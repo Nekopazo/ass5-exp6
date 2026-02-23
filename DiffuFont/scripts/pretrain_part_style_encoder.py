@@ -1,0 +1,450 @@
+#!/usr/bin/env python3
+"""Contrastive pretraining for PartStyleEncoder.
+
+Input: DataPreparation/PartBank/manifest.json
+Output: checkpoint containing part_cnn and part_fc weights.
+"""
+
+from __future__ import annotations
+
+import argparse
+from datetime import datetime
+import json
+import random
+import sys
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+from PIL import Image
+
+PROJECT_ROOT_FALLBACK = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT_FALLBACK) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT_FALLBACK))
+
+from models.font_diffusion_unet import PartStyleEncoder
+
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def load_part_bank(manifest_path: Path, root: Path) -> Dict[str, List[Path]]:
+    obj = json.loads(manifest_path.read_text(encoding="utf-8"))
+    fonts = obj.get("fonts", {})
+    out: Dict[str, List[Path]] = {}
+    for font_name, info in fonts.items():
+        parts = info.get("parts", [])
+        paths: List[Path] = []
+        for p in parts:
+            rel = p.get("path")
+            if not rel:
+                continue
+            fp = (root / rel).resolve()
+            if fp.exists():
+                paths.append(fp)
+        if paths:
+            out[font_name] = paths
+    return out
+
+
+def load_part_image(path: Path, patch_size: int) -> torch.Tensor:
+    img = Image.open(path).convert("RGB").resize((patch_size, patch_size), Image.BILINEAR)
+    arr = np.asarray(img, dtype=np.float32) / 255.0
+    arr = arr * 2.0 - 1.0  # match main training normalization range
+    t = torch.from_numpy(arr).permute(2, 0, 1).contiguous()
+    return t
+
+
+def sample_paths(paths: List[Path], n: int, rng: random.Random) -> List[Path]:
+    if len(paths) >= n:
+        return rng.sample(paths, n)
+    picked = list(paths)
+    while len(picked) < n:
+        picked.append(rng.choice(paths))
+    return picked
+
+
+def encode_part_set(
+    encoder: PartStyleEncoder,
+    part_paths: List[Path],
+    patch_size: int,
+    device: torch.device,
+) -> torch.Tensor:
+    imgs = torch.stack([load_part_image(p, patch_size) for p in part_paths], dim=0).to(device)
+    feat = encoder.part_cnn(imgs).flatten(1)
+    feat = encoder.part_fc(feat)
+    z = F.normalize(feat.sum(dim=0, keepdim=True), dim=-1)
+    return z
+
+
+def split_fonts_for_val(font_names: List[str], val_ratio: float, seed: int) -> Tuple[List[str], List[str]]:
+    if val_ratio <= 0.0 or len(font_names) < 4:
+        return font_names, []
+
+    names = list(font_names)
+    rng = random.Random(seed + 1009)
+    rng.shuffle(names)
+
+    val_count = int(round(len(names) * val_ratio))
+    val_count = max(2, val_count)
+    val_count = min(len(names) - 2, val_count)
+    if val_count <= 0:
+        return font_names, []
+
+    val_fonts = names[:val_count]
+    train_fonts = names[val_count:]
+    return train_fonts, val_fonts
+
+
+def resolve_path(root: Path, path_value: Path) -> Path:
+    if path_value.is_absolute():
+        return path_value.resolve()
+    return (root / path_value).resolve()
+
+
+def should_maximize(metric_name: str) -> bool:
+    return metric_name.endswith("_acc")
+
+
+def is_improved(metric_name: str, new_value: float, best_value: float | None, min_delta: float) -> bool:
+    if best_value is None:
+        return True
+    if should_maximize(metric_name):
+        return new_value > (best_value + min_delta)
+    return new_value < (best_value - min_delta)
+
+
+def make_checkpoint(
+    encoder: PartStyleEncoder,
+    args: argparse.Namespace,
+    extra: Dict,
+) -> Dict:
+    return {
+        "part_style_encoder": {
+            "part_cnn": encoder.part_cnn.state_dict(),
+            "part_fc": encoder.part_fc.state_dict(),
+        },
+        "config": {
+            k: (str(v) if isinstance(v, Path) else v)
+            for k, v in vars(args).items()
+        },
+        "extra": extra,
+    }
+
+
+def run_one_batch(
+    encoder: PartStyleEncoder,
+    bank: Dict[str, List[Path]],
+    font_pool: List[str],
+    batch_size: int,
+    min_k: int,
+    max_k: int,
+    patch_size: int,
+    temperature: float,
+    rng: random.Random,
+    device: torch.device,
+    opt: torch.optim.Optimizer | None = None,
+) -> Tuple[float, float]:
+    if len(font_pool) >= batch_size:
+        batch_fonts = rng.sample(font_pool, batch_size)
+    else:
+        batch_fonts = [rng.choice(font_pool) for _ in range(batch_size)]
+
+    z1_list = []
+    z2_list = []
+    for font in batch_fonts:
+        part_paths = bank[font]
+        ub = min(max_k, len(part_paths))
+        lb = min(min_k, ub)
+        n1 = rng.randint(lb, ub)
+        n2 = rng.randint(lb, ub)
+
+        set1 = sample_paths(part_paths, n1, rng)
+        set2 = sample_paths(part_paths, n2, rng)
+
+        z1_list.append(encode_part_set(encoder, set1, patch_size, device))
+        z2_list.append(encode_part_set(encoder, set2, patch_size, device))
+
+    z1 = torch.cat(z1_list, dim=0)
+    z2 = torch.cat(z2_list, dim=0)
+
+    logits = (z1 @ z2.t()) / temperature
+    labels = torch.arange(logits.size(0), device=device)
+
+    loss_12 = F.cross_entropy(logits, labels)
+    loss_21 = F.cross_entropy(logits.t(), labels)
+    loss = 0.5 * (loss_12 + loss_21)
+
+    if opt is not None:
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+
+    with torch.no_grad():
+        pred = logits.argmax(dim=1)
+        acc = (pred == labels).float().mean().item()
+    return float(loss.item()), float(acc)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--project-root", type=Path, default=Path("."))
+    parser.add_argument("--manifest", type=Path, default=Path("DataPreparation/PartBank/manifest.json"))
+    parser.add_argument("--out", type=Path, default=Path("checkpoints/part_style_encoder_pretrain.pt"))
+    parser.add_argument("--best-out", type=Path, default=Path("checkpoints/part_style_encoder_pretrain_best.pt"))
+    parser.add_argument("--log-file", type=Path, default=Path("checkpoints/part_style_encoder_pretrain.log"))
+    parser.add_argument("--metrics-jsonl", type=Path, default=Path("checkpoints/part_style_encoder_pretrain.metrics.jsonl"))
+
+    parser.add_argument("--steps", type=int, default=10000)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--min-set-size", type=int, default=1)
+    parser.add_argument("--max-set-size", type=int, default=12)
+    parser.add_argument("--warmup-max-set-size", type=int, default=6)
+    parser.add_argument("--warmup-steps", type=int, default=4000)
+    parser.add_argument("--val-ratio", type=float, default=0.1)
+    parser.add_argument("--val-batches", type=int, default=8)
+    parser.add_argument(
+        "--monitor",
+        type=str,
+        default="val_loss",
+        choices=["val_loss", "val_acc", "train_loss", "train_acc"],
+    )
+    parser.add_argument("--early-stop-patience", type=int, default=20, help="In units of log events. 0 disables early stop.")
+    parser.add_argument("--early-stop-min-delta", type=float, default=1e-4)
+
+    parser.add_argument("--patch-size", type=int, default=64)
+    parser.add_argument("--style-dim", type=int, default=256)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--temperature", type=float, default=0.4)
+
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
+    parser.add_argument("--log-every", type=int, default=50)
+    args = parser.parse_args()
+
+    root = args.project_root.resolve()
+    manifest_path = resolve_path(root, args.manifest)
+    out_path = resolve_path(root, args.out)
+    best_out_path = resolve_path(root, args.best_out)
+    log_path = resolve_path(root, args.log_file)
+    metrics_path = resolve_path(root, args.metrics_jsonl)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    best_out_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+
+    set_seed(args.seed)
+    train_rng = random.Random(args.seed)
+    eval_rng = random.Random(args.seed + 17)
+
+    if args.device == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(args.device)
+
+    bank = load_part_bank(manifest_path, root)
+    # keep fonts with enough parts for two random views
+    bank = {k: v for k, v in bank.items() if len(v) >= max(2, args.min_set_size)}
+    if len(bank) < 2:
+        raise RuntimeError("Part bank has too few fonts for contrastive pretraining.")
+
+    font_names = sorted(bank.keys())
+    train_fonts, val_fonts = split_fonts_for_val(font_names, args.val_ratio, args.seed)
+    has_val = len(val_fonts) >= 2
+    if has_val:
+        train_bank = {k: bank[k] for k in train_fonts}
+        val_bank = {k: bank[k] for k in val_fonts}
+    else:
+        train_bank = bank
+        val_bank = {}
+
+    if len(train_bank) < 2:
+        raise RuntimeError("Train split has too few fonts for contrastive pretraining.")
+
+    monitor_name = args.monitor
+    if monitor_name.startswith("val_") and not has_val:
+        monitor_name = "train_loss"
+
+    log_fp = log_path.open("w", encoding="utf-8")
+    metrics_fp = metrics_path.open("w", encoding="utf-8")
+
+    def log(msg: str) -> None:
+        line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
+        print(line, flush=True)
+        log_fp.write(line + "\n")
+        log_fp.flush()
+
+    log(f"Loaded part bank: total_fonts={len(font_names)} train_fonts={len(train_bank)} val_fonts={len(val_bank)}")
+    log(f"Using device={device}, monitor={monitor_name}, steps={args.steps}, batch_size={args.batch_size}")
+
+    encoder = PartStyleEncoder(
+        in_channels=3,
+        style_dim=args.style_dim,
+        patch_size=args.patch_size,
+        patch_stride=max(1, args.patch_size // 2),
+        min_patches_per_style=1,
+        max_patches_per_style=1,
+    ).to(device)
+
+    params = list(encoder.part_cnn.parameters()) + list(encoder.part_fc.parameters())
+    opt = torch.optim.Adam(params, lr=args.lr)
+
+    min_k = max(1, args.min_set_size)
+    warmup_max_k = max(min_k, args.warmup_max_set_size)
+    final_max_k = max(min_k, args.max_set_size)
+
+    best_metric: float | None = None
+    best_step = 0
+    no_improve_count = 0
+    last_step = 0
+
+    try:
+        encoder.train()
+        for step in range(1, args.steps + 1):
+            current_max_k = warmup_max_k if step <= args.warmup_steps else final_max_k
+
+            train_loss, train_acc = run_one_batch(
+                encoder=encoder,
+                bank=train_bank,
+                font_pool=list(train_bank.keys()),
+                batch_size=args.batch_size,
+                min_k=min_k,
+                max_k=current_max_k,
+                patch_size=args.patch_size,
+                temperature=args.temperature,
+                rng=train_rng,
+                device=device,
+                opt=opt,
+            )
+            last_step = step
+
+            should_log = (step % args.log_every == 0) or (step == 1) or (step == args.steps)
+            if not should_log:
+                continue
+
+            val_loss = None
+            val_acc = None
+            if has_val:
+                encoder.eval()
+                val_losses: List[float] = []
+                val_accs: List[float] = []
+                with torch.no_grad():
+                    for _ in range(max(1, args.val_batches)):
+                        vl, va = run_one_batch(
+                            encoder=encoder,
+                            bank=val_bank,
+                            font_pool=list(val_bank.keys()),
+                            batch_size=min(args.batch_size, len(val_bank)),
+                            min_k=min_k,
+                            max_k=current_max_k,
+                            patch_size=args.patch_size,
+                            temperature=args.temperature,
+                            rng=eval_rng,
+                            device=device,
+                            opt=None,
+                        )
+                        val_losses.append(vl)
+                        val_accs.append(va)
+                val_loss = float(np.mean(val_losses))
+                val_acc = float(np.mean(val_accs))
+                encoder.train()
+
+            metrics = {
+                "step": step,
+                "max_set_size": current_max_k,
+                "train_loss": train_loss,
+                "train_acc": train_acc,
+                "val_loss": val_loss,
+                "val_acc": val_acc,
+                "lr": float(opt.param_groups[0]["lr"]),
+            }
+            metrics_fp.write(json.dumps(metrics, ensure_ascii=False) + "\n")
+            metrics_fp.flush()
+
+            current_metric = metrics.get(monitor_name)
+            if current_metric is None:
+                current_metric = train_loss if monitor_name.endswith("loss") else train_acc
+
+            improved = is_improved(
+                metric_name=monitor_name,
+                new_value=float(current_metric),
+                best_value=best_metric,
+                min_delta=args.early_stop_min_delta,
+            )
+
+            if improved:
+                best_metric = float(current_metric)
+                best_step = step
+                no_improve_count = 0
+                best_ckpt = make_checkpoint(
+                    encoder=encoder,
+                    args=args,
+                    extra={
+                        "step": step,
+                        "best_step": best_step,
+                        "best_metric_name": monitor_name,
+                        "best_metric_value": best_metric,
+                        "metrics": metrics,
+                        "split": {
+                            "train_fonts": len(train_bank),
+                            "val_fonts": len(val_bank),
+                        },
+                    },
+                )
+                torch.save(best_ckpt, best_out_path)
+            else:
+                no_improve_count += 1
+
+            msg = (
+                f"step={step:05d} "
+                f"max_set={current_max_k} "
+                f"train_loss={train_loss:.4f} train_acc={train_acc:.3f}"
+            )
+            if val_loss is not None and val_acc is not None:
+                msg += f" val_loss={val_loss:.4f} val_acc={val_acc:.3f}"
+            msg += (
+                f" monitor={monitor_name}:{float(current_metric):.4f} "
+                f"best_step={best_step} best={best_metric:.4f} "
+                f"patience={no_improve_count}/{args.early_stop_patience}"
+            )
+            log(msg)
+
+            if args.early_stop_patience > 0 and no_improve_count >= args.early_stop_patience:
+                log(f"Early stop at step={step}, no improvement for {no_improve_count} log events.")
+                break
+    finally:
+        final_ckpt = make_checkpoint(
+            encoder=encoder,
+            args=args,
+            extra={
+                "step": last_step,
+                "best_step": best_step,
+                "best_metric_name": monitor_name,
+                "best_metric_value": best_metric,
+                "split": {
+                    "train_fonts": len(train_bank),
+                    "val_fonts": len(val_bank),
+                },
+            },
+        )
+        torch.save(final_ckpt, out_path)
+        log(f"Saved final checkpoint: {out_path}")
+        if best_step > 0:
+            log(f"Saved best checkpoint: {best_out_path} ({monitor_name}={best_metric:.4f} @ step={best_step})")
+        else:
+            log("Best checkpoint was not updated during training.")
+        log(f"Metrics jsonl: {metrics_path}")
+        log_fp.close()
+        metrics_fp.close()
+
+
+if __name__ == "__main__":
+    main()

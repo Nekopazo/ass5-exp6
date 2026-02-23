@@ -1,0 +1,10 @@
+{
+  "generated_at_utc": "2026-02-23T02:31:13Z",
+  "char_count": 2000,
+  "reference_count": 300,
+  "per_char_refs": 3,
+  "sources": {
+    "char_frequency": "https://raw.githubusercontent.com/fxsjy/jieba/master/extra_dict/dict.txt.small",
+    "decomposition": "https://raw.githubusercontent.com/kfcd/chaizi/master/chaizi-jt.txt"
+  }
+}

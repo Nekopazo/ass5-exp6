@@ -1,0 +1,77 @@
+# Common binary files
+*.exe
+*.dll
+*.so
+*.dylib
+*.bin
+*.o
+*.obj
+
+# Common image files
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.ico
+*.svg
+
+# Common archive files
+*.zip
+*.tar
+*.gz
+*.bz2
+*.7z
+*.rar
+*.xz
+
+# Common document files
+*.pdf
+*.doc
+*.docx
+*.ppt
+*.pptx
+*.xls
+*.xlsx
+*.csv
+
+# Common training weights and models
+*.h5
+*.ckpt
+*.pth
+*.pt
+*.onnx
+*.tflite
+*.pb
+*.weights
+
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Logs
+*.log
+*.out
+*.err
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*.orig
+
+# IDE specific files
+.vscode/
+.idea/
+*.iml
+
+# System files
+.DS_Store
+Thumbs.db
+*.mdb
