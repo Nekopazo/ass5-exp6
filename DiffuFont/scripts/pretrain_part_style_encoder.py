@@ -205,8 +205,8 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=10000)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--min-set-size", type=int, default=1)
-    parser.add_argument("--max-set-size", type=int, default=12)
-    parser.add_argument("--warmup-max-set-size", type=int, default=6)
+    parser.add_argument("--max-set-size", type=int, default=8)
+    parser.add_argument("--warmup-max-set-size", type=int, default=4)
     parser.add_argument("--warmup-steps", type=int, default=4000)
     parser.add_argument("--val-ratio", type=float, default=0.1)
     parser.add_argument("--val-batches", type=int, default=8)
@@ -285,21 +285,25 @@ def main() -> None:
     log(f"Loaded part bank: total_fonts={len(font_names)} train_fonts={len(train_bank)} val_fonts={len(val_bank)}")
     log(f"Using device={device}, monitor={monitor_name}, steps={args.steps}, batch_size={args.batch_size}")
 
+    min_k = max(1, args.min_set_size)
+    final_max_k = max(min_k, args.max_set_size)
+    warmup_max_k = max(min_k, min(args.warmup_max_set_size, final_max_k))
+    log(
+        f"Part-set size schedule: min={min_k}, warmup_max={warmup_max_k}, "
+        f"final_max={final_max_k}, warmup_steps={args.warmup_steps}"
+    )
+
     encoder = PartStyleEncoder(
         in_channels=3,
         style_dim=args.style_dim,
         patch_size=args.patch_size,
         patch_stride=max(1, args.patch_size // 2),
-        min_patches_per_style=1,
-        max_patches_per_style=1,
+        min_patches_per_style=min_k,
+        max_patches_per_style=final_max_k,
     ).to(device)
 
     params = list(encoder.part_cnn.parameters()) + list(encoder.part_fc.parameters())
     opt = torch.optim.Adam(params, lr=args.lr)
-
-    min_k = max(1, args.min_set_size)
-    warmup_max_k = max(min_k, args.warmup_max_set_size)
-    final_max_k = max(min_k, args.max_set_size)
 
     best_metric: float | None = None
     best_step = 0

@@ -38,6 +38,30 @@ def parse_csv(s: str) -> List[str]:
     return [x.strip() for x in s.split(",") if x.strip()]
 
 
+def parse_int_list(s: str) -> List[int]:
+    vals: List[int] = []
+    for p in s.split(","):
+        p = p.strip()
+        if not p:
+            continue
+        vals.append(int(p))
+    if not vals:
+        raise ValueError("empty int list")
+    return vals
+
+
+def parse_float_list(s: str) -> List[float]:
+    vals: List[float] = []
+    for p in s.split(","):
+        p = p.strip()
+        if not p:
+            continue
+        vals.append(float(p))
+    if not vals:
+        raise ValueError("empty float list")
+    return vals
+
+
 def collate_fn(samples, style_k: int):
     """Convert a list of dataset samples to batch tensors."""
     contents, styles, targets = [], [], []
@@ -94,9 +118,21 @@ def main():
     parser.add_argument("--use-part-style", action="store_true")
     parser.add_argument("--part-patch-size", type=int, default=64)
     parser.add_argument("--part-patch-stride", type=int, default=32)
-    parser.add_argument("--part-min-patches-per-style", type=int, default=2)
+    parser.add_argument("--part-min-patches-per-style", type=int, default=1)
     parser.add_argument("--part-max-patches-per-style", type=int, default=8)
     parser.add_argument("--part-fuse-strength", type=float, default=1.0)
+    parser.add_argument(
+        "--part-fuse-scales",
+        type=str,
+        default=None,
+        help="Comma-separated encoder scale indices for part fusion, e.g. '1,2,3'.",
+    )
+    parser.add_argument(
+        "--part-fuse-scale-gains",
+        type=str,
+        default=None,
+        help="Comma-separated gains aligned with --part-fuse-scales, e.g. '0.2,1.0,1.0'.",
+    )
     parser.add_argument("--part-style-pretrained", type=str, default=None)
     parser.add_argument("--freeze-part-style", action="store_true")
 
@@ -194,6 +230,11 @@ def main():
         f"lr_tmax_steps={lr_tmax_steps}"
     )
 
+    part_fuse_scales = parse_int_list(args.part_fuse_scales) if args.part_fuse_scales else None
+    part_fuse_scale_gains = parse_float_list(args.part_fuse_scale_gains) if args.part_fuse_scale_gains else None
+    if part_fuse_scale_gains is not None and part_fuse_scales is None:
+        raise ValueError("--part-fuse-scale-gains requires --part-fuse-scales")
+
     model = FontDiffusionUNet(
         in_channels=3,
         style_k=args.style_k,
@@ -206,6 +247,8 @@ def main():
         part_patch_stride=args.part_patch_stride,
         part_min_patches_per_style=args.part_min_patches_per_style,
         part_max_patches_per_style=args.part_max_patches_per_style,
+        part_fuse_scales=part_fuse_scales,
+        part_fuse_scale_gains=part_fuse_scale_gains,
         part_fuse_strength=args.part_fuse_strength,
     )
 

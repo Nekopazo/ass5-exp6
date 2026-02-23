@@ -118,6 +118,9 @@ python scripts/build_part_bank.py \
   --parts-per-font 32 \
   --patch-size 64 \
   --detector sift \
+  --location-dedupe \
+  --sim-dedupe-cos-threshold 0.995 \
+  --sim-dedupe-anchor-limit 1500 \
   --canvas-size 256 \
   --char-size 224
 ```
@@ -139,9 +142,9 @@ python scripts/pretrain_part_style_encoder.py \
   --steps 10000 \
   --batch-size 64 \
   --min-set-size 1 \
-  --warmup-max-set-size 6 \
+  --warmup-max-set-size 4 \
   --warmup-steps 4000 \
-  --max-set-size 12 \
+  --max-set-size 8 \
   --val-ratio 0.1 \
   --val-batches 8 \
   --monitor val_loss \
@@ -182,8 +185,11 @@ python train.py \
   --use-part-style \
   --part-patch-size 64 \
   --part-patch-stride 32 \
-  --part-min-patches-per-style 2 \
+  --part-min-patches-per-style 1 \
   --part-max-patches-per-style 8 \
+  --part-fuse-scales 1,2,3 \
+  --part-fuse-scale-gains 0.25,1.0,1.0 \
+  --part-fuse-strength 1.0 \
   --part-style-pretrained checkpoints/part_style_encoder_pretrain_best.pt \
   --overlap-report-samples 2000 \
   --overlap-report-json checkpoints/overlap_stats/train_overlap_report.json \

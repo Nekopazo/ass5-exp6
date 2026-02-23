@@ -13,12 +13,18 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Iterable, List
+from typing import Dict, Iterable, List, Optional, Set
 
 from PIL import Image, ImageDraw, ImageFont
 
+try:
+    from fontTools.ttLib import TTFont
+except Exception:  # pragma: no cover - optional dependency import guard
+    TTFont = None
+
 
 IMG_EXTS = {".ttf", ".otf", ".ttc", ".TTF", ".OTF", ".TTC"}
+_CMAP_CACHE: Dict[Path, Optional[Set[int]]] = {}
 
 
 def load_json_list(path: Path) -> List[str]:
@@ -59,7 +65,32 @@ def resolve_font_path(project_root: Path, font_dir: Path, item: str) -> Path:
     return p1
 
 
+def load_font_cmap(font_path: Path) -> Optional[Set[int]]:
+    cached = _CMAP_CACHE.get(font_path)
+    if cached is not None or font_path in _CMAP_CACHE:
+        return cached
+
+    if TTFont is None:
+        _CMAP_CACHE[font_path] = None
+        return None
+
+    try:
+        tt = TTFont(str(font_path), lazy=True)
+        cmap: Set[int] = set()
+        for table in tt["cmap"].tables:
+            cmap.update(int(cp) for cp in table.cmap.keys())
+        tt.close()
+        _CMAP_CACHE[font_path] = cmap
+        return cmap
+    except Exception:
+        _CMAP_CACHE[font_path] = None
+        return None
+
+
 def char_supported(ch: str, font_path: Path) -> bool:
+    cmap = load_font_cmap(font_path)
+    if cmap is not None:
+        return ord(ch) in cmap
     try:
         font = ImageFont.truetype(str(font_path), size=12)
         return font.getmask(ch).getbbox() is not None
@@ -116,40 +147,60 @@ def generate_images(
 
     for font_item in font_items:
         font_path = resolve_font_path(project_root, font_dir, font_item)
-        if not font_path.exists() or font_path.suffix not in IMG_EXTS:
-            print(f"[skip] font not found or invalid: {font_item}")
-            continue
+        if not font_path.exists():
+            raise FileNotFoundError(f"font not found: {font_item} -> {font_path}")
+        if font_path.suffix not in IMG_EXTS:
+            raise ValueError(f"invalid font suffix for: {font_item} -> {font_path.suffix}")
 
         font_name = font_path.stem
         font_out_dir = out_dir / font_name
         font_out_dir.mkdir(parents=True, exist_ok=True)
 
         saved = 0
-        skipped = 0
+        unsupported_chars: List[str] = []
         print(f"Processing font: {font_name}")
         for ch in chars:
             if len(ch) != 1:
-                continue
+                raise ValueError(f"invalid char entry '{ch}' in charset (expected single character)")
             if not char_supported(ch, font_path):
-                skipped += 1
+                unsupported_chars.append(ch)
                 continue
 
-            img = draw_char(
-                ch=ch,
-                font_path=font_path,
-                char_size=char_size,
-                canvas_size=canvas_size,
-                x_offset=x_offset,
-                y_offset=y_offset,
-            )
+            try:
+                img = draw_char(
+                    ch=ch,
+                    font_path=font_path,
+                    char_size=char_size,
+                    canvas_size=canvas_size,
+                    x_offset=x_offset,
+                    y_offset=y_offset,
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"failed to render char '{ch}' for font '{font_name}' ({font_path})"
+                ) from exc
             save_path = font_out_dir / f"{font_name}@{ch}.png"
             img.save(save_path, dpi=(300, 300))
             saved += 1
 
-        print(f"  done: saved={saved}, skipped_unsupported={skipped}")
+        if unsupported_chars:
+            sample = "".join(unsupported_chars[:20])
+            raise RuntimeError(
+                f"font '{font_name}' generation failed: "
+                f"{len(unsupported_chars)} unsupported chars in charset. sample='{sample}'"
+            )
+        if saved == 0:
+            raise RuntimeError(f"font '{font_name}' generation failed: no glyph images were saved")
+        print(f"  done: saved={saved}, unsupported=0")
 
 
 def main() -> None:
+    if TTFont is None:
+        raise RuntimeError(
+            "fontTools is required for strict glyph coverage checking. "
+            "Please install it: pip install fonttools"
+        )
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--project-root", type=Path, default=Path(__file__).resolve().parent.parent)
     parser.add_argument("--char-list-json", type=Path, default=Path("CharacterData/CharList.json"))

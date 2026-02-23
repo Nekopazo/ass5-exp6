@@ -215,6 +215,58 @@ def dedupe_keep_order(seq: List[int]) -> List[int]:
     return out
 
 
+def dedupe_candidates_by_location(cands: List[Candidate]) -> tuple[List[Candidate], int]:
+    """Remove exact duplicates by (char, x, y), keeping highest-response entries first."""
+    seen = set()
+    out: List[Candidate] = []
+    removed = 0
+    for cand in cands:
+        key = (cand.char, int(cand.x), int(cand.y))
+        if key in seen:
+            removed += 1
+            continue
+        seen.add(key)
+        out.append(cand)
+    return out, removed
+
+
+def dedupe_candidates_by_similarity(
+    cands: List[Candidate],
+    cos_threshold: float,
+    anchor_limit: int,
+) -> tuple[List[Candidate], int]:
+    """Greedy descriptor-level dedupe.
+
+    Notes:
+    - descriptors are already unit-normalized, so cosine similarity is fast and stable.
+    - set cos_threshold<=0 to disable.
+    """
+    if not cands or cos_threshold <= 0:
+        return cands, 0
+
+    anchor_limit = max(1, int(anchor_limit))
+    dim = int(cands[0].descriptor.shape[0])
+    anchors = np.empty((min(anchor_limit, len(cands)), dim), dtype=np.float32)
+    anchor_count = 0
+
+    out: List[Candidate] = []
+    removed = 0
+    for cand in cands:
+        desc = cand.descriptor.astype(np.float32, copy=False)
+        if anchor_count > 0:
+            sim = anchors[:anchor_count] @ desc
+            if float(sim.max()) >= cos_threshold:
+                removed += 1
+                continue
+
+        out.append(cand)
+        if anchor_count < anchors.shape[0]:
+            anchors[anchor_count] = desc
+            anchor_count += 1
+
+    return out, removed
+
+
 def init_medoids_farthest(dist: np.ndarray, k: int, seed: int) -> List[int]:
     n = dist.shape[0]
     rng = np.random.default_rng(seed)
@@ -334,6 +386,24 @@ def main() -> None:
     parser.add_argument("--max-ink-ratio", type=float, default=0.85)
     parser.add_argument("--min-edge-ratio", type=float, default=0.03)
     parser.add_argument("--max-candidates", type=int, default=6000)
+    parser.add_argument(
+        "--location-dedupe",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Dedupe candidates by exact (char,x,y) before representative selection.",
+    )
+    parser.add_argument(
+        "--sim-dedupe-cos-threshold",
+        type=float,
+        default=0.995,
+        help="Cosine threshold for descriptor-level dedupe. <=0 disables.",
+    )
+    parser.add_argument(
+        "--sim-dedupe-anchor-limit",
+        type=int,
+        default=1500,
+        help="Number of high-response anchors used for similarity dedupe.",
+    )
 
     parser.add_argument("--medoid-pool-size", type=int, default=1200)
     parser.add_argument("--kmedoids-n-init", type=int, default=4)
@@ -432,6 +502,21 @@ def main() -> None:
             continue
 
         cands = sorted(cands, key=lambda x: x.response, reverse=True)[: args.max_candidates]
+        loc_removed = 0
+        sim_removed = 0
+        if args.location_dedupe:
+            cands, loc_removed = dedupe_candidates_by_location(cands)
+        cands, sim_removed = dedupe_candidates_by_similarity(
+            cands,
+            cos_threshold=float(args.sim_dedupe_cos_threshold),
+            anchor_limit=int(args.sim_dedupe_anchor_limit),
+        )
+        if loc_removed > 0 or sim_removed > 0:
+            print(
+                f"  dedupe: location_removed={loc_removed} "
+                f"similarity_removed={sim_removed} remain={len(cands)}"
+            )
+
         picked_idx = pick_representative_indices_kmedoids(
             cands,
             k=args.parts_per_font,

@@ -16,13 +16,18 @@ cd "$PROJECT_ROOT"
 CMD=(
   "$PYTHON_BIN" -u train.py
   --data-root .
-  --device cuda:1
+  --device cuda:0
   --precision bf16
   --font-mode random
   --batch 48
   --num-workers 8
   --epochs 50
   --use-part-style
+  --part-min-patches-per-style 1
+  --part-max-patches-per-style 8
+  --part-fuse-scales 1,2,3
+  --part-fuse-scale-gains 0.25,1.0,1.0
+  --part-fuse-strength 1.0
   --part-style-pretrained checkpoints/part_style_encoder_pretrain_256_best.pt
   --sample-every-steps 300
   --log-every-steps 100

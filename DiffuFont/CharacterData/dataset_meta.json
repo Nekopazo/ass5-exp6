@@ -1,10 +1,40 @@
 {
-  "generated_at_utc": "2026-02-23T02:31:13Z",
-  "char_count": 2000,
+  "generated_at_utc": "2026-02-23T11:04:09Z",
+  "char_count": 1000,
   "reference_count": 300,
   "per_char_refs": 3,
   "sources": {
     "char_frequency": "https://raw.githubusercontent.com/fxsjy/jieba/master/extra_dict/dict.txt.small",
     "decomposition": "https://raw.githubusercontent.com/kfcd/chaizi/master/chaizi-jt.txt"
+  },
+  "selection": {
+    "method": "top_frequency_restore_with_problem_chars",
+    "target_char_count": 1000,
+    "placeholder_group_threshold": 20,
+    "font_count": 59,
+    "note": "Restored from baseline high-frequency sequence; problem chars allowed per user request",
+    "injected_problem_chars": [
+      "丝",
+      "丢",
+      "严",
+      "临",
+      "丽",
+      "乌",
+      "习",
+      "亏",
+      "亩",
+      "伞"
+    ],
+    "removed_chars_on_user_request": [
+      "紝",
+      "銆",
+      "殑",
+      "鐨",
+      "剉",
+      "屽",
+      "鏄",
+      "槸",
+      "簡"
+    ]
   }
 }

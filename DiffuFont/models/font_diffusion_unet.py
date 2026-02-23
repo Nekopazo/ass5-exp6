@@ -359,6 +359,7 @@ class FontDiffusionUNet(nn.Module):
         part_max_patches_per_style: int = 4,
         part_style_dim: int = 256,
         part_fuse_scales: Sequence[int] | None = None,
+        part_fuse_scale_gains: Sequence[float] | None = None,
         part_fuse_strength: float = 1.0,
     ):
         super().__init__()
@@ -372,7 +373,30 @@ class FontDiffusionUNet(nn.Module):
         if part_fuse_scales is None:
             # low-resolution style fusion is usually the most stable for Chinese glyphs
             part_fuse_scales = (max(0, num_layers - 2), max(0, num_layers - 1))
-        self.part_fuse_scales = set(int(x) for x in part_fuse_scales)
+        fuse_scales_ordered: List[int] = []
+        seen_scales = set()
+        for raw_scale in part_fuse_scales:
+            scale = int(raw_scale)
+            if scale < 0 or scale >= num_layers:
+                raise ValueError(f"part_fuse_scales contains out-of-range index {scale}, valid=[0,{num_layers - 1}]")
+            if scale in seen_scales:
+                continue
+            seen_scales.add(scale)
+            fuse_scales_ordered.append(scale)
+        self.part_fuse_scales = set(fuse_scales_ordered)
+
+        if part_fuse_scale_gains is None:
+            self.part_fuse_scale_gains = {scale: 1.0 for scale in fuse_scales_ordered}
+        else:
+            gains = [float(x) for x in part_fuse_scale_gains]
+            if len(gains) != len(fuse_scales_ordered):
+                raise ValueError(
+                    "part_fuse_scale_gains length must match part_fuse_scales length, "
+                    f"got gains={len(gains)} scales={len(fuse_scales_ordered)}"
+                )
+            self.part_fuse_scale_gains = {
+                scale: gain for scale, gain in zip(fuse_scales_ordered, gains)
+            }
 
         if daca_layers is None:
             daca_layers = [True] * (num_layers - 1) + [False]
@@ -543,7 +567,8 @@ class FontDiffusionUNet(nn.Module):
                 continue
             part_bias = self.part_to_style[i](part_style_vec).unsqueeze(-1).unsqueeze(-1)
             gate = torch.sigmoid(self.part_gate[i](t_emb)).unsqueeze(-1).unsqueeze(-1)
-            fused.append(feat + self.part_fuse_strength * gate * part_bias)
+            scale_gain = float(self.part_fuse_scale_gains.get(i, 1.0))
+            fused.append(feat + self.part_fuse_strength * scale_gain * gate * part_bias)
         return fused
 
     def forward_with_feats(
