@@ -4,7 +4,7 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="/scratch/yangximing/miniconda3/envs/sg3/bin/python"
 
-RUN_NAME="run_a40_cuda1_bf16_bs48_adamw_noedge_dbg4_lrfix_$(date +%Y%m%d_%H%M%S)"
+RUN_NAME="run_a40_cuda1_bf16_bs48_adamw_dbg4_lrfix_$(date +%Y%m%d_%H%M%S)"
 LOG_DIR="$PROJECT_ROOT/logs"
 CKPT_DIR="$PROJECT_ROOT/checkpoints/$RUN_NAME"
 LOG_FILE="$CKPT_DIR/train.log"
@@ -16,12 +16,14 @@ cd "$PROJECT_ROOT"
 CMD=(
   "$PYTHON_BIN" -u train.py
   --data-root .
-  --device cuda:0
+  --device cuda:1
   --precision bf16
   --font-mode random
   --batch 48
   --num-workers 8
   --epochs 50
+  --use-global-style
+  --use-part-style
   --part-min-patches-per-style 2
   --part-max-patches-per-style 10
   --part-fuse-scales 1,2,3
@@ -35,6 +37,7 @@ CMD=(
   --save-every-epochs 0
   --save-dir "$CKPT_DIR"
   --use-global-style 
+  --no-use-part-style
   --use-part-style
 )
 

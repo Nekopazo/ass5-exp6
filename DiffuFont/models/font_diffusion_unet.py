@@ -20,7 +20,7 @@ out = model(
     x_t,         # noisy image  (B,C,H,W)
     t,           # timestep tensor (B,)
     content_img, # content image (B,C,H,W)
-    style_img,   # reference style images (B,C*k,H,W)
+    style_img,   # reference style images (B,C*k,H,W), optional when use_global_style=False
 )
 # returns  \hat x_0   (B,C,H,W)
 ```
@@ -29,7 +29,7 @@ out = model(
 from __future__ import annotations
 
 import math
-from typing import List, Sequence
+from typing import List, Sequence, Optional
 
 import torch
 import torch.nn as nn
@@ -229,7 +229,12 @@ class PartStyleEncoder(nn.Module):
         selected = selected.transpose(1, 2).contiguous().view(bk, topk, c, p, p)
         return selected
 
-    def forward(self, style_img: torch.Tensor) -> torch.Tensor:
+    def _encode_patch_batch(self, patch_batch: torch.Tensor) -> torch.Tensor:
+        feat = self.part_cnn(patch_batch).flatten(1)  # (N, 128)
+        feat = self.part_fc(feat)  # (N, D)
+        return feat
+
+    def _forward_from_style_image(self, style_img: torch.Tensor) -> torch.Tensor:
         """style_img: (B, C*K, H, W) -> style_vec: (B, D)."""
         b, ck, h, w = style_img.shape
         if ck % self.in_channels != 0:
@@ -242,15 +247,54 @@ class PartStyleEncoder(nn.Module):
         patches = self._extract_top_patches(style_stack)  # (B*K, N, C, p, p)
         bk, n, c, p, _ = patches.shape
         patch_batch = patches.view(bk * n, c, p, p)
-
-        feat = self.part_cnn(patch_batch).flatten(1)      # (B*K*N, 128)
-        feat = self.part_fc(feat)                          # (B*K*N, D)
+        feat = self._encode_patch_batch(patch_batch)  # (B*K*N, D)
         feat = feat.view(b, k * n, self.style_dim)         # set of part features
 
         # DeepSets-style aggregation: sum then L2 normalization.
         style_vec = feat.sum(dim=1)
         style_vec = F.normalize(style_vec, dim=-1)
         return style_vec
+
+    def _forward_from_part_set(
+        self,
+        part_imgs: torch.Tensor,
+        part_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """part_imgs: (B, P, C, H, W) -> style_vec: (B, D)."""
+        if part_imgs.dim() != 5:
+            raise ValueError(f"part_imgs must be 5D (B,P,C,H,W), got shape={tuple(part_imgs.shape)}")
+        b, p, c, h, w = part_imgs.shape
+        if c != self.in_channels:
+            raise ValueError(
+                f"part_imgs channel mismatch: got C={c}, expected in_channels={self.in_channels}"
+            )
+        patch_batch = part_imgs.view(b * p, c, h, w)
+        feat = self._encode_patch_batch(patch_batch).view(b, p, self.style_dim)
+
+        if part_mask is not None:
+            if part_mask.dim() != 2 or part_mask.shape[0] != b or part_mask.shape[1] != p:
+                raise ValueError(
+                    f"part_mask must be shape (B,P)=({b},{p}), got {tuple(part_mask.shape)}"
+                )
+            mask = part_mask.to(dtype=feat.dtype, device=feat.device).unsqueeze(-1)
+            feat = feat * mask
+
+        style_vec = feat.sum(dim=1)
+        style_vec = F.normalize(style_vec, dim=-1)
+        return style_vec
+
+    def forward(
+        self,
+        style_img: Optional[torch.Tensor] = None,
+        part_imgs: Optional[torch.Tensor] = None,
+        part_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        # Explicit part-set path (paper-aligned) has priority when provided.
+        if part_imgs is not None:
+            return self._forward_from_part_set(part_imgs=part_imgs, part_mask=part_mask)
+        if style_img is None:
+            raise ValueError("Either style_img or part_imgs must be provided to PartStyleEncoder.")
+        return self._forward_from_style_image(style_img)
 
 
 # ------------------------- 编码器 ------------------------- #
@@ -352,6 +396,7 @@ class FontDiffusionUNet(nn.Module):
         fgsa_layers: Sequence[bool] | None = None,
         attnx_enabled: bool = False,
         attnx_positions: Sequence[str] | None = None,
+        use_global_style: bool = True,
         use_part_style: bool = False,
         part_patch_size: int = 32,
         part_patch_stride: int = 16,
@@ -367,6 +412,7 @@ class FontDiffusionUNet(nn.Module):
         self.time_embed_dim = time_embed_dim
         self.style_k = style_k
         self.num_layers = num_layers
+        self.use_global_style = bool(use_global_style)
         self.use_part_style = use_part_style
         self.part_fuse_strength = float(part_fuse_strength)
 
@@ -428,7 +474,7 @@ class FontDiffusionUNet(nn.Module):
 
         # Encoders for content and style (style 输入通道 = in_channels * style_k)
         self.content_encoder = Encoder(in_channels, base_channels, num_layers)
-        self.style_encoder = Encoder(in_channels * style_k, base_channels, num_layers)
+        self.style_encoder = Encoder(in_channels * style_k, base_channels, num_layers) if self.use_global_style else None
         if self.use_part_style:
             self.part_style_encoder = PartStyleEncoder(
                 in_channels=in_channels,
@@ -539,14 +585,29 @@ class FontDiffusionUNet(nn.Module):
     def encode_conditions(
         self,
         content_img: torch.Tensor,
-        style_img: torch.Tensor,
+        style_img: Optional[torch.Tensor],
+        part_imgs: Optional[torch.Tensor] = None,
+        part_mask: Optional[torch.Tensor] = None,
         return_part: bool = False,
     ) -> tuple[List[torch.Tensor], List[torch.Tensor]] | tuple[List[torch.Tensor], List[torch.Tensor], torch.Tensor | None]:
         content_feats = self.content_encoder(content_img)
-        style_feats = self.style_encoder(style_img)
+        if self.use_global_style:
+            if style_img is None:
+                raise ValueError("style_img is required when use_global_style=True")
+            if self.style_encoder is None:
+                raise RuntimeError("style_encoder is not initialized while use_global_style=True")
+            style_feats = self.style_encoder(style_img)
+        else:
+            style_feats = [torch.zeros_like(feat) for feat in content_feats]
         part_style_vec: torch.Tensor | None = None
         if self.use_part_style:
-            part_style_vec = self.part_style_encoder(style_img)
+            if part_imgs is None and style_img is None:
+                raise ValueError("Either part_imgs or style_img is required when use_part_style=True")
+            part_style_vec = self.part_style_encoder(
+                style_img=style_img,
+                part_imgs=part_imgs,
+                part_mask=part_mask,
+            )
         if return_part:
             return content_feats, style_feats, part_style_vec
         return content_feats, style_feats
@@ -616,12 +677,16 @@ class FontDiffusionUNet(nn.Module):
         x_t: torch.Tensor,
         t: torch.Tensor,
         content_img: torch.Tensor,
-        style_img: torch.Tensor,
+        style_img: Optional[torch.Tensor],
+        part_imgs: Optional[torch.Tensor] = None,
+        part_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """推断一个时间步的 \hat{x}_0。"""
         content_feats, style_feats, part_style_vec = self.encode_conditions(
             content_img,
             style_img,
+            part_imgs=part_imgs,
+            part_mask=part_mask,
             return_part=True,
         )
         return self.forward_with_feats(x_t, t, content_feats, style_feats, part_style_vec=part_style_vec)

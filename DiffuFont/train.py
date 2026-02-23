@@ -65,6 +65,7 @@ def parse_float_list(s: str) -> List[float]:
 def collate_fn(samples, style_k: int):
     """Convert a list of dataset samples to batch tensors."""
     contents, styles, targets = [], [], []
+    parts_list, part_masks = [], []
     for s in samples:
         contents.append(s["content"])
         targets.append(s["input"])  # training target glyph
@@ -75,18 +76,46 @@ def collate_fn(samples, style_k: int):
             style_imgs = (style_imgs * style_k)[:style_k]
         styles.append(torch.cat(style_imgs, dim=0))
 
-    return {
+        if "parts" in s:
+            parts_list.append(s["parts"])
+            if "part_mask" in s:
+                part_masks.append(s["part_mask"])
+            else:
+                part_masks.append(torch.ones((s["parts"].size(0),), dtype=torch.float32))
+
+    batch = {
         "content": torch.stack(contents),
         "style": torch.stack(styles),
         "target": torch.stack(targets),
     }
+    if parts_list:
+        max_parts = max(int(x.size(0)) for x in parts_list)
+        c = int(parts_list[0].size(1))
+        h = int(parts_list[0].size(2))
+        w = int(parts_list[0].size(3))
+        parts = torch.zeros((len(parts_list), max_parts, c, h, w), dtype=parts_list[0].dtype)
+        mask = torch.zeros((len(parts_list), max_parts), dtype=torch.float32)
+        for i, p in enumerate(parts_list):
+            n = int(p.size(0))
+            parts[i, :n] = p
+            if i < len(part_masks):
+                m = part_masks[i]
+                if m.dim() == 1 and m.size(0) == n:
+                    mask[i, :n] = m.float()
+                else:
+                    mask[i, :n] = 1.0
+            else:
+                mask[i, :n] = 1.0
+        batch["parts"] = parts
+        batch["part_mask"] = mask
+    return batch
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-root", type=Path, default=Path("."))
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch", type=int, default=1)
+    parser.add_argument("--batch", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--precision", type=str, default="fp32", choices=["fp32", "bf16", "fp16"])
@@ -108,6 +137,12 @@ def main():
     parser.add_argument("--auto-select-font", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--include-target-in-style", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--component-guided-style", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--style-overlap-topk",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Pick style chars by highest component overlap first (global style set).",
+    )
     parser.add_argument("--decomposition-json", type=str, default="CharacterData/decomposition.json")
 
     parser.add_argument("--daca-layers", type=str, default="0,1,1,0")
@@ -115,7 +150,8 @@ def main():
     parser.add_argument("--attnx-enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--attnx-positions", type=str, default="bottleneck_16,up0_16to32")
 
-    parser.add_argument("--use-part-style", action="store_true")
+    parser.add_argument("--use-global-style", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--use-part-style", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--part-patch-size", type=int, default=64)
     parser.add_argument("--part-patch-stride", type=int, default=32)
     parser.add_argument("--part-min-patches-per-style", type=int, default=1)
@@ -135,6 +171,17 @@ def main():
     )
     parser.add_argument("--part-style-pretrained", type=str, default=None)
     parser.add_argument("--freeze-part-style", action="store_true")
+    parser.add_argument("--use-part-bank", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--part-bank-manifest", type=str, default="DataPreparation/PartBank/manifest.json")
+    parser.add_argument("--part-set-size", type=int, default=32)
+    parser.add_argument(
+        "--part-set-sampling",
+        type=str,
+        default="deterministic",
+        choices=["deterministic", "random"],
+    )
+    parser.add_argument("--part-target-char-priority", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--part-image-size", type=int, default=64)
 
     parser.add_argument("--sample-every-steps", type=int, default=100)
     parser.add_argument("--log-every-steps", type=int, default=100)
@@ -182,7 +229,14 @@ def main():
         num_style_refs=args.style_k,
         include_target_in_style=args.include_target_in_style,
         component_guided_style=args.component_guided_style,
+        style_overlap_topk=args.style_overlap_topk,
         decomposition_json=args.decomposition_json,
+        use_part_bank=bool(args.use_part_style and args.use_part_bank),
+        part_bank_manifest=args.part_bank_manifest,
+        part_set_size=args.part_set_size,
+        part_set_sampling=args.part_set_sampling,
+        part_target_char_priority=args.part_target_char_priority,
+        part_image_size=args.part_image_size,
         transform=transform,
     )
 
@@ -242,6 +296,7 @@ def main():
         fgsa_layers=parse_bool_list(args.fgsa_layers),
         attnx_enabled=args.attnx_enabled,
         attnx_positions=parse_csv(args.attnx_positions),
+        use_global_style=args.use_global_style,
         use_part_style=args.use_part_style,
         part_patch_size=args.part_patch_size,
         part_patch_stride=args.part_patch_stride,
@@ -250,6 +305,10 @@ def main():
         part_fuse_scales=part_fuse_scales,
         part_fuse_scale_gains=part_fuse_scale_gains,
         part_fuse_strength=args.part_fuse_strength,
+    )
+    print(
+        "[train] style switches "
+        f"use_global_style={args.use_global_style} use_part_style={args.use_part_style}"
     )
 
     if args.part_style_pretrained:

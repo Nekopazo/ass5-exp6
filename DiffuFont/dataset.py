@@ -31,10 +31,12 @@ from pathlib import Path
 import json
 import io
 import random
+import re
 from typing import List, Dict, Any, Optional, Union, Tuple, Set
 from collections import Counter
 
 import lmdb
+import numpy as np
 from PIL import Image
 
 try:
@@ -60,7 +62,14 @@ class FontImageDataset(Dataset):
         style_sampling: str = "random",
         include_target_in_style: bool = False,
         component_guided_style: bool = False,
+        style_overlap_topk: bool = False,
         decomposition_json: Optional[Union[str, Path]] = None,
+        use_part_bank: bool = False,
+        part_bank_manifest: Optional[Union[str, Path]] = None,
+        part_set_size: int = 32,
+        part_set_sampling: str = "deterministic",
+        part_target_char_priority: bool = True,
+        part_image_size: int = 64,
         random_seed: int = 42,
         content_lmdb: Optional[Union[str, Path]] = None,
         train_lmdb: Optional[Union[str, Path]] = None,
@@ -78,6 +87,15 @@ class FontImageDataset(Dataset):
         self.lmdb_font_scan_limit = int(max(1000, lmdb_font_scan_limit))
         self.include_target_in_style = bool(include_target_in_style)
         self.component_guided_style = bool(component_guided_style)
+        self.style_overlap_topk = bool(style_overlap_topk)
+        self.use_part_bank = bool(use_part_bank)
+        self.part_set_size = max(1, int(part_set_size))
+        self.part_set_sampling = str(part_set_sampling).strip().lower()
+        if self.part_set_sampling not in {"deterministic", "random"}:
+            raise ValueError("part_set_sampling must be either 'deterministic' or 'random'")
+        self.part_target_char_priority = bool(part_target_char_priority)
+        self.part_image_size = max(8, int(part_image_size))
+        self.part_bank_by_font: Dict[str, List[Dict[str, Any]]] = {}
         self.char_components: Dict[str, Set[str]] = {}
         if self.component_guided_style:
             if decomposition_json is None:
@@ -156,6 +174,14 @@ class FontImageDataset(Dataset):
             font: self._build_style_char_pool(valid_indices)
             for font, valid_indices in self.valid_indices_by_font.items()
         }
+
+        if self.use_part_bank:
+            if "torch" not in globals():
+                raise RuntimeError("use_part_bank=True requires torch to be installed.")
+            if part_bank_manifest is None:
+                part_bank_manifest = self.root / "DataPreparation" / "PartBank" / "manifest.json"
+            self.part_bank_by_font = self._load_part_bank_manifest(part_bank_manifest)
+            self._filter_samples_by_part_bank()
 
         if not self.samples:
             raise RuntimeError("No valid samples found – please check LMDB integrity and paths.")
@@ -255,6 +281,133 @@ class FontImageDataset(Dataset):
             seen.add(ch)
             chars.append(ch)
         return chars
+
+    @staticmethod
+    def _parse_part_index(path_like: str) -> int:
+        m = re.search(r"part_(\d+)", path_like)
+        if m is None:
+            return 1_000_000_000
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return 1_000_000_000
+
+    def _load_part_bank_manifest(self, part_bank_manifest: Union[str, Path]) -> Dict[str, List[Dict[str, Any]]]:
+        path = Path(part_bank_manifest)
+        if not path.is_absolute():
+            path = (self.root / path).resolve()
+        if not path.exists():
+            raise FileNotFoundError(f"PartBank manifest not found: {path}")
+
+        try:
+            obj = json.load(path.open("r", encoding="utf-8"))
+        except Exception as e:
+            raise RuntimeError(f"Failed to parse PartBank manifest: {path}") from e
+
+        fonts = obj.get("fonts", {}) if isinstance(obj, dict) else {}
+        if not isinstance(fonts, dict):
+            raise RuntimeError(f"Invalid PartBank manifest format: {path}")
+
+        out: Dict[str, List[Dict[str, Any]]] = {}
+        for font_name, info in fonts.items():
+            if not isinstance(font_name, str) or not isinstance(info, dict):
+                continue
+            part_rows: List[Dict[str, Any]] = []
+            for row in info.get("parts", []):
+                if not isinstance(row, dict):
+                    continue
+                rel = row.get("path")
+                if not isinstance(rel, str) or not rel:
+                    continue
+                p = Path(rel)
+                if not p.is_absolute():
+                    p = (self.root / p).resolve()
+                if not p.exists():
+                    continue
+                ch = row.get("char")
+                part_rows.append(
+                    {
+                        "path": p,
+                        "char": ch if isinstance(ch, str) and len(ch) == 1 else "",
+                        "x": int(row.get("x", 0)) if isinstance(row.get("x", 0), (int, float)) else 0,
+                        "y": int(row.get("y", 0)) if isinstance(row.get("y", 0), (int, float)) else 0,
+                        "response": float(row.get("response", 0.0)) if isinstance(row.get("response", 0.0), (int, float)) else 0.0,
+                        "index": self._parse_part_index(str(p.name)),
+                    }
+                )
+
+            if not part_rows:
+                continue
+
+            # Canonical deterministic order: file index first, then confidence.
+            part_rows.sort(key=lambda x: (int(x["index"]), -float(x["response"]), str(x["path"])))
+            out[font_name] = part_rows
+
+        return out
+
+    def _filter_samples_by_part_bank(self) -> None:
+        available_fonts = set(self.part_bank_by_font.keys())
+        if self.font_mode == "fixed":
+            if self.font_name not in available_fonts:
+                raise RuntimeError(
+                    f"Font '{self.font_name}' not found in PartBank manifest; "
+                    "cannot use part-bank conditioning."
+                )
+            return
+
+        before = len(self.samples)
+        self.samples = [x for x in self.samples if x[0] in available_fonts]
+        after = len(self.samples)
+        if after <= 0:
+            raise RuntimeError("No samples left after applying PartBank font filter.")
+        if after < before:
+            removed_fonts = sorted([x for x in self.valid_indices_by_font.keys() if x not in available_fonts])
+            print(
+                f"[FontImageDataset] PartBank filter removed {before - after} samples "
+                f"across {len(removed_fonts)} fonts."
+            )
+
+    def _load_part_tensor(self, path: Path):
+        img = Image.open(path).convert("RGB")
+        if self.part_image_size > 0:
+            img = img.resize((self.part_image_size, self.part_image_size), Image.BILINEAR)
+        arr = np.asarray(img, dtype=np.float32) / 255.0
+        arr = arr * 2.0 - 1.0
+        t = torch.from_numpy(arr).permute(2, 0, 1).contiguous()
+        return t
+
+    def _select_part_rows(self, font_name: str, target_char: str) -> List[Dict[str, Any]]:
+        rows = self.part_bank_by_font.get(font_name, [])
+        if not rows:
+            return []
+
+        size = min(self.part_set_size, len(rows))
+        same_char: List[Dict[str, Any]] = []
+        if self.part_target_char_priority and target_char:
+            same_char = [r for r in rows if r.get("char", "") == target_char]
+
+        if self.part_set_sampling == "random":
+            picked: List[Dict[str, Any]] = []
+            if same_char:
+                keep = min(len(same_char), size)
+                picked.extend(self.rng.sample(same_char, keep) if len(same_char) > keep else same_char[:keep])
+            if len(picked) < size:
+                remain = [r for r in rows if r not in picked]
+                need = size - len(picked)
+                if len(remain) >= need:
+                    picked.extend(self.rng.sample(remain, need))
+                else:
+                    picked.extend(remain)
+                    while len(picked) < size:
+                        picked.append(self.rng.choice(rows))
+            return picked[:size]
+
+        # deterministic
+        if same_char:
+            seen_ids = {id(x) for x in same_char}
+            merged = same_char + [r for r in rows if id(r) not in seen_ids]
+            return merged[:size]
+        return rows[:size]
 
     def _build_multi_font_entries(self, requested_font: str, c_txn, t_txn, lmdb_fonts: List[str]):
         entries: List[Tuple[str, List[str], List[int]]] = []
@@ -398,7 +551,14 @@ class FontImageDataset(Dataset):
         needed = self.num_style_refs - len(picked)
 
         if needed > 0:
-            if self.style_sampling == "deterministic":
+            if self.component_guided_style and self.style_overlap_topk:
+                scored = sorted(
+                    pool,
+                    key=lambda c: (self._component_overlap(ch, c), c),
+                    reverse=True,
+                )
+                picked.extend(scored[:needed])
+            elif self.style_sampling == "deterministic":
                 if self.component_guided_style:
                     scored = sorted(pool, key=lambda c: self._component_overlap(ch, c), reverse=True)
                     picked.extend(scored[:needed])
@@ -603,6 +763,15 @@ class FontImageDataset(Dataset):
             "input": self._bytes_to_img(input_bytes),
             "styles": style_imgs,
         }
+        if self.use_part_bank:
+            part_rows = self._select_part_rows(font_name, ch)
+            if not part_rows:
+                raise KeyError(f"Missing PartBank parts for font: {font_name}")
+            part_imgs = [self._load_part_tensor(r["path"]) for r in part_rows]
+            parts = torch.stack(part_imgs, dim=0)
+            part_mask = torch.ones((parts.size(0),), dtype=torch.float32)
+            sample["parts"] = parts
+            sample["part_mask"] = part_mask
         return sample
 
     def close(self):

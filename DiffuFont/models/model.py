@@ -166,6 +166,8 @@ class DiffusionTrainer:
         x0 = batch["target"].to(self.device)  # clean target image
         content = batch["content"].to(self.device)
         style = batch["style"].to(self.device)
+        part_imgs = batch["parts"].to(self.device) if "parts" in batch else None
+        part_mask = batch["part_mask"].to(self.device) if "part_mask" in batch else None
         B = x0.size(0)
         t = torch.randint(0, self.scheduler.T, (B,), device=self.device)
 
@@ -178,7 +180,14 @@ class DiffusionTrainer:
             x_t, _ = self.scheduler.add_noise(x0, t)
 
             # prediction
-            x0_hat = self.model(x_t, t, content, style)
+            x0_hat = self.model(
+                x_t,
+                t,
+                content,
+                style,
+                part_imgs=part_imgs,
+                part_mask=part_mask,
+            )
 
             # losses
             loss_mse = F.mse_loss(x0_hat, x0)
@@ -267,6 +276,8 @@ class DiffusionTrainer:
         style_img: torch.Tensor,
         c: int = 10,
         eta: float = 0.0,
+        part_imgs: torch.Tensor | None = None,
+        part_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """DDIM 采样实现，默认使用 η=0 的确定性路径。
 
@@ -288,11 +299,17 @@ class DiffusionTrainer:
         x_t = torch.randn(B, C, H, W, device=device)
         content_img = content_img.to(device)
         style_img = style_img.to(device)
+        if part_imgs is not None:
+            part_imgs = part_imgs.to(device)
+        if part_mask is not None:
+            part_mask = part_mask.to(device)
 
         # S1: pre-compute condition features once, reuse across all timesteps.
         content_feats, style_feats, part_style_vec = self.model.encode_conditions(
             content_img,
             style_img,
+            part_imgs=part_imgs,
+            part_mask=part_mask,
             return_part=True,
         )
 
@@ -405,6 +422,8 @@ class DiffusionTrainer:
         out_dir.mkdir(parents=True, exist_ok=True)
         content = batch["content"].to(self.device)
         style = batch["style"].to(self.device)
-        sample = self.ddim_sample(content, style, steps)
+        part_imgs = batch["parts"].to(self.device) if "parts" in batch else None
+        part_mask = batch["part_mask"].to(self.device) if "part_mask" in batch else None
+        sample = self.ddim_sample(content, style, c=steps, part_imgs=part_imgs, part_mask=part_mask)
         filename = f"sample_ep{self.current_epoch}_gstep{self.global_step}_estep{self.local_step}.png"
         save_image((sample + 1) / 2, out_dir / filename)

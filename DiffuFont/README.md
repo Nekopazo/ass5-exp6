@@ -6,6 +6,8 @@
 * `models/model.py` – training utilities (losses, DDPM training, DDIM sampling, automatic image logging).
 * `train.py` – single-GPU training script.
 * `dataset.py` – `FontImageDataset` loader used by the project.
+* `docs/model_architecture.md` – full architecture graph with `use_global_style` / `use_part_style` switches.
+* `docs/flowchart_simple.md` – simplified flowchart (recommended first read).
 
 ## 1. Installation
 ```bash
@@ -179,6 +181,7 @@ python train.py \
   --font-mode random \
   --component-guided-style \
   --style-k 3 \
+  --use-global-style \
   --daca-layers 0,1,1,0 \
   --fgsa-layers 1,1,1,0 \
   --attnx-enabled \
@@ -196,6 +199,10 @@ python train.py \
   --lr 2e-4 \
   --save-dir checkpoints
 ```
+
+Switches:
+- Disable global style branch: `--no-use-global-style`
+- Disable part style branch: `--no-use-part-style`
 
 If you want to keep the pretrained part encoder fixed:
 
