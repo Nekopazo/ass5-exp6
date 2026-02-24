@@ -1,247 +1,97 @@
-# Few-Shot Font Generation via Denoising Diffusion and Component-Level Fine-Grained Style
+# DiffuFont (Current Branch)
 
-## Key Components
+This branch uses a source-aligned FontDiffuser backbone with configurable conditioning:
 
-* `models/font_diffusion_unet.py` – U-Net generator containing DACA / FGSA / AdaLN modules.
-* `models/model.py` – training utilities (losses, DDPM training, DDIM sampling, automatic image logging).
-* `train.py` – single-GPU training script.
-* `dataset.py` – `FontImageDataset` loader used by the project.
-* `docs/model_architecture.md` – full architecture graph with `use_global_style` / `use_part_style` switches.
-* `docs/flowchart_simple.md` – simplified flowchart (recommended first read).
+- `baseline`: no token, no RSI
+- `token_only`: token on, RSI off
+- `rsi_only`: token off, RSI on
+- `full` (default): token on, RSI on
 
-## 1. Installation
+The old style-image `E_s(x_s)` conditioning path has been removed from runtime conditioning.
+
+## Key Files
+
+- `train.py`: main training entry
+- `dataset.py`: dataset and PartBank retrieval
+- `models/source_part_ref_unet.py`: token/RSI conditioning wrapper
+- `models/source_fontdiffuser/`: source UNet/RSI blocks
+- `models/model.py`: trainer, logging, sampling, checkpoints
+- `docs/model_architecture.md`: latest architecture notes
+- `docs/model_full_graph.md`: full graph diagram + layer-by-layer injection table
+- `docs/scripts_usage.md`: all scripts, defaults, and usage
+
+## Environment
+
+Example (conda):
+
 ```bash
-# Python ≥ 3.8 is recommended
-conda create -n DiffFont python=3.9 -y
-conda activate DiffFont
-
-# Core dependencies (choose the CUDA / CPU build that matches your system)
-pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu118
-pip install tqdm lmdb pillow
-pip install opencv-python
+conda create -n sg3 python=3.10 -y
+conda activate sg3
+pip install torch torchvision torchaudio
+pip install diffusers transformers lmdb pillow opencv-python
 ```
-A CUDA-enabled GPU is strongly recommended for training.
 
-## 2. Data Preparation
-The directory layout expected by `dataset.py` is shown below.
+## Data Layout
+
 ```text
-ProjectRoot/
+DiffuFont/
 ├── CharacterData/
-│   ├── CharList.json          # list of content characters
-│   └── ReferenceCharList.json # global style reference pool (e.g. 300 chars)
+│   ├── CharList.json
+│   └── ReferenceCharList.json
 ├── DataPreparation/
-│   ├── FontList.json          # list of candidate .ttf files
-│   └── LMDB/
-│       ├── ContentFont.lmdb   # LMDB for the content font
-│       └── TrainFont.lmdb     # LMDB for all style / target fonts
+│   ├── FontList.json
+│   ├── LMDB/
+│   │   ├── ContentFont.lmdb
+│   │   └── TrainFont.lmdb
+│   └── PartBank/
+│       └── manifest.json
 └── ...
 ```
-### 2.1 Charset Preparation (No Mapping)
 
-```bash
-python scripts/prepare_common_charset.py \
-  --out-dir CharacterData \
-  --char-count 2000 \
-  --ref-count 300
-```
+## Training
 
-Outputs:
-- `CharacterData/CharList.json`
-- `CharacterData/ReferenceCharList.json`
-- `CharacterData/dataset_meta.json`
+Full conditioning:
 
-No `mapping.json` is generated.
-
-### 2.2 Image Generation & LMDB Construction
-Two helper scripts are provided:
-* **`generate_font_images.py`** – render characters of a given TrueType font to individual PNG files.
-* **`images_to_lmdb.py`** – convert a folder of PNGs into an LMDB database.
-
-Typical workflow
-1. **Generate content-font images**
-   ```bash
-   # Render one font by index from DataPreparation/FontList.json
-   python DataPreparation/generate_font_images.py \
-       --project-root . \
-       --font-indices 0 \
-       --char-list-json CharacterData/CharList.json \
-       --out-dir DataPreparation/Generated/ContentFont
-
-   # Convert to LMDB
-   python DataPreparation/images_to_lmdb.py \
-       --project-root . \
-       --img-roots DataPreparation/Generated/ContentFont \
-       --lmdb-path DataPreparation/LMDB/ContentFont.lmdb
-   ```
-2. **Generate style / target font images**
-   ```bash
-   # Render all fonts listed in FontList.json
-   python DataPreparation/generate_font_images.py \
-       --project-root . \
-       --char-list-json CharacterData/CharList.json \
-       --out-dir DataPreparation/Generated/TrainFonts
-
-   # Convert to a single LMDB (sub-directories are supported)
-   python DataPreparation/images_to_lmdb.py \
-       --project-root . \
-       --img-roots DataPreparation/Generated/TrainFonts \
-       --lmdb-path DataPreparation/LMDB/TrainFont.lmdb
-   ```
-> The default filename pattern is `FontName@<char>.png`; `images_to_lmdb.py` relies on this convention.
-
-### 2.3 Font Files
-The **300** Chinese font files used in our experiments can be downloaded from Google Drive:
-<https://drive.google.com/file/d/17rajeJz53RnCOEv9B4X6tDKaIwpz2bIb/view?usp=drive_link>
-
-After downloading, extract the archive to `DataPreparation/Fonts/` and list the extracted `.ttf` paths in `DataPreparation/FontList.json`, then follow Section 2.1 to render the images.
-
-### 2.4 Style Reference Pool
-
-`ReferenceCharList.json` contains a shared pool of style reference chars.
-At training time, `dataset.py` samples `num_style_refs` style chars from this pool
-(default: same as `--style-k`), so no per-content mapping file is required.
-
-`FontImageDataset` will first try the font from `FontList.json` + `font_index`.
-If that font does not exist in `TrainFont.lmdb`, it automatically falls back to a usable
-font prefix found in LMDB keys (format: `<FontName>@<char>`).
-
-### 2.5 Build Few-Part Bank (Optional but Recommended)
-
-The script below extracts representative local patches (few-parts) for each font.
-It uses keypoints/descriptors (SIFT if available, ORB fallback) and descriptor-space
-diversity sampling.
-
-```bash
-python scripts/build_part_bank.py \
-  --project-root . \
-  --fonts-dir fonts \
-  --charset-json CharacterData/ReferenceCharList.json \
-  --output-dir DataPreparation/PartBank \
-  --parts-per-font 32 \
-  --patch-size 64 \
-  --detector sift \
-  --location-dedupe \
-  --sim-dedupe-cos-threshold 0.995 \
-  --sim-dedupe-anchor-limit 1500 \
-  --canvas-size 256 \
-  --char-size 224
-```
-
-Output:
-- `DataPreparation/PartBank/<FontName>/part_*.png`
-- `DataPreparation/PartBank/manifest.json`
-
-### 2.6 Pretrain Part-Style Encoder (Optional)
-
-```bash
-python scripts/pretrain_part_style_encoder.py \
-  --project-root . \
-  --manifest DataPreparation/PartBank/manifest.json \
-  --out checkpoints/part_style_encoder_pretrain_final.pt \
-  --best-out checkpoints/part_style_encoder_pretrain_best.pt \
-  --log-file checkpoints/part_style_encoder_pretrain.log \
-  --metrics-jsonl checkpoints/part_style_encoder_pretrain.metrics.jsonl \
-  --steps 10000 \
-  --batch-size 64 \
-  --min-set-size 1 \
-  --warmup-max-set-size 4 \
-  --warmup-steps 4000 \
-  --max-set-size 8 \
-  --val-ratio 0.1 \
-  --val-batches 8 \
-  --monitor val_loss \
-  --early-stop-patience 20 \
-  --patch-size 64 \
-  --temperature 0.4 \
-  --log-every 100
-```
-
-### 2.7 Analyze Component-Overlap Sampling (Recommended)
-
-```bash
-python scripts/analyze_component_overlap.py \
-  --project-root . \
-  --font-mode random \
-  --style-k 3 \
-  --samples 4000 \
-  --out-dir checkpoints/overlap_stats
-```
-
-Output:
-- `checkpoints/overlap_stats/component_overlap_report.json`
-- `checkpoints/overlap_stats/component_overlap_top_pairs.csv`
-- `checkpoints/overlap_stats/component_overlap_hist.png` (if matplotlib is available)
-
-## 3. Training
 ```bash
 python train.py \
   --data-root . \
-  --epochs 50 \
-  --batch 1 \
-  --font-mode random \
-  --component-guided-style \
-  --style-k 3 \
-  --use-global-style \
-  --daca-layers 0,1,1,0 \
-  --fgsa-layers 1,1,1,0 \
-  --attnx-enabled \
-  --use-part-style \
-  --part-patch-size 64 \
-  --part-patch-stride 32 \
-  --part-min-patches-per-style 1 \
-  --part-max-patches-per-style 8 \
-  --part-fuse-scales 1,2,3 \
-  --part-fuse-scale-gains 0.25,1.0,1.0 \
-  --part-fuse-strength 1.0 \
-  --part-style-pretrained checkpoints/part_style_encoder_pretrain_best.pt \
-  --overlap-report-samples 2000 \
-  --overlap-report-json checkpoints/overlap_stats/train_overlap_report.json \
-  --lr 2e-4 \
-  --save-dir checkpoints
+  --conditioning-profile full \
+  --part-retrieval-ep-ckpt checkpoints/e_p_font_encoder_best.pt \
+  --save-dir checkpoints/run_full
 ```
 
-Switches:
-- Disable global style branch: `--no-use-global-style`
-- Disable part style branch: `--no-use-part-style`
-
-If you want to keep the pretrained part encoder fixed:
+Baseline:
 
 ```bash
-python train.py ... --use-part-style --part-style-pretrained checkpoints/part_style_encoder_pretrain_best.pt --freeze-part-style
+python train.py \
+  --data-root . \
+  --conditioning-profile baseline \
+  --save-dir checkpoints/run_baseline
 ```
 
-During training
-* A checkpoint is saved every **5** epochs in `checkpoints/ckpt_*.pt`.
-* A DDIM sample is saved every `--sample-every-steps` mini-batches (default **100**) in `checkpoints/samples/` with filename `sample_ep{epoch}_step{batch}.png`.
+Current default cadence:
 
-Resume training
-```bash
-python train.py --resume checkpoints/ckpt_10.pt
-```
+- sample grid every `300` steps
+- detailed log every `100` steps
+- checkpoint every `5000` steps
+- epoch checkpoint disabled by default
 
-## 4. Inference / Sampling
-```python
-import torch
-from PIL import Image
-from torchvision import transforms as T
-from models.font_diffusion_unet import FontDiffusionUNet
-from models.model import DiffusionTrainer
+## Startup Config And Logs
 
-net = FontDiffusionUNet(in_channels=3, style_k=3)
-trainer = DiffusionTrainer(net, torch.device('cuda'), sample_every_steps=None)
-trainer.load('checkpoints/ckpt_50.pt')
+At startup, `train.py` prints full run config and writes:
 
-transform = T.Compose([
-    T.Resize((256, 256)),
-    T.ToTensor(),
-    T.Normalize(0.5, 0.5),
-])
-content_img = transform(Image.open('content.png')).unsqueeze(0)
-style_imgs = [transform(Image.open(f'style_{i}.png')) for i in range(3)]
-style_img = torch.cat(style_imgs, dim=0).unsqueeze(0)
+- `<save_dir>/train_run_config.json` (all args + derived runtime config)
+- `<save_dir>/train_step_metrics.jsonl` (step-level metrics)
 
-sample = trainer.ddim_sample(content_img, style_img, c=10, eta=0)
-T.functional.to_pil_image((sample[0] + 1) / 2).save('result.png')
-```
+## Scripts
 
----
+All script usage and defaults are documented in:
+
+- `docs/scripts_usage.md`
+
+Includes:
+
+- `train.py`
+- every `scripts/*.py`
+- `scripts/run_train_a40_cuda1.sh`
+- `scripts/run_train_a40_cuda2.sh`

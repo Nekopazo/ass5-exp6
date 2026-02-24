@@ -380,7 +380,7 @@ def main() -> None:
     parser.add_argument("--max-chars", type=int, default=0)
 
     parser.add_argument("--output-dir", type=Path, default=Path("DataPreparation/PartBank"))
-    parser.add_argument("--parts-per-font", type=int, default=32)
+    parser.add_argument("--parts-per-font", type=int, default=48)
     parser.add_argument("--patch-size", type=int, default=64)
     parser.add_argument("--min-ink-ratio", type=float, default=0.02)
     parser.add_argument("--max-ink-ratio", type=float, default=0.70)

@@ -5,20 +5,16 @@ Training utilities for FontDiffusionUNet.
 
 from __future__ import annotations
 
-import math
-import os
+import json
 from pathlib import Path
 from typing import Dict, List
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision.models as models
 from torchvision import transforms as T
+from torchvision.models import VGG19_Weights, vgg19
 from torchvision.utils import save_image
-
-from .font_diffusion_unet import FontDiffusionUNet
-from .daca import DACA
 
 
 class NoiseScheduler:
@@ -62,7 +58,7 @@ class VGGPerceptualLoss(nn.Module):
 
     def __init__(self):
         super().__init__()
-        vgg = models.vgg19(pretrained=True).features[:16]  # till relu3_1
+        vgg = vgg19(weights=VGG19_Weights.IMAGENET1K_V1).features[:16]  # till relu3_1
         for p in vgg.parameters():
             p.requires_grad = False
         self.vgg = vgg
@@ -82,12 +78,13 @@ class VGGPerceptualLoss(nn.Module):
 class DiffusionTrainer:
     def __init__(
         self,
-        model: FontDiffusionUNet,
+        model: nn.Module,
         device: torch.device,
         lr: float = 2e-4,
         lambda_mse: float = 1.0,
         lambda_off: float = 0.1,
         lambda_cp: float = 0.1,
+        lambda_cons: float = 0.0,
         T: int = 1000,
         lr_tmax: int | None = None,
         sample_every_steps: int | None = None,
@@ -113,12 +110,14 @@ class DiffusionTrainer:
         self.lambda_mse = lambda_mse
         self.lambda_off = lambda_off
         self.lambda_cp = lambda_cp
+        self.lambda_cons = float(lambda_cons)
         self.perc_loss_fn = VGGPerceptualLoss().to(device)
         self.global_step = 0
         self.local_step = 0  # batch idx within current epoch
         self.current_epoch = 0
         self.save_every_steps = save_every_steps
         self.checkpoint_dir: Path | None = None
+        self.step_log_file: Path | None = None
         self.log_every_steps = int(log_every_steps) if log_every_steps and int(log_every_steps) > 0 else None
         self.detailed_log = bool(detailed_log)
 
@@ -149,16 +148,24 @@ class DiffusionTrainer:
             raise ValueError(f"Unsupported precision: {precision}")
 
         self.use_grad_scaler = bool(self.use_amp and self.amp_dtype == torch.float16 and self.device.type == "cuda")
-        self.grad_scaler = torch.cuda.amp.GradScaler(enabled=self.use_grad_scaler)
+        if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+            self.grad_scaler = torch.amp.GradScaler("cuda", enabled=self.use_grad_scaler)
+        else:
+            self.grad_scaler = torch.cuda.amp.GradScaler(enabled=self.use_grad_scaler)
 
     def _offset_loss(self) -> torch.Tensor:
-        off_losses: List[torch.Tensor] = []
-        for m in self.model.modules():
-            if isinstance(m, DACA) and hasattr(m, "last_offset_loss"):
-                off_losses.append(m.last_offset_loss)
-        if len(off_losses) == 0:
-            return torch.tensor(0.0, device=self.device)
-        return torch.stack(off_losses).mean()
+        if hasattr(self.model, "last_offset_loss"):
+            v = getattr(self.model, "last_offset_loss")
+            if isinstance(v, torch.Tensor):
+                return v.to(self.device)
+        return torch.tensor(0.0, device=self.device)
+
+    def _write_step_log(self, row: Dict[str, float | int]) -> None:
+        if self.step_log_file is None:
+            return
+        self.step_log_file.parent.mkdir(parents=True, exist_ok=True)
+        with self.step_log_file.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def train_step(self, batch: Dict[str, torch.Tensor], grad_clip: float | None = 1.0):
         self.model.train()
@@ -166,8 +173,13 @@ class DiffusionTrainer:
         x0 = batch["target"].to(self.device)  # clean target image
         content = batch["content"].to(self.device)
         style = batch["style"].to(self.device)
+        class_ids = batch.get("char_index")
+        if class_ids is not None:
+            class_ids = class_ids.to(self.device).long()
         part_imgs = batch["parts"].to(self.device) if "parts" in batch else None
         part_mask = batch["part_mask"].to(self.device) if "part_mask" in batch else None
+        part_imgs_b = batch["parts_b"].to(self.device) if "parts_b" in batch else None
+        part_mask_b = batch["part_mask_b"].to(self.device) if "part_mask_b" in batch else None
         B = x0.size(0)
         t = torch.randint(0, self.scheduler.T, (B,), device=self.device)
 
@@ -187,17 +199,30 @@ class DiffusionTrainer:
                 style,
                 part_imgs=part_imgs,
                 part_mask=part_mask,
+                class_ids=class_ids,
             )
 
             # losses
             loss_mse = F.mse_loss(x0_hat, x0)
             loss_off = self._offset_loss()
             loss_cp = self.perc_loss_fn(x0_hat, x0)
+            loss_cons = torch.tensor(0.0, device=self.device, dtype=loss_mse.dtype)
+            if (
+                self.lambda_cons > 0.0
+                and part_imgs is not None
+                and part_imgs_b is not None
+                and hasattr(self.model, "encode_part_tokens")
+                and bool(getattr(self.model, "enable_token_condition", True))
+            ):
+                tok_a = self.model.encode_part_tokens(part_imgs, part_mask)  # type: ignore[attr-defined]
+                tok_b = self.model.encode_part_tokens(part_imgs_b, part_mask_b)  # type: ignore[attr-defined]
+                loss_cons = F.mse_loss(tok_a, tok_b)
 
             loss = (
                 self.lambda_mse * loss_mse
                 + self.lambda_off * loss_off
                 + self.lambda_cp * loss_cp
+                + self.lambda_cons * loss_cons
             )
 
         # backward
@@ -237,10 +262,25 @@ class DiffusionTrainer:
             self.save(self.checkpoint_dir / f"ckpt_step_{self.global_step}.pt")
 
         if self.log_every_steps and self.global_step % self.log_every_steps == 0:
+            log_row: Dict[str, float | int] = {
+                "global_step": int(self.global_step),
+                "epoch": int(self.current_epoch),
+                "epoch_step": int(self.local_step),
+                "loss": float(loss.item()),
+                "loss_mse": float(loss_mse.item()),
+                "loss_off": float(loss_off.item()),
+                "loss_cp": float(loss_cp.item()),
+                "loss_cons": float(loss_cons.item()),
+                "lr": float(self.lr_schedule.get_last_lr()[0]),
+            }
+            if grad_norm is not None:
+                log_row["grad_norm"] = float(grad_norm)
+            self._write_step_log(log_row)
+
             msg = (
                 f"[debug-step] gstep={self.global_step} epoch={self.current_epoch} estep={self.local_step} "
                 f"loss={loss.item():.4f} mse={loss_mse.item():.4f} off={loss_off.item():.4f} "
-                f"cp={loss_cp.item():.4f} lr={self.lr_schedule.get_last_lr()[0]:.6e}"
+                f"cp={loss_cp.item():.4f} cons={loss_cons.item():.4f} lr={self.lr_schedule.get_last_lr()[0]:.6e}"
             )
             if grad_norm is not None:
                 msg += f" grad_norm={grad_norm:.4f}"
@@ -265,6 +305,7 @@ class DiffusionTrainer:
             "loss_mse": loss_mse.item(),
             "loss_off": loss_off.item(),
             "loss_cp": loss_cp.item(),
+            "loss_cons": loss_cons.item(),
             "lr": self.lr_schedule.get_last_lr()[0],
         }
 
@@ -278,6 +319,7 @@ class DiffusionTrainer:
         eta: float = 0.0,
         part_imgs: torch.Tensor | None = None,
         part_mask: torch.Tensor | None = None,
+        class_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """DDIM 采样实现，默认使用 η=0 的确定性路径。
 
@@ -303,28 +345,47 @@ class DiffusionTrainer:
             part_imgs = part_imgs.to(device)
         if part_mask is not None:
             part_mask = part_mask.to(device)
+        if class_ids is not None:
+            class_ids = class_ids.to(device).long()
 
-        # S1: pre-compute condition features once, reuse across all timesteps.
-        content_feats, style_feats, part_style_vec = self.model.encode_conditions(
-            content_img,
-            style_img,
-            part_imgs=part_imgs,
-            part_mask=part_mask,
-            return_part=True,
-        )
+        has_feature_api = hasattr(self.model, "encode_conditions") and hasattr(self.model, "forward_with_feats")
+        cond = None
+        if has_feature_api:
+            # S1: pre-compute condition features once, reuse across all timesteps.
+            cond = self.model.encode_conditions(
+                content_img,
+                style_img,
+                part_imgs=part_imgs,
+                part_mask=part_mask,
+                class_ids=class_ids,
+            )
 
         for i in range(len(tau) - 1):
             t_i = tau[i]
             t_prev = tau[i + 1]  # tau_{i-1}
 
             t_cond = torch.full((B,), t_i, device=device, dtype=torch.long)
-            x0_hat = self.model.forward_with_feats(
-                x_t,
-                t_cond,
-                content_feats,
-                style_feats,
-                part_style_vec=part_style_vec,
-            )
+            if has_feature_api and cond is not None:
+                x0_hat = self.model.forward_with_feats(
+                    x_t,
+                    t_cond,
+                    cond["content_feats"],  # type: ignore[arg-type]
+                    cond["style_feats"],    # type: ignore[arg-type]
+                    part_style_vec=cond["part_style_vec"],                # type: ignore[arg-type]
+                    style_tokens=cond["style_tokens"],                    # type: ignore[arg-type]
+                    style_global=cond["style_global"],                    # type: ignore[arg-type]
+                    part_condition_tokens=cond["part_condition_tokens"],  # type: ignore[arg-type]
+                )
+            else:
+                x0_hat = self.model(
+                    x_t,
+                    t_cond,
+                    content_img,
+                    style_img,
+                    part_imgs=part_imgs,
+                    part_mask=part_mask,
+                    class_ids=class_ids,
+                )
 
             alphabar_i = self.scheduler.alpha_bars[t_i].to(device)
             alphabar_prev = self.scheduler.alpha_bars[t_prev].to(device)
@@ -376,9 +437,8 @@ class DiffusionTrainer:
 
     # ------------------ internal helpers ------------------ #
     def _clear_offset(self):
-        for m in self.model.modules():
-            if isinstance(m, DACA):
-                m.last_offset_loss = torch.tensor(0.0, device=self.device)
+        if hasattr(self.model, "last_offset_loss"):
+            self.model.last_offset_loss = torch.tensor(0.0, device=self.device)
 
     # --------------------- epoch / fit --------------------- #
     def train_epoch(self, dataloader, epoch: int, grad_clip: float | None = 1.0):
@@ -405,6 +465,19 @@ class DiffusionTrainer:
             save_dir = Path(save_dir)
             save_dir.mkdir(parents=True, exist_ok=True)
             self.checkpoint_dir = save_dir
+            self.step_log_file = save_dir / "train_step_metrics.jsonl"
+            if self.global_step == 0:
+                self.step_log_file.write_text("", encoding="utf-8")
+                self._write_step_log(
+                    {
+                        "meta": 1,
+                        "diffusion_steps": int(self.diffusion_steps),
+                        "lr_tmax": int(self.lr_tmax),
+                        "log_every_steps": int(self.log_every_steps or 0),
+                        "save_every_steps": int(self.save_every_steps or 0),
+                        "sample_every_steps": int(self.sample_every_steps or 0),
+                    }
+                )
         for epoch in range(1, epochs + 1):
             log = self.train_epoch(dataloader, epoch)
             print(f"\nEpoch {epoch}:", {k: round(v,4) for k,v in log.items()})
@@ -424,6 +497,14 @@ class DiffusionTrainer:
         style = batch["style"].to(self.device)
         part_imgs = batch["parts"].to(self.device) if "parts" in batch else None
         part_mask = batch["part_mask"].to(self.device) if "part_mask" in batch else None
-        sample = self.ddim_sample(content, style, c=steps, part_imgs=part_imgs, part_mask=part_mask)
+        class_ids = batch["char_index"].to(self.device).long() if "char_index" in batch else None
+        sample = self.ddim_sample(
+            content,
+            style,
+            c=steps,
+            part_imgs=part_imgs,
+            part_mask=part_mask,
+            class_ids=class_ids,
+        )
         filename = f"sample_ep{self.current_epoch}_gstep{self.global_step}_estep{self.local_step}.png"
         save_image((sample + 1) / 2, out_dir / filename)

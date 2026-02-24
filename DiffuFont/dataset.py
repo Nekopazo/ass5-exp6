@@ -66,9 +66,12 @@ class FontImageDataset(Dataset):
         decomposition_json: Optional[Union[str, Path]] = None,
         use_part_bank: bool = False,
         part_bank_manifest: Optional[Union[str, Path]] = None,
-        part_set_size: int = 32,
-        part_set_sampling: str = "deterministic",
-        part_target_char_priority: bool = True,
+        part_retrieval_mode: str = "none",
+        part_retrieval_ep_ckpt: Optional[Union[str, Path]] = None,
+        part_set_size: int = 10,
+        part_set_min_size: int = 2,
+        part_set_sampling: str = "random",
+        part_target_char_priority: bool = False,
         part_image_size: int = 64,
         random_seed: int = 42,
         content_lmdb: Optional[Union[str, Path]] = None,
@@ -89,13 +92,26 @@ class FontImageDataset(Dataset):
         self.component_guided_style = bool(component_guided_style)
         self.style_overlap_topk = bool(style_overlap_topk)
         self.use_part_bank = bool(use_part_bank)
+        self.part_retrieval_mode = str(part_retrieval_mode).strip().lower()
+        if self.part_retrieval_mode not in {"none", "font_softmax_top1"}:
+            raise ValueError("part_retrieval_mode must be one of: none, font_softmax_top1")
+        self.part_retrieval_ep_ckpt = part_retrieval_ep_ckpt
         self.part_set_size = max(1, int(part_set_size))
+        self.part_set_min_size = max(1, int(part_set_min_size))
+        if self.part_set_min_size > self.part_set_size:
+            raise ValueError(
+                "part_set_min_size must be <= part_set_size, "
+                f"got min={self.part_set_min_size} max={self.part_set_size}"
+            )
         self.part_set_sampling = str(part_set_sampling).strip().lower()
         if self.part_set_sampling not in {"deterministic", "random"}:
             raise ValueError("part_set_sampling must be either 'deterministic' or 'random'")
         self.part_target_char_priority = bool(part_target_char_priority)
         self.part_image_size = max(8, int(part_image_size))
         self.part_bank_by_font: Dict[str, List[Dict[str, Any]]] = {}
+        self.part_retrieval_model = None
+        self.part_retrieval_class_fonts: List[str] = []
+        self.part_retrieval_candidate_labels = None
         self.char_components: Dict[str, Set[str]] = {}
         if self.component_guided_style:
             if decomposition_json is None:
@@ -182,6 +198,8 @@ class FontImageDataset(Dataset):
                 part_bank_manifest = self.root / "DataPreparation" / "PartBank" / "manifest.json"
             self.part_bank_by_font = self._load_part_bank_manifest(part_bank_manifest)
             self._filter_samples_by_part_bank()
+            if self.part_retrieval_mode == "font_softmax_top1":
+                self._init_part_retrieval_classifier(self.part_retrieval_ep_ckpt)
 
         if not self.samples:
             raise RuntimeError("No valid samples found – please check LMDB integrity and paths.")
@@ -367,6 +385,72 @@ class FontImageDataset(Dataset):
                 f"across {len(removed_fonts)} fonts."
             )
 
+    def _init_part_retrieval_classifier(self, ckpt_path_like: Optional[Union[str, Path]]) -> None:
+        if ckpt_path_like is None:
+            raise ValueError("part_retrieval_ep_ckpt is required when part_retrieval_mode=font_softmax_top1")
+        if "torch" not in globals():
+            raise RuntimeError("font_softmax_top1 retrieval requires torch.")
+
+        path = Path(ckpt_path_like)
+        if not path.is_absolute():
+            path = (self.root / path).resolve()
+        if not path.exists():
+            raise FileNotFoundError(f"E_p classifier checkpoint not found: {path}")
+
+        try:
+            from models.style_encoders import FontClassifier
+        except Exception as e:
+            raise RuntimeError("Failed to import FontClassifier for part retrieval.") from e
+
+        try:
+            obj = torch.load(path, map_location="cpu", weights_only=False)
+        except TypeError:
+            obj = torch.load(path, map_location="cpu")
+        if not isinstance(obj, dict):
+            raise RuntimeError(f"invalid classifier checkpoint: {path}")
+
+        class_fonts = [str(x) for x in obj.get("font_names", [])]
+        if not class_fonts:
+            raise RuntimeError("classifier checkpoint missing 'font_names'")
+        cfg = obj.get("config", {}) if isinstance(obj.get("config", {}), dict) else {}
+        backbone = str(cfg.get("backbone", "resnet18"))
+        state = obj.get("e_p", obj)
+
+        model = FontClassifier(in_channels=3, num_fonts=len(class_fonts), backbone=backbone)
+        model.load_state_dict(state, strict=False)
+        model.eval()
+
+        candidate_labels = [
+            i for i, f in enumerate(class_fonts)
+            if f in self.part_bank_by_font
+        ]
+        if not candidate_labels:
+            raise RuntimeError("No overlap between classifier fonts and PartBank fonts.")
+
+        self.part_retrieval_model = model
+        self.part_retrieval_class_fonts = class_fonts
+        self.part_retrieval_candidate_labels = torch.tensor(candidate_labels, dtype=torch.long)
+
+    def _predict_part_font_from_styles(self, style_imgs: List[Any], fallback_font: str) -> str:
+        if self.part_retrieval_model is None or self.part_retrieval_candidate_labels is None:
+            return fallback_font
+        if not style_imgs:
+            return fallback_font
+        if not all(isinstance(x, torch.Tensor) for x in style_imgs):
+            return fallback_font
+
+        with torch.no_grad():
+            x = torch.stack(style_imgs, dim=0)
+            logits = self.part_retrieval_model(x)
+            probs = torch.softmax(logits, dim=-1).mean(dim=0)
+            cand_probs = probs.index_select(0, self.part_retrieval_candidate_labels)
+            idx_local = int(torch.argmax(cand_probs).item())
+            idx_global = int(self.part_retrieval_candidate_labels[idx_local].item())
+        pred_font = self.part_retrieval_class_fonts[idx_global]
+        if pred_font not in self.part_bank_by_font:
+            return fallback_font if fallback_font in self.part_bank_by_font else pred_font
+        return pred_font
+
     def _load_part_tensor(self, path: Path):
         img = Image.open(path).convert("RGB")
         if self.part_image_size > 0:
@@ -376,12 +460,23 @@ class FontImageDataset(Dataset):
         t = torch.from_numpy(arr).permute(2, 0, 1).contiguous()
         return t
 
-    def _select_part_rows(self, font_name: str, target_char: str) -> List[Dict[str, Any]]:
+    def _select_part_rows(self, font_name: str, target_char: str, retrieved_font: Optional[str] = None) -> List[Dict[str, Any]]:
+        if self.part_retrieval_mode == "font_softmax_top1" and retrieved_font:
+            font_name = retrieved_font
         rows = self.part_bank_by_font.get(font_name, [])
         if not rows:
             return []
 
-        size = min(self.part_set_size, len(rows))
+        size_hi = min(self.part_set_size, len(rows))
+        if size_hi <= 0:
+            return []
+        size_lo = min(self.part_set_min_size, size_hi)
+
+        if self.part_set_sampling == "random":
+            size = self.rng.randint(size_lo, size_hi)
+        else:
+            size = size_hi
+
         same_char: List[Dict[str, Any]] = []
         if self.part_target_char_priority and target_char:
             same_char = [r for r in rows if r.get("char", "") == target_char]
@@ -759,19 +854,31 @@ class FontImageDataset(Dataset):
         sample: Dict[str, Any] = {
             "font": font_name,
             "char": ch,
+            "char_index": int(real_idx),
             "content": self._bytes_to_img(content_bytes),
             "input": self._bytes_to_img(input_bytes),
             "styles": style_imgs,
         }
         if self.use_part_bank:
-            part_rows = self._select_part_rows(font_name, ch)
-            if not part_rows:
+            retrieved_font = None
+            if self.part_retrieval_mode == "font_softmax_top1":
+                retrieved_font = self._predict_part_font_from_styles(style_imgs, fallback_font=font_name)
+            part_rows = self._select_part_rows(font_name, ch, retrieved_font=retrieved_font)
+            part_rows_b = self._select_part_rows(font_name, ch, retrieved_font=retrieved_font)
+            if not part_rows or not part_rows_b:
                 raise KeyError(f"Missing PartBank parts for font: {font_name}")
             part_imgs = [self._load_part_tensor(r["path"]) for r in part_rows]
+            part_imgs_b = [self._load_part_tensor(r["path"]) for r in part_rows_b]
             parts = torch.stack(part_imgs, dim=0)
+            parts_b = torch.stack(part_imgs_b, dim=0)
             part_mask = torch.ones((parts.size(0),), dtype=torch.float32)
+            part_mask_b = torch.ones((parts_b.size(0),), dtype=torch.float32)
             sample["parts"] = parts
             sample["part_mask"] = part_mask
+            sample["parts_b"] = parts_b
+            sample["part_mask_b"] = part_mask_b
+            if retrieved_font:
+                sample["retrieved_part_font"] = retrieved_font
         return sample
 
     def close(self):

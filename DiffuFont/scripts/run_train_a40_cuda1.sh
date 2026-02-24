@@ -9,6 +9,7 @@ LOG_DIR="$PROJECT_ROOT/logs"
 CKPT_DIR="$PROJECT_ROOT/checkpoints/$RUN_NAME"
 LOG_FILE="$CKPT_DIR/train.log"
 LOG_LINK="$LOG_DIR/$RUN_NAME.log"
+EP_CKPT="${EP_CKPT:-checkpoints/e_p_font_encoder_best.pt}"
 
 mkdir -p "$LOG_DIR" "$CKPT_DIR"
 cd "$PROJECT_ROOT"
@@ -19,23 +20,20 @@ CMD=(
   --device cuda:0
   --precision bf16
   --font-mode random
+  --conditioning-profile full
   --batch 48
-  --num-workers 8
+  --num-workers 0
   --epochs 50
-  --part-min-patches-per-style 2
-  --part-max-patches-per-style 10
-  --part-fuse-scales 1,2,3
-  --part-fuse-scale-gains 0.25,1.0,1.0
-  --part-fuse-strength 1.0
-  --part-style-pretrained checkpoints/part_style_encoder_pretrain_256_best.pt
+  --part-set-min-size 2
+  --part-set-size 10
+  --part-retrieval-mode font_softmax_top1
+  --part-retrieval-ep-ckpt "$EP_CKPT"
   --sample-every-steps 300
   --log-every-steps 100
   --detailed-log
   --save-every-steps 5000
   --save-every-epochs 0
   --save-dir "$CKPT_DIR"
-  --use-global-style 
-  --use-part-style
 )
 
 if [[ $# -gt 0 ]]; then

@@ -1,16 +1,0 @@
---2026-02-23 10:31:00--  https://pcsoftcdnms.ddooo.com/pcsf/fzzk172_149.rar?time=1771842629878
-Resolving pcsoftcdnms.ddooo.com (pcsoftcdnms.ddooo.com)... 202.75.140.212, 202.75.147.157, 202.75.147.78
-Connecting to pcsoftcdnms.ddooo.com (pcsoftcdnms.ddooo.com)|202.75.140.212|:443... connected.
-HTTP request sent, awaiting response... 302 Moved Temporarily
-Location: https://api.ddooo.com/location.html [following]
---2026-02-23 10:31:00--  https://api.ddooo.com/location.html
-Resolving api.ddooo.com (api.ddooo.com)... 202.122.145.214, 45.116.82.51
-Connecting to api.ddooo.com (api.ddooo.com)|202.122.145.214|:443... connected.
-HTTP request sent, awaiting response... 200 OK
-Length: 348 [text/html]
-Saving to: ‘fzzk172_149.rar?time=1771842629878’
-
-fzzk172_149.rar?time=17718426   0%[                                                 ]       0  --.-KB/s               fzzk172_149.rar?time=17718426 100%[================================================>]     348  --.-KB/s    in 0s      
-
-2026-02-23 10:31:00 (425 MB/s) - ‘fzzk172_149.rar?time=1771842629878’ saved [348/348]
-

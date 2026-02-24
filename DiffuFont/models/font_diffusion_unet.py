@@ -29,7 +29,7 @@ out = model(
 from __future__ import annotations
 
 import math
-from typing import List, Sequence, Optional
+from typing import Dict, List, Sequence, Optional
 
 import torch
 import torch.nn as nn
@@ -37,6 +37,7 @@ import torch.nn.functional as F
 
 from models.daca import DACA
 from models.fgsa import FGSA
+from models.style_encoders import GlyphStyleEncoder, encode_style_stack
 
 
 # ------------------------- 基础工具 ------------------------- #
@@ -157,6 +158,67 @@ class AttnXGatedFusion(nn.Module):
         style_proj = self.style_proj(style_feat)
         gate = torch.sigmoid(self.gate_mlp(t_emb)).unsqueeze(-1).unsqueeze(-1)  # (B,C,1,1)
         return x + gate * style_proj
+
+
+class GlobalStyleFusion(nn.Module):
+    """Inject global style tokens/vectors by cross-attention + FiLM."""
+
+    def __init__(
+        self,
+        channels: int,
+        style_dim: int,
+        t_embed_dim: int,
+        use_cross_attn: bool = True,
+        use_film: bool = True,
+    ):
+        super().__init__()
+        self.channels = int(channels)
+        self.use_cross_attn = bool(use_cross_attn)
+        self.use_film = bool(use_film)
+
+        if self.use_cross_attn:
+            self.q_proj = nn.Conv2d(self.channels, self.channels, kernel_size=1, bias=True)
+            self.k_proj = nn.Linear(style_dim, self.channels)
+            self.v_proj = nn.Linear(style_dim, self.channels)
+            self.out_proj = nn.Conv2d(self.channels, self.channels, kernel_size=1, bias=True)
+            self.attn_scale = self.channels ** -0.5
+
+        if self.use_film:
+            self.film_norm = nn.GroupNorm(1, self.channels, eps=1e-6, affine=False)
+            self.film_mlp = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(style_dim + t_embed_dim, self.channels * 2),
+            )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        style_tokens: Optional[torch.Tensor],
+        style_global: Optional[torch.Tensor],
+        t_emb: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.use_cross_attn:
+            if style_tokens is None:
+                raise ValueError("style_tokens is required when use_cross_attn=True")
+            b, c, h, w = x.shape
+            q = self.q_proj(x).view(b, c, h * w).transpose(1, 2)          # (B,HW,C)
+            k = self.k_proj(style_tokens)                                  # (B,K,C)
+            v = self.v_proj(style_tokens)                                  # (B,K,C)
+            attn = torch.softmax((q @ k.transpose(1, 2)) * self.attn_scale, dim=-1)  # (B,HW,K)
+            ctx = attn @ v                                                 # (B,HW,C)
+            ctx = ctx.transpose(1, 2).contiguous().view(b, c, h, w)
+            x = x + self.out_proj(ctx)
+
+        if self.use_film:
+            if style_global is None:
+                raise ValueError("style_global is required when use_film=True")
+            cond = torch.cat([style_global, t_emb], dim=-1)
+            params = self.film_mlp(cond).view(x.size(0), 2, self.channels, 1, 1)
+            gamma = torch.tanh(params[:, 0])
+            beta = params[:, 1]
+            x = x + gamma * self.film_norm(x) + beta
+
+        return x
 
 
 class PartStyleEncoder(nn.Module):
@@ -285,16 +347,10 @@ class PartStyleEncoder(nn.Module):
 
     def forward(
         self,
-        style_img: Optional[torch.Tensor] = None,
-        part_imgs: Optional[torch.Tensor] = None,
+        part_imgs: torch.Tensor,
         part_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # Explicit part-set path (paper-aligned) has priority when provided.
-        if part_imgs is not None:
-            return self._forward_from_part_set(part_imgs=part_imgs, part_mask=part_mask)
-        if style_img is None:
-            raise ValueError("Either style_img or part_imgs must be provided to PartStyleEncoder.")
-        return self._forward_from_style_image(style_img)
+        return self._forward_from_part_set(part_imgs=part_imgs, part_mask=part_mask)
 
 
 # ------------------------- 编码器 ------------------------- #
@@ -397,7 +453,19 @@ class FontDiffusionUNet(nn.Module):
         attnx_enabled: bool = False,
         attnx_positions: Sequence[str] | None = None,
         use_global_style: bool = True,
+        use_global_style_vector: bool = False,
+        style_vector_only: bool = False,
+        global_style_dim: int = 256,
+        global_style_positions: Sequence[str] | None = None,
+        global_style_use_cross_attn: bool = True,
+        global_style_use_film: bool = True,
         use_part_style: bool = False,
+        num_classes: int = 4096,
+        class_embed_dim: int = 256,
+        use_part_condition_cross_attn: bool = True,
+        part_condition_positions: Sequence[str] | None = None,
+        part_condition_use_cross_attn: bool = True,
+        part_condition_use_film: bool = False,
         part_patch_size: int = 32,
         part_patch_stride: int = 16,
         part_min_patches_per_style: int = 1,
@@ -413,8 +481,24 @@ class FontDiffusionUNet(nn.Module):
         self.style_k = style_k
         self.num_layers = num_layers
         self.use_global_style = bool(use_global_style)
+        self.use_global_style_vector = bool(use_global_style_vector)
+        self.style_vector_only = bool(style_vector_only)
+        self.global_style_dim = int(global_style_dim)
+        self.global_style_use_cross_attn = bool(global_style_use_cross_attn)
+        self.global_style_use_film = bool(global_style_use_film)
         self.use_part_style = use_part_style
+        self.num_classes = int(max(2, num_classes))
+        self.class_embed_dim = int(class_embed_dim)
+        self.use_part_condition_cross_attn = bool(use_part_condition_cross_attn)
+        self.part_condition_use_cross_attn = bool(part_condition_use_cross_attn)
+        self.part_condition_use_film = bool(part_condition_use_film)
         self.part_fuse_strength = float(part_fuse_strength)
+        if global_style_positions is None:
+            global_style_positions = ("bottleneck", "decoder_32", "decoder_64")
+        self.global_style_positions = set(global_style_positions)
+        if part_condition_positions is None:
+            part_condition_positions = ("bottleneck", "decoder_32", "decoder_64")
+        self.part_condition_positions = set(part_condition_positions)
 
         if part_fuse_scales is None:
             # low-resolution style fusion is usually the most stable for Chinese glyphs
@@ -475,6 +559,11 @@ class FontDiffusionUNet(nn.Module):
         # Encoders for content and style (style 输入通道 = in_channels * style_k)
         self.content_encoder = Encoder(in_channels, base_channels, num_layers)
         self.style_encoder = Encoder(in_channels * style_k, base_channels, num_layers) if self.use_global_style else None
+        self.global_style_encoder = (
+            GlyphStyleEncoder(in_channels=in_channels, embedding_dim=self.global_style_dim)
+            if self.use_global_style_vector
+            else None
+        )
         if self.use_part_style:
             self.part_style_encoder = PartStyleEncoder(
                 in_channels=in_channels,
@@ -484,6 +573,8 @@ class FontDiffusionUNet(nn.Module):
                 min_patches_per_style=part_min_patches_per_style,
                 max_patches_per_style=part_max_patches_per_style,
             )
+            self.class_embed = nn.Embedding(self.num_classes, self.class_embed_dim)
+            self.part_to_class_cond = nn.Linear(part_style_dim, self.class_embed_dim)
 
         # U-Net Down & Up
         down_blocks = []
@@ -539,6 +630,60 @@ class FontDiffusionUNet(nn.Module):
             in_ch = out_ch
         self.up_blocks = nn.ModuleList(up_blocks)
 
+        self.global_style_fusions = nn.ModuleDict()
+        if self.use_global_style_vector:
+            if "bottleneck" in self.global_style_positions:
+                self.global_style_fusions["bottleneck"] = GlobalStyleFusion(
+                    channels=ch,
+                    style_dim=self.global_style_dim,
+                    t_embed_dim=time_embed_dim,
+                    use_cross_attn=self.global_style_use_cross_attn,
+                    use_film=self.global_style_use_film,
+                )
+            if len(rev_channels) >= 1 and "decoder_32" in self.global_style_positions:
+                self.global_style_fusions["decoder_32"] = GlobalStyleFusion(
+                    channels=rev_channels[0],
+                    style_dim=self.global_style_dim,
+                    t_embed_dim=time_embed_dim,
+                    use_cross_attn=self.global_style_use_cross_attn,
+                    use_film=self.global_style_use_film,
+                )
+            if len(rev_channels) >= 2 and "decoder_64" in self.global_style_positions:
+                self.global_style_fusions["decoder_64"] = GlobalStyleFusion(
+                    channels=rev_channels[1],
+                    style_dim=self.global_style_dim,
+                    t_embed_dim=time_embed_dim,
+                    use_cross_attn=self.global_style_use_cross_attn,
+                    use_film=self.global_style_use_film,
+                )
+
+        self.part_condition_fusions = nn.ModuleDict()
+        if self.use_part_style and self.use_part_condition_cross_attn:
+            if "bottleneck" in self.part_condition_positions:
+                self.part_condition_fusions["bottleneck"] = GlobalStyleFusion(
+                    channels=ch,
+                    style_dim=self.class_embed_dim,
+                    t_embed_dim=time_embed_dim,
+                    use_cross_attn=self.part_condition_use_cross_attn,
+                    use_film=self.part_condition_use_film,
+                )
+            if len(rev_channels) >= 1 and "decoder_32" in self.part_condition_positions:
+                self.part_condition_fusions["decoder_32"] = GlobalStyleFusion(
+                    channels=rev_channels[0],
+                    style_dim=self.class_embed_dim,
+                    t_embed_dim=time_embed_dim,
+                    use_cross_attn=self.part_condition_use_cross_attn,
+                    use_film=self.part_condition_use_film,
+                )
+            if len(rev_channels) >= 2 and "decoder_64" in self.part_condition_positions:
+                self.part_condition_fusions["decoder_64"] = GlobalStyleFusion(
+                    channels=rev_channels[1],
+                    style_dim=self.class_embed_dim,
+                    t_embed_dim=time_embed_dim,
+                    use_cross_attn=self.part_condition_use_cross_attn,
+                    use_film=self.part_condition_use_film,
+                )
+
         # final output conv
         self.out_conv = nn.Conv2d(in_ch, in_channels, kernel_size=3, padding=1)
 
@@ -574,6 +719,31 @@ class FontDiffusionUNet(nn.Module):
         self.part_style_encoder.part_cnn.load_state_dict(cnn_state, strict=strict)
         self.part_style_encoder.part_fc.load_state_dict(fc_state, strict=strict)
 
+    def load_global_style_pretrained(self, ckpt_path: str, strict: bool = True) -> None:
+        if not self.use_global_style_vector:
+            raise RuntimeError("use_global_style_vector=False, cannot load global-style encoder weights")
+        if self.global_style_encoder is None:
+            raise RuntimeError("global_style_encoder is not initialized")
+
+        try:
+            obj = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        except TypeError:
+            obj = torch.load(ckpt_path, map_location="cpu")
+        state = obj if isinstance(obj, dict) else {}
+        if isinstance(state, dict) and "e_s" in state:
+            state = state["e_s"]
+        if isinstance(state, dict) and "global_style_encoder" in state:
+            state = state["global_style_encoder"]
+        if not isinstance(state, dict):
+            raise RuntimeError(f"Unsupported checkpoint format for global style encoder: {type(state)}")
+
+        # accept either plain backbone keys or prefixed model keys
+        pref = "global_style_encoder."
+        if any(k.startswith(pref) for k in state.keys()):
+            state = {k[len(pref):]: v for k, v in state.items() if k.startswith(pref)}
+
+        self.global_style_encoder.load_state_dict(state, strict=strict)
+
     # -------------------- forward -------------------- #
 
     def _time_embedding(self, t: torch.Tensor) -> torch.Tensor:
@@ -588,8 +758,8 @@ class FontDiffusionUNet(nn.Module):
         style_img: Optional[torch.Tensor],
         part_imgs: Optional[torch.Tensor] = None,
         part_mask: Optional[torch.Tensor] = None,
-        return_part: bool = False,
-    ) -> tuple[List[torch.Tensor], List[torch.Tensor]] | tuple[List[torch.Tensor], List[torch.Tensor], torch.Tensor | None]:
+        class_ids: Optional[torch.Tensor] = None,
+    ) -> Dict[str, Optional[torch.Tensor] | List[torch.Tensor]]:
         content_feats = self.content_encoder(content_img)
         if self.use_global_style:
             if style_img is None:
@@ -599,18 +769,46 @@ class FontDiffusionUNet(nn.Module):
             style_feats = self.style_encoder(style_img)
         else:
             style_feats = [torch.zeros_like(feat) for feat in content_feats]
-        part_style_vec: torch.Tensor | None = None
-        if self.use_part_style:
-            if part_imgs is None and style_img is None:
-                raise ValueError("Either part_imgs or style_img is required when use_part_style=True")
-            part_style_vec = self.part_style_encoder(
+
+        style_tokens: torch.Tensor | None = None
+        style_global: torch.Tensor | None = None
+        if self.use_global_style_vector:
+            if style_img is None:
+                raise ValueError("style_img is required when use_global_style_vector=True")
+            if self.global_style_encoder is None:
+                raise RuntimeError("global_style_encoder is not initialized while use_global_style_vector=True")
+            style_tokens, style_global = encode_style_stack(
+                self.global_style_encoder,
                 style_img=style_img,
-                part_imgs=part_imgs,
-                part_mask=part_mask,
+                in_channels=self.in_channels,
             )
-        if return_part:
-            return content_feats, style_feats, part_style_vec
-        return content_feats, style_feats
+
+        if self.style_vector_only:
+            style_feats = [torch.zeros_like(feat) for feat in content_feats]
+
+        part_style_vec: torch.Tensor | None = None
+        part_condition_tokens: torch.Tensor | None = None
+        if self.use_part_style:
+            if part_imgs is None:
+                raise ValueError("part_imgs is required when use_part_style=True")
+            part_style_vec = self.part_style_encoder(part_imgs=part_imgs, part_mask=part_mask)
+            if self.use_part_condition_cross_attn:
+                if class_ids is None:
+                    raise ValueError("class_ids is required when use_part_condition_cross_attn=True")
+                if class_ids.dim() != 1:
+                    raise ValueError(f"class_ids must be 1D tensor (B,), got {tuple(class_ids.shape)}")
+                class_tok = self.class_embed(class_ids.clamp(0, self.num_classes - 1))
+                part_tok = self.part_to_class_cond(part_style_vec)
+                part_condition_tokens = torch.stack([class_tok, part_tok], dim=1)  # (B,2,D)
+
+        return {
+            "content_feats": content_feats,
+            "style_feats": style_feats,
+            "part_style_vec": part_style_vec,
+            "style_tokens": style_tokens,
+            "style_global": style_global,
+            "part_condition_tokens": part_condition_tokens,
+        }
 
     def _fuse_part_style_feats(
         self,
@@ -632,6 +830,43 @@ class FontDiffusionUNet(nn.Module):
             fused.append(feat + self.part_fuse_strength * scale_gain * gate * part_bias)
         return fused
 
+    def _apply_global_style_fusion(
+        self,
+        key: str,
+        x: torch.Tensor,
+        style_tokens: torch.Tensor | None,
+        style_global: torch.Tensor | None,
+        t_emb: torch.Tensor,
+    ) -> torch.Tensor:
+        if not self.use_global_style_vector:
+            return x
+        if key not in self.global_style_fusions:
+            return x
+        if style_tokens is None or style_global is None:
+            return x
+        return self.global_style_fusions[key](x, style_tokens=style_tokens, style_global=style_global, t_emb=t_emb)
+
+    def _apply_part_condition_fusion(
+        self,
+        key: str,
+        x: torch.Tensor,
+        part_condition_tokens: torch.Tensor | None,
+        t_emb: torch.Tensor,
+    ) -> torch.Tensor:
+        if not self.use_part_style or not self.use_part_condition_cross_attn:
+            return x
+        if key not in self.part_condition_fusions:
+            return x
+        if part_condition_tokens is None:
+            return x
+        part_global = part_condition_tokens.mean(dim=1)
+        return self.part_condition_fusions[key](
+            x,
+            style_tokens=part_condition_tokens,
+            style_global=part_global,
+            t_emb=t_emb,
+        )
+
     def forward_with_feats(
         self,
         x_t: torch.Tensor,
@@ -639,6 +874,9 @@ class FontDiffusionUNet(nn.Module):
         content_feats: Sequence[torch.Tensor],
         style_feats: Sequence[torch.Tensor],
         part_style_vec: torch.Tensor | None = None,
+        style_tokens: torch.Tensor | None = None,
+        style_global: torch.Tensor | None = None,
+        part_condition_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if len(content_feats) < self.num_layers:
             raise ValueError(f"content_feats length must be >= {self.num_layers}, got {len(content_feats)}")
@@ -663,12 +901,53 @@ class FontDiffusionUNet(nn.Module):
         h = self.decoder_resblock(h, style_feat_bottom, t_emb)
         if self.use_attnx_bottleneck:
             h = self.attnx_bottleneck(h, style_feat_bottom, t_emb)
+        h = self._apply_global_style_fusion(
+            key="bottleneck",
+            x=h,
+            style_tokens=style_tokens,
+            style_global=style_global,
+            t_emb=t_emb,
+        )
+        h = self._apply_part_condition_fusion(
+            key="bottleneck",
+            x=h,
+            part_condition_tokens=part_condition_tokens,
+            t_emb=t_emb,
+        )
 
         # decoder path (含 FGSA)
         for i, up in enumerate(self.up_blocks):
             skip = skips[-(i + 1)]
             style_feat = fused_style_feats[-(i + 1)]
             h = up(h, skip, style_feat, t_emb)
+            if i == 0:
+                h = self._apply_global_style_fusion(
+                    key="decoder_32",
+                    x=h,
+                    style_tokens=style_tokens,
+                    style_global=style_global,
+                    t_emb=t_emb,
+                )
+                h = self._apply_part_condition_fusion(
+                    key="decoder_32",
+                    x=h,
+                    part_condition_tokens=part_condition_tokens,
+                    t_emb=t_emb,
+                )
+            elif i == 1:
+                h = self._apply_global_style_fusion(
+                    key="decoder_64",
+                    x=h,
+                    style_tokens=style_tokens,
+                    style_global=style_global,
+                    t_emb=t_emb,
+                )
+                h = self._apply_part_condition_fusion(
+                    key="decoder_64",
+                    x=h,
+                    part_condition_tokens=part_condition_tokens,
+                    t_emb=t_emb,
+                )
         # output
         return self.out_conv(h)
 
@@ -680,16 +959,26 @@ class FontDiffusionUNet(nn.Module):
         style_img: Optional[torch.Tensor],
         part_imgs: Optional[torch.Tensor] = None,
         part_mask: Optional[torch.Tensor] = None,
+        class_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """推断一个时间步的 \hat{x}_0。"""
-        content_feats, style_feats, part_style_vec = self.encode_conditions(
+        cond = self.encode_conditions(
             content_img,
             style_img,
             part_imgs=part_imgs,
             part_mask=part_mask,
-            return_part=True,
+            class_ids=class_ids,
         )
-        return self.forward_with_feats(x_t, t, content_feats, style_feats, part_style_vec=part_style_vec)
+        return self.forward_with_feats(
+            x_t,
+            t,
+            cond["content_feats"],  # type: ignore[arg-type]
+            cond["style_feats"],    # type: ignore[arg-type]
+            part_style_vec=cond["part_style_vec"],          # type: ignore[arg-type]
+            style_tokens=cond["style_tokens"],              # type: ignore[arg-type]
+            style_global=cond["style_global"],              # type: ignore[arg-type]
+            part_condition_tokens=cond["part_condition_tokens"],  # type: ignore[arg-type]
+        )
 
 
 # ------------------------- quick sanity test ------------------------- #
@@ -709,6 +998,24 @@ if __name__ == "__main__":
     t = torch.randint(0, 1000, (B,))
     content = torch.randn(B, C, H, W)
     style = torch.randn(B, C*K, H, W)  # 3 张风格图像拼通道
-    content_feats, style_feats, part_style_vec = net.encode_conditions(content, style, return_part=True)
-    out = net.forward_with_feats(x_t, t, content_feats, style_feats, part_style_vec=part_style_vec)
+    part_imgs = torch.randn(B, 4, C, 64, 64)
+    part_mask = torch.ones(B, 4)
+    class_ids = torch.randint(0, 2000, (B,))
+    cond = net.encode_conditions(
+        content,
+        style,
+        part_imgs=part_imgs,
+        part_mask=part_mask,
+        class_ids=class_ids,
+    )
+    out = net.forward_with_feats(
+        x_t,
+        t,
+        cond["content_feats"],  # type: ignore[arg-type]
+        cond["style_feats"],    # type: ignore[arg-type]
+        part_style_vec=cond["part_style_vec"],          # type: ignore[arg-type]
+        style_tokens=cond["style_tokens"],              # type: ignore[arg-type]
+        style_global=cond["style_global"],              # type: ignore[arg-type]
+        part_condition_tokens=cond["part_condition_tokens"],  # type: ignore[arg-type]
+    )
     print("Output:", out.shape)  # Expected (B, C, H, W)

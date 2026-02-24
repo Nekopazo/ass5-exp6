@@ -1,57 +1,75 @@
-# FontDiffusionUNet 结构图（支持全局/部件开关）
+# Source-Aligned Architecture (Latest)
 
-## 开关说明
-- `--use-global-style`:
-  - 开：`style_img -> style_encoder -> style_feats`
-  - 关：`style_feats` 用全零特征占位
-- `--use-part-style`:
-  - 开：`part_imgs(+part_mask)` 或 `style_img` 输入 `PartStyleEncoder`，得到 `part_style_vec` 并融合到 `style_feats`
-  - 关：跳过部件分支
+Current training path:
 
-## 整体结构
-```mermaid
-flowchart TD
-    XT[x_t noisy glyph] --> DOWN
-    T[timestep t] --> SIN[Sinusoidal Embedding]
-    SIN --> TMLP[Time MLP -> t_emb]
+`train.py -> FontImageDataset -> SourcePartRefUNet -> source_fontdiffuser.UNet -> DiffusionTrainer`
 
-    CIMG[content_img] --> CENC[Content Encoder]
-    CENC --> CFEATS[content_feats multi-scale]
+## Conditioning Profiles
 
-    SIMG[style_img] --> GSW{use_global_style?}
-    GSW -->|ON| SENC[Style Encoder]
-    GSW -->|OFF| SZERO[Zero style feats]
-    SENC --> SRAW[style_feats raw]
-    SZERO --> SRAW
+Use `--conditioning-profile` in `train.py`:
 
-    PIMG[part_imgs] --> PSW{use_part_style?}
-    PMASK[part_mask] --> PSW
-    SIMG --> PSW
-    PSW -->|ON| PENC[PartStyleEncoder]
-    PENC --> PVEC[part_style_vec]
-    PSW -->|OFF| PNONE[None]
+- `baseline`:
+  - token conditioning: OFF
+  - RSI conditioning: OFF
+  - behavior: only content/source path is used
+- `token_only`:
+  - token conditioning: ON
+  - RSI conditioning: OFF
+- `rsi_only`:
+  - token conditioning: OFF
+  - RSI conditioning: ON
+- `full` (default):
+  - token conditioning: ON
+  - RSI conditioning: ON
 
-    SRAW --> PFUSE[Part Fusion\npart_to_style + part_gate(t_emb)\nselected scales]
-    PVEC --> PFUSE
-    TMLP --> PFUSE
-    PNONE --> PFUSE
-    PFUSE --> SFEATS[style_feats fused]
+## Style Path Update
 
-    subgraph UNet["Diffusion U-Net Backbone"]
-        DOWN[Down Blocks + DACA + AdaLN]
-        DOWN --> BTM[Bottom ResBlock]
-        BTM --> DRES[DecoderResBlock + FGSA (+AttnX optional)]
-        DRES --> UP[Up Blocks + FGSA (+AttnX optional) + AdaLN]
-        UP --> OUT[Out Conv]
-    end
+The old style-image encoder branch (`E_s(x_s)`) has been removed from the runtime conditioning path.
 
-    CFEATS --> DOWN
-    TMLP --> DOWN
-    SFEATS --> DRES
-    SFEATS --> UP
-    OUT --> X0[x0_hat]
-```
+Style conditioning is now built from PartBank part sets:
 
-## 训练与推理共用流程
-- 训练：`train_step -> model.forward -> encode_conditions -> forward_with_feats`
-- 推理：`ddim_sample` 先调用一次 `encode_conditions`，然后每个 DDIM 步复用条件特征跑 `forward_with_feats`
+1. `parts -> patch encoder -> per-part embeddings Z`
+2. `learnable queries Q + cross-attention(Q, Z, Z) -> fixed M style tokens T`
+3. `T` is injected as cross-attention context in MCA/mid/down/up style attention points when token conditioning is enabled.
+
+## RSI Path
+
+RSI still uses style-structure features derived from aggregated part proxy inputs.
+When `rsi_only` or `full` is enabled:
+
+- `parts (+mask)` are aggregated into a proxy image
+- proxy image passes through `ContentEncoder`
+- resulting style-structure features are used by up-block offset/deform logic
+
+When RSI is disabled, up-blocks skip offset/deform and continue with standard skip concat.
+
+## Losses
+
+Main training loss in `DiffusionTrainer`:
+
+- `loss_mse`: reconstruction MSE
+- `loss_off`: RSI offset regularization from source path
+- `loss_cp`: perceptual loss (VGG19)
+- `loss_cons` (optional): token consistency loss between two part subsets from same font
+
+Total:
+
+`L = lambda_mse * loss_mse + lambda_off * loss_off + lambda_cp * loss_cp + lambda_cons * loss_cons`
+
+`lambda_cons` is automatically forced to `0` when token conditioning is disabled.
+
+## Logging / Saving Defaults
+
+Current defaults:
+
+- sample grid every `300` global steps
+- detailed step log every `100` global steps (console + JSONL)
+- checkpoint every `5000` global steps
+- no epoch-based checkpoint by default
+
+Files under `--save-dir`:
+
+- `train_run_config.json`: full startup hyperparameter/config dump
+- `train_step_metrics.jsonl`: step-level metrics log
+- `ckpt_step_*.pt`: step checkpoints
+- `samples/sample_ep*_gstep*_estep*.png`: sampling grids
