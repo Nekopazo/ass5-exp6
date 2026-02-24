@@ -26,7 +26,6 @@ CMD=(
   --epochs 50
   --part-set-min-size 2
   --part-set-size 10
-  --part-retrieval-mode font_softmax_top1
   --part-retrieval-ep-ckpt "$EP_CKPT"
   --sample-every-steps 300
   --log-every-steps 100

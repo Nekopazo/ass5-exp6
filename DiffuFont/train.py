@@ -5,33 +5,36 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict
+
+# Work around hosts with broken NVML by avoiding the native caching allocator path.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
 
 import torch
 from torch.utils.data import DataLoader
 from torchvision import transforms as T
 
 from dataset import FontImageDataset
-from models.model import DiffusionTrainer
+from models.model import DiffusionTrainer, FlowMatchingTrainer
 from models.source_part_ref_unet import SourcePartRefUNet
 
 
-def collate_fn(samples, style_k: int) -> Dict[str, torch.Tensor]:
+def collate_fn(samples) -> Dict[str, torch.Tensor]:
     contents, styles, targets = [], [], []
-    char_indices = []
     parts_list, part_masks = [], []
     parts_list_b, part_masks_b = [], []
 
     for s in samples:
         contents.append(s["content"])
         targets.append(s["input"])
-        char_indices.append(int(s.get("char_index", 0)))
 
-        style_imgs = s["styles"][:style_k]
-        if len(style_imgs) < style_k:
-            style_imgs = (style_imgs * style_k)[:style_k]
-        styles.append(torch.cat(style_imgs, dim=0))
+        style_imgs = s["styles"]
+        if not style_imgs:
+            raise ValueError("Dataset returned empty style image list for one sample.")
+        # Single-reference style path: keep exactly one style image per sample.
+        styles.append(style_imgs[0])
 
         if "parts" in s:
             parts_list.append(s["parts"])
@@ -44,7 +47,6 @@ def collate_fn(samples, style_k: int) -> Dict[str, torch.Tensor]:
         "content": torch.stack(contents),
         "style": torch.stack(styles),
         "target": torch.stack(targets),
-        "char_index": torch.tensor(char_indices, dtype=torch.long),
     }
 
     def _pad_parts(plist, mlist):
@@ -77,16 +79,23 @@ def collate_fn(samples, style_k: int) -> Dict[str, torch.Tensor]:
 
 
 def resolve_device(device_arg: str) -> torch.device:
+    def _probe_cuda(candidate: str) -> tuple[bool, str | None]:
+        try:
+            dev = torch.device(candidate)
+            _ = torch.empty((1,), device=dev)
+            return True, None
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+
     if device_arg == "auto":
-        return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        ok, _ = _probe_cuda("cuda:0")
+        return torch.device("cuda:0" if ok else "cpu")
 
     req = torch.device(device_arg)
     if req.type == "cuda":
-        if not torch.cuda.is_available():
-            print("[train] CUDA unavailable, fallback to CPU")
-            return torch.device("cpu")
-        if req.index is not None and req.index >= torch.cuda.device_count():
-            raise ValueError(f"Invalid --device {device_arg}, cuda count={torch.cuda.device_count()}")
+        ok, err = _probe_cuda(str(req))
+        if not ok:
+            raise ValueError(f"CUDA device requested but probe failed for {req}: {err}")
     return req
 
 
@@ -103,12 +112,20 @@ def main() -> None:
     parser.add_argument("--data-root", type=Path, default=Path("."))
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch", type=int, default=64)
+    parser.add_argument("--image-size", type=int, default=256)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--prefetch-factor", type=int, default=0)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--precision", type=str, default="fp32", choices=["fp32", "bf16", "fp16"])
 
     parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--trainer", type=str, default="diffusion", choices=["diffusion", "flow_matching"])
     parser.add_argument("--lambda-cons", type=float, default=0.05)
+    parser.add_argument("--lambda-fm", type=float, default=1.0)
+    parser.add_argument("--lambda-diff", type=float, default=1.0)
+    parser.add_argument("--lambda-off", type=float, default=0.5)
+    parser.add_argument("--lambda-cp", type=float, default=0.01)
+    parser.add_argument("--cfg-drop-prob", type=float, default=0.1)
     parser.add_argument("--diffusion-steps", type=int, default=1000)
     parser.add_argument(
         "--lr-tmax-steps",
@@ -116,7 +133,6 @@ def main() -> None:
         default=0,
         help="CosineAnnealingLR T_max in optimizer steps. <=0 means epochs*steps_per_epoch.",
     )
-    parser.add_argument("--style-k", type=int, default=3)
 
     parser.add_argument("--font-index", type=int, default=0)
     parser.add_argument("--font-name", type=str, default=None)
@@ -124,41 +140,41 @@ def main() -> None:
     parser.add_argument("--max-fonts", type=int, default=0)
     parser.add_argument("--auto-select-font", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--include-target-in-style", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--component-guided-style", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--style-overlap-topk", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--decomposition-json", type=str, default="CharacterData/decomposition.json")
 
     parser.add_argument(
         "--conditioning-profile",
         type=str,
         default="full",
-        choices=["baseline", "token_only", "rsi_only", "full"],
-        help="baseline=no token/no RSI; token_only=token on RSI off; rsi_only=RSI on token off; full=both on.",
+        choices=["baseline", "parts_vector_only", "rsi_only", "full"],
+        help="baseline=no parts_vector/no RSI; parts_vector_only=parts_vector on RSI off; rsi_only=RSI on parts_vector off; full=both on.",
     )
 
     parser.add_argument("--part-bank-manifest", type=str, default="DataPreparation/PartBank/manifest.json")
-    parser.add_argument(
-        "--part-retrieval-mode",
-        type=str,
-        default="font_softmax_top1",
-        choices=["none", "font_softmax_top1"],
-    )
+    parser.add_argument("--part-bank-lmdb", type=str, default="DataPreparation/LMDB/PartBank.lmdb")
     parser.add_argument("--part-retrieval-ep-ckpt", type=str, default=None)
-    parser.add_argument("--part-set-size", type=int, default=10)
-    parser.add_argument("--part-set-min-size", type=int, default=2)
+    parser.add_argument("--part-set-size", type=int, default=9)
+    parser.add_argument("--part-set-min-size", type=int, default=1)
     parser.add_argument("--part-set-sampling", type=str, default="random", choices=["deterministic", "random"])
     parser.add_argument("--part-target-char-priority", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--part-image-size", type=int, default=64)
+    parser.add_argument("--part-image-cache-size", type=int, default=4096)
+    parser.add_argument("--lmdb-decode-cache-size", type=int, default=1024)
+    parser.add_argument("--use-style-plan-cache", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--style-prefetch-limit", type=int, default=1024)
 
     parser.add_argument("--sample-every-steps", type=int, default=300)
+    parser.add_argument("--sample-solver", type=str, default="dpm", choices=["dpm", "ddim"])
+    parser.add_argument("--sample-guidance-scale", type=float, default=7.5)
+    parser.add_argument("--sample-use-cfg", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--sample-inference-steps", type=int, default=20)
     parser.add_argument("--log-every-steps", type=int, default=100)
     parser.add_argument("--detailed-log", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--overlap-report-samples", type=int, default=0)
-    parser.add_argument("--overlap-report-seed", type=int, default=42)
-    parser.add_argument("--overlap-report-json", type=str, default=None)
     parser.add_argument("--save-every-epochs", type=int, default=0)
     parser.add_argument("--save-every-steps", type=int, default=5000)
     parser.add_argument("--save-dir", type=str, default="checkpoints")
+    parser.add_argument("--split-save-components", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--save-frozen-retrieval-copy", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--part-vector-pretrain-ckpt", type=str, default=None)
     parser.add_argument("--resume", type=str, default=None)
     args = parser.parse_args()
 
@@ -166,26 +182,35 @@ def main() -> None:
         raise ValueError(
             f"--part-set-min-size ({args.part_set_min_size}) must be <= --part-set-size ({args.part_set_size})"
         )
-
     profile = str(args.conditioning_profile).strip().lower()
-    enable_token = profile in {"token_only", "full"}
+    enable_parts_vector = profile in {"parts_vector_only", "full"}
     enable_rsi = profile in {"rsi_only", "full"}
-    use_part_style = enable_token or enable_rsi
-    if use_part_style and args.part_retrieval_mode == "none":
-        args.part_retrieval_mode = "font_softmax_top1"
-    if not use_part_style:
-        args.part_retrieval_mode = "none"
-    if not enable_token:
-        args.lambda_cons = 0.0
+    use_part_bank = bool(enable_parts_vector)
+    if not enable_parts_vector and args.lambda_cons > 0.0:
+        raise ValueError("lambda_cons > 0 requires part-vector conditioning (parts_vector_only/full).")
+    if not enable_parts_vector and args.part_vector_pretrain_ckpt:
+        raise ValueError("part_vector_pretrain_ckpt is only valid when part-vector conditioning is enabled.")
+    if args.sample_solver == "ddim" and args.sample_use_cfg:
+        raise ValueError("sample_use_cfg is unsupported with sample_solver=ddim. Use dpm for CFG sampling.")
+    if args.trainer == "flow_matching" and args.sample_solver != "dpm":
+        raise ValueError("flow_matching trainer supports only sample_solver=dpm.")
 
-    if use_part_style and args.part_retrieval_mode == "font_softmax_top1":
+    resolved_ep_ckpt: Path | None = None
+    resolved_part_vector_ckpt: Path | None = None
+    if use_part_bank:
         if not args.part_retrieval_ep_ckpt:
-            raise ValueError("--part-retrieval-ep-ckpt is required for part_retrieval_mode=font_softmax_top1")
-        ep_ckpt = Path(args.part_retrieval_ep_ckpt)
-        if not ep_ckpt.is_absolute():
-            ep_ckpt = (args.data_root / ep_ckpt).resolve()
-        if not ep_ckpt.exists():
-            raise FileNotFoundError(f"E_p checkpoint not found: {ep_ckpt}")
+            raise ValueError("--part-retrieval-ep-ckpt is required when parts_vector conditioning is enabled.")
+        resolved_ep_ckpt = Path(args.part_retrieval_ep_ckpt)
+        if not resolved_ep_ckpt.is_absolute():
+            resolved_ep_ckpt = (args.data_root / resolved_ep_ckpt).resolve()
+        if not resolved_ep_ckpt.exists():
+            raise FileNotFoundError(f"E_p checkpoint not found: {resolved_ep_ckpt}")
+    if args.part_vector_pretrain_ckpt:
+        resolved_part_vector_ckpt = Path(args.part_vector_pretrain_ckpt)
+        if not resolved_part_vector_ckpt.is_absolute():
+            resolved_part_vector_ckpt = (args.data_root / resolved_part_vector_ckpt).resolve()
+        if not resolved_part_vector_ckpt.exists():
+            raise FileNotFoundError(f"Part vector pretrain checkpoint not found: {resolved_part_vector_ckpt}")
 
     device = resolve_device(args.device)
     print(f"[train] device={device} precision={args.precision}")
@@ -193,19 +218,12 @@ def main() -> None:
     run_cfg: Dict[str, Any] = {k: _to_jsonable(v) for k, v in vars(args).items()}
     run_cfg.update(
         {
-            "resolved_device": str(device),
-            "enable_token_condition": bool(enable_token),
+            "enable_parts_vector_condition": bool(enable_parts_vector),
             "enable_rsi_condition": bool(enable_rsi),
-            "use_part_style": bool(use_part_style),
-            "torch_version": str(torch.__version__),
-            "cuda_available": bool(torch.cuda.is_available()),
-            "cuda_device_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
+            "use_part_bank": bool(use_part_bank),
         }
     )
-    print("[train-config] " + json.dumps(run_cfg, ensure_ascii=False, sort_keys=True), flush=True)
-
     transform = T.Compose([
-        T.Resize((256, 256), interpolation=T.InterpolationMode.BICUBIC),
         T.ToTensor(),
         T.Normalize(0.5, 0.5),
     ])
@@ -217,53 +235,35 @@ def main() -> None:
         font_mode=args.font_mode,
         max_fonts=args.max_fonts,
         auto_select_font=args.auto_select_font,
-        num_style_refs=args.style_k,
+        num_style_refs=1,
         include_target_in_style=args.include_target_in_style,
-        component_guided_style=args.component_guided_style,
-        style_overlap_topk=args.style_overlap_topk,
-        decomposition_json=args.decomposition_json,
-        use_part_bank=bool(use_part_style),
+        use_part_bank=bool(use_part_bank),
         part_bank_manifest=args.part_bank_manifest,
-        part_retrieval_mode=args.part_retrieval_mode,
+        part_bank_lmdb=args.part_bank_lmdb,
         part_retrieval_ep_ckpt=args.part_retrieval_ep_ckpt,
         part_set_size=args.part_set_size,
         part_set_min_size=args.part_set_min_size,
         part_set_sampling=args.part_set_sampling,
         part_target_char_priority=args.part_target_char_priority,
         part_image_size=args.part_image_size,
+        part_image_cache_size=args.part_image_cache_size,
+        lmdb_decode_cache_size=args.lmdb_decode_cache_size,
+        use_style_plan_cache=args.use_style_plan_cache,
+        style_prefetch_limit=args.style_prefetch_limit,
         transform=transform,
     )
 
-    if args.overlap_report_samples > 0:
-        report = dataset.component_overlap_stats(
-            num_samples=args.overlap_report_samples,
-            random_seed=args.overlap_report_seed,
-            top_char_k=20,
-            top_pair_k=50,
-        )
-        print(
-            "[component-overlap] "
-            f"positive_rate={report.get('positive_rate', 0.0):.4f} "
-            f"mean={report.get('mean_overlap', 0.0):.4f} "
-            f"p90={report.get('p90_overlap', 0.0):.4f} "
-            f"pairs={report.get('total_pairs', 0)}"
-        )
-        if args.overlap_report_json:
-            out_path = Path(args.overlap_report_json)
-            if not out_path.is_absolute():
-                out_path = args.data_root / out_path
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-            print(f"[component-overlap] saved report json: {out_path}")
-
-    loader = DataLoader(
-        dataset,
-        batch_size=args.batch,
-        shuffle=True,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        collate_fn=lambda x: collate_fn(x, args.style_k),
-    )
+    loader_kwargs: Dict[str, Any] = {
+        "dataset": dataset,
+        "batch_size": args.batch,
+        "shuffle": True,
+        "num_workers": int(args.num_workers),
+        "pin_memory": True,
+        "collate_fn": collate_fn,
+    }
+    if int(args.num_workers) > 0 and int(args.prefetch_factor) > 0:
+        loader_kwargs["prefetch_factor"] = int(args.prefetch_factor)
+    loader = DataLoader(**loader_kwargs)
     steps_per_epoch = len(loader)
     total_train_steps = steps_per_epoch * args.epochs
     if total_train_steps <= 0:
@@ -273,14 +273,13 @@ def main() -> None:
     print(
         "[train] "
         f"conditioning_profile={args.conditioning_profile} "
-        f"part_retrieval_mode={args.part_retrieval_mode} "
+        "part_retrieval_policy=top1_gate_top3_fixed "
         f"steps_per_epoch={steps_per_epoch} total_steps={total_train_steps} lr_tmax_steps={lr_tmax_steps}"
     )
 
     model = SourcePartRefUNet(
         in_channels=3,
-        image_size=96,
-        style_k=args.style_k,
+        image_size=args.image_size,
         content_start_channel=64,
         style_start_channel=64,
         unet_channels=(64, 128, 256, 512),
@@ -288,25 +287,62 @@ def main() -> None:
         channel_attn=True,
         conditioning_profile=args.conditioning_profile,
     )
+    if resolved_part_vector_ckpt is not None:
+        model.load_part_vector_pretrained(str(resolved_part_vector_ckpt))
+        print(f"[train] loaded part vector pretrain from {resolved_part_vector_ckpt}")
 
-    trainer = DiffusionTrainer(
+    trainer_cls = DiffusionTrainer if args.trainer == "diffusion" else FlowMatchingTrainer
+    trainer_kwargs: Dict[str, Any] = {
+        "lr": args.lr,
+        "lambda_off": args.lambda_off,
+        "lambda_cp": args.lambda_cp,
+        "lambda_cons": args.lambda_cons,
+        "cfg_drop_prob": args.cfg_drop_prob,
+        "T": args.diffusion_steps,
+        "lr_tmax": lr_tmax_steps,
+        "precision": args.precision,
+        "save_every_steps": (args.save_every_steps if args.save_every_steps > 0 else None),
+        "log_every_steps": (args.log_every_steps if args.log_every_steps > 0 else None),
+        "detailed_log": args.detailed_log,
+    }
+    if args.trainer == "flow_matching":
+        trainer_kwargs["lambda_fm"] = args.lambda_fm
+    else:
+        trainer_kwargs["lambda_mse"] = args.lambda_diff
+
+    trainer = trainer_cls(
         model,
         device,
-        lr=args.lr,
-        lambda_cons=args.lambda_cons,
-        T=args.diffusion_steps,
-        lr_tmax=lr_tmax_steps,
-        precision=args.precision,
-        save_every_steps=(args.save_every_steps if args.save_every_steps > 0 else None),
-        log_every_steps=(args.log_every_steps if args.log_every_steps > 0 else None),
-        detailed_log=args.detailed_log,
+        **trainer_kwargs,
     )
+    trainer.sample_solver = str(args.sample_solver).lower()
+    trainer.sample_guidance_scale = float(args.sample_guidance_scale)
+    trainer.sample_use_cfg = bool(args.sample_use_cfg)
+    trainer.sample_inference_steps = int(args.sample_inference_steps)
+    trainer.save_split_components = bool(args.split_save_components)
+    trainer.save_frozen_retrieval_copy = bool(args.save_frozen_retrieval_copy)
+    trainer.frozen_retrieval_ckpt_path = str(resolved_ep_ckpt) if resolved_ep_ckpt is not None else None
 
     if args.resume:
         trainer.load(args.resume)
         print(f"Resumed from {args.resume}")
 
-    fixed_batch = next(iter(loader))
+    try:
+        fixed_batch = next(iter(loader))
+    except Exception as e:
+        print(
+            "[train] failed to fetch fixed sample batch from training DataLoader; "
+            f"fallback to single-process loader. reason={type(e).__name__}: {e}"
+        )
+        sample_loader = DataLoader(
+            dataset,
+            batch_size=min(int(args.batch), 8),
+            shuffle=True,
+            num_workers=0,
+            pin_memory=True,
+            collate_fn=collate_fn,
+        )
+        fixed_batch = next(iter(sample_loader))
     trainer.sample_every_steps = args.sample_every_steps
     trainer.sample_batch = fixed_batch
     trainer.sample_dir = Path(args.save_dir) / "samples"

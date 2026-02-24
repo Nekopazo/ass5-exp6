@@ -26,38 +26,30 @@ python train.py \
   --data-root . \
   --epochs 50 \
   --batch 64 \
-  --num-workers 0 \
+  --num-workers 4 \
   --device cuda:0 \
   --precision fp32 \
   --lr 2e-4 \
   --lambda-cons 0.05 \
   --diffusion-steps 1000 \
   --lr-tmax-steps 0 \
-  --style-k 3 \
   --font-index 0 \
-  --font-name None \
   --font-mode random \
   --max-fonts 0 \
   --auto-select-font \
   --no-include-target-in-style \
-  --component-guided-style \
-  --style-overlap-topk \
-  --decomposition-json CharacterData/decomposition.json \
   --conditioning-profile full \
   --part-bank-manifest DataPreparation/PartBank/manifest.json \
-  --part-retrieval-mode font_softmax_top1 \
-  --part-retrieval-ep-ckpt <required for non-baseline> \
-  --part-set-size 10 \
-  --part-set-min-size 2 \
+  --part-retrieval-ep-ckpt checkpoints/e_p_font_encoder_best.pt \
+  --part-vector-pretrain-ckpt checkpoints/part_style_encoder_pretrain_best.pt \
+  --part-set-size 9 \
+  --part-set-min-size 1 \
   --part-set-sampling random \
   --no-part-target-char-priority \
   --part-image-size 64 \
   --sample-every-steps 300 \
   --log-every-steps 100 \
   --detailed-log \
-  --overlap-report-samples 0 \
-  --overlap-report-seed 42 \
-  --overlap-report-json None \
   --save-every-epochs 0 \
   --save-every-steps 5000 \
   --save-dir checkpoints \
@@ -66,11 +58,13 @@ python train.py \
 
 Notes:
 
-- `--conditioning-profile baseline` disables both token and RSI.
-- `--conditioning-profile token_only` enables token only.
+- `--conditioning-profile baseline` disables both parts_vector and RSI.
+- `--conditioning-profile parts_vector_only` enables parts_vector only.
 - `--conditioning-profile rsi_only` enables RSI only.
-- `--conditioning-profile full` enables both token and RSI.
-- When token is disabled, `lambda-cons` is forced to `0`.
+- `--conditioning-profile full` enables both parts_vector and RSI.
+- Part retrieval policy is fixed to: `top1 gate + top3 weighted mix` (locked in code).
+- Retrieval tuning thresholds are internal constants, not CLI parameters.
+- When parts_vector conditioning is enabled (`parts_vector_only/full`), `--part-retrieval-ep-ckpt` is required.
 
 ## 2) `scripts/prepare_common_charset.py`
 
@@ -271,9 +265,10 @@ Defaults:
 - `--device auto` (`auto|cpu|cuda`)
 - `--log-every 50`
 
-## 9) `scripts/analyze_component_overlap.py`
+## 9) `scripts/analyze_component_overlap.py` (Offline Only)
 
-Purpose: analyze component-guided style sampling overlap stats.
+Purpose: offline component-overlap statistics analysis.  
+This script is not used by online training/inference.
 
 Minimal:
 
@@ -284,23 +279,14 @@ python scripts/analyze_component_overlap.py --project-root .
 Defaults:
 
 - `--project-root .`
-- `--font-index 0`
-- `--font-name None`
-- `--font-mode random` (`fixed|random`)
-- `--max-fonts 0`
-- `--style-k 3`
-- `--include-target-in-style` off by default
-- `--component-guided-style` on by default
+- `--char-list CharacterData/CharList.json`
+- `--reference-char-list CharacterData/ReferenceCharList.json`
 - `--decomposition-json CharacterData/decomposition.json`
 - `--samples 4000`
+- `--style-k 1`
 - `--seed 42`
-- `--top-char-k 20`
-- `--top-pair-k 80`
-- `--out-dir checkpoints/overlap_stats`
-- `--json-name component_overlap_report.json`
-- `--pairs-csv-name component_overlap_top_pairs.csv`
-- `--plot-name component_overlap_hist.png`
-- `--skip-plot` off by default
+- `--mode random` (`random|topk_overlap`)
+- `--out-json checkpoints/overlap_stats/component_overlap_report.json`
 
 ## 10) Runner Shell Scripts
 
@@ -312,7 +298,6 @@ Default launch profile:
 - `--precision bf16`
 - `--conditioning-profile full`
 - `--batch 48`
-- `--part-retrieval-mode font_softmax_top1`
 - `--part-retrieval-ep-ckpt ${EP_CKPT:-checkpoints/e_p_font_encoder_best.pt}`
 - `--sample-every-steps 300`
 - `--log-every-steps 100`

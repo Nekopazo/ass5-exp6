@@ -1,0 +1,1265 @@
+﻿Expert Systems With Applications 296 (2026) 128987 
+
+Contents lists available at ScienceDirect
+
+Expert Systems With Applications
+journal homepage: www.elsevier.com/locate/eswa
+
+Few-shot font generation via denoising diffusion and component-level 
+fine-grained style 
+
+Yu Liu a,b, Yang Ding c, Fatimah Binti Khalid b, Cunrui Wang a,∗, Lei Wang b
+
+aDalian Chinese Font Design Technology Innovation Center, Dalin Minzu University, 116600, Dalian, China
+b Faculty of Computer Science and Information Technology, University Putra Malaysia, 43400 UPM, Serdang, Malaysia
+c School of Computer Science and Technology, Changchun University of Science and Technology, 130022, Jilin, China
+
+a r t i c l e  i n f o  a b s t r a c t
+
+Keywords: Few-shot font generation aims to create new fonts using a small number of style examples. It is increasingly gain-
+Diffusion model ing attention due to its significant reduction in labor costs. Existing methods rely on GAN-based image-to-image 
+Few-shot font generation style-transfer frameworks, which are prone to training collapse and struggle to maintain consistency between 
+Deformable convolution character content and style. Moreover, they capture only the global style while overlooking fine-grained features 
+Attention mechanism
+
+of radicals, components, and strokes. To address these challenges, we propose a diffusion model-based image-
+to-image font generation method .We fully consider the component styles between content glyphs and reference 
+glyphs, assigning appropriate fine-grained styles to content glyphs through a multi-character style aggregation 
+module. Additionally, in order to better preserve the integrity of character structures during the denoising it-
+eration process, we propose leveraging an offset-enhanced multi-head attention mechanism. This mechanism 
+adaptively samples and embeds multi-scale glyph content features into the diffusion model. Comprehensive ex-
+periments demonstrate that our method outperforms existing font generation methods both qualitatively and 
+quantitatively.
+
+1.  Introduction leverage prior knowledge, such as the strokes or component composition 
+of characters, to facilitate font generation (Cha et al., 2020; Kong et al., 
+
+A font is a set of characters with a consistent style, playing a crucial 2022; Park et al., 2021a). However, these methods not only rely on a 
+role in printing and media. Traditional methods of creating font libraries large number of paired samples but also require retraining the model 
+heavily rely on professional designers to individually draw each glyph, for each new font, making efficient font generation impractical (Wang 
+which is especially expensive and labor-intensive for logographic lan- et al., 2025).
+guages such as Chinese, Japanese, and Korean. In the field of computer To address the end-to-end font generation problem, some studies 
+vision and multimedia, automated font design remains a challenging have combined adversarial training (Yi et al., 2017) with consistency 
+problem. constraints (Zhu et al., 2017) to propose few-shot font generation (FFG) 
+
+Over the years, deep generative models have advanced the field of solutions for font generation (Park et al., 2021b; Xie et al., 2021). Based 
+font generation. Font generation is regarded as an image-to-image (I2I) on the explicit disentanglement of content and style, FFG research can 
+translation task (Isola et al., 2017), where the model aims to learn a be divided into two different types: global style representation and 
+mapping function between the source domain and the target domain, component style representation. The former models glyph styles as a 
+retaining the content information of the source font and transforming universal representation for each font (Gao et al., 2019; Liu et al., 
+it into the target style. Some studies adopt a conditional GAN (Goodfel- 2019), extracting style features by randomly selecting a style font im-
+low et al., 2014) framework, generating raster font images containing age during training. The latter (Huang et al., 2020; Park et al., 2021a,b) 
+9169 characters in an end-to-end manner by learning the styles of a decomposes the font style into independent, smaller parts or compo-
+small number (about 500) of manually designed reference font images nents extracted from different reference instances of the same font. In 
+(Yu et al., 2024b; Zeng et al., 2021; Zeng & Pan, 2022). Other methods global style representation, the style tends to become smoother or more 
+
+∗ Corresponding author.
+ E-mail addresses: gs64481@upm.edu.my (Y. Liu), 2023200170@mails.cust.edu.cn (Y. Ding), fatimahk@upm.edu.my (F.B. Khalid), wcr@dlnu.edu.cn (C. Wang), 
+gs68810@student.upm.edu.my (L. Wang).
+https://doi.org/10.1016/j.eswa.2025.128987
+Received 11 February 2025; Received in revised form 12 June 2025; Accepted 9 July 2025
+Available online 20 July 2025 
+0957-4174/© 2025 Elsevier Ltd. All rights are reserved, including those for text and data mining, AI training, and similar technologies. 
+
+
+
+Y. Liu et al. Expert Systems With Applications 296 (2026) 128987 
+
+blurred; whereas component-level representation only integrates within 2.  Related work
+the same part, keeping different parts independent. This component-
+level style avoids the loss of detail caused by the averaging effect in 2.1.  Few-shot font generation
+global style representation (Kong et al., 2022; Park et al., 2021b). How-
+ever, these methods are based on the GAN framework, where the target Image-to-image (I2I) translation aims to learn a mapping function 
+style is usually learned and represented by a simple classifier or dis- between the source and target domains that retains the content of the 
+criminator, making the model prone to collapse during large-span style source image while incorporating the style of the target domain (Kim 
+transfers. & Choi, 2021; Ko et al., 2023; Zhang et al., 2023). Font generation is a 
+
+The denoising diffusion probabilistic model (DDPM) (Ho et al., 2020) typical I2I translation task because it seeks to retain the content informa-
+has been proposed for learning to restore target data distributions cor- tion of the source font and map it to the target style font. Many previous 
+rupted by a forward diffusion process. They have achieved great success end-to-end font generation methods have been based on I2I translation 
+in image generation. Some initial studies on image generation based on methods (Gao & Wu, 2020; Hassan et al., 2021; Jiang et al., 2019; Wen 
+diffusion models (Dhariwal & Nichol, 2021; Gao et al., 2023) have con- et al., 2021a). However, these methods require extensive paired training 
+firmed the powerful performance of DDPM in generative tasks. Condi- supervision and are not scalable for generating new style fonts. Recently, 
+tional diffusion models incorporate conditional constraints such as class font generation methods have evolved towards FFG methods. FFG meth-
+labels, text descriptions, or images into DDPMs, enabling control over ods decompose font images into content and style features, generating 
+the generation process (Hwang et al., 2024; Rombach et al., 2022; Sa- new fonts through a few reference glyphs.
+haria et al., 2022). Compared to GANs, diffusion models learn to gener- FFG methods can be categorized into two types based on the repre-
+ate samples based on the distribution characteristics of the data itself sentation of style features: global feature representation and component-
+through a step-by-step denoising process, thereby avoiding the com- based feature representation. In global feature representation methods, 
+mon training instability challenges in GANs. However, in the high-noise AGISNet (Gao et al., 2019) and EMD (Zhang et al., 2018) integrate style 
+phase of the diffusion model, the output is almost dominated by random and content features through a bilinear model to generate fonts. DG-
+noise, making it difficult to accurately restore the content features of the Font (Xie et al., 2021) employs Deformable Convolution to enhance the 
+characters; while in later iterations, excessively injecting content infor- model’s performance in generating complex cursive characters. Deep-
+mation weakens the quality of the reconstructed font image (Fu et al., CalliFont (Liu & Lian, 2024) integrates bimodal generation models to 
+2024; Yang et al., 2024). synthesize calligraphy fonts with a limited number of Chinese charac-
+
+In this paper, we propose a diffusion-based image-to-image few-shot ters. FontGAN (Liu et al., 2022) integrates stylization, destylization, and 
+font generation method, modeling font generation as a noise-to-noise texture transformation of character structures into a unified framework, 
+paradigm that can generate unseen characters and styles. We selected improving the quality of generated results. However, these methods tend 
+300 Chinese characters as the style reference character set based on to split the style and content of the image either globally or by compo-
+the coverage of Chinese character components. We then designed a nents and average the extracted features when receiving multiple style 
+content-style reference mapping, considering the component styles be- images. This process weakens local details due to separation and aver-
+tween content glyphs and reference glyphs, and selected 𝐾 style ref- aging operations.
+erence characters for each content character. Finally, through a fine- In component-based feature representation studies, ZiGAN (Wen 
+grained style aggregation (FGSA) module module, the styles of the 𝐾 et al., 2021b) uses paired samples of different character styles to cap-
+reference characters are transferred to the content character. In the ture fine-grained correlations between different glyph structures, better 
+early stages of the denoising iteration, the model’s input contains a capturing structural information. LF-Font (Park et al., 2021a) designs a 
+significant amount of noise and lacks effective content information, component-conditional reference encoder to extract component features 
+making it difficult to guide the attention mechanism to focus on the from reference images. VQ-Font (Yao et al., 2024) combines structural 
+relevant style features. Therefore, we design the deformable attention components such as radicals and glyph parts in a specific arrangement 
+content aggregation (DACA) module, which adaptively embeds multi- to recalibrate fine-grained styles based on the reference. However, these 
+scale glyph content features into the diffusion model at different sam- methods require substantial preparatory work for training data, increas-
+pling stages. Our method outperforms the compared font generation ing the complexity of the font generation task and being unfavorable 
+methods in both SFUC and UFUC dataset settings (Liu et al., 2024; for generating new style fonts. We set up a character set composed of a 
+Tang et al., 2022). Additionally, our method can be applied to cross- small number of characters as a style reference set and allocate 𝑘 style 
+language generation tasks. We summarize the main contributions as reference characters for each character based on the component styles 
+follows: between content and style characters. This approach not only reduces 
+
+the workload of preparatory data but also improves the flexibility of 
+generating new style fonts.
+
+• We designed a diffusion model-based few-shot font generation model 2.2.  Diffusion model
+capable of generating font images with any style-content com-
+bination. The code is public at: https://github.com/ethanliuyu/ Sohl-Dickstein et al. (2015) introduced diffusion probabilistic mod-
+DiffuFont. els by formulating a multi-step Markovian forward process that grad-
+
+• We curated a style reference set containing a small number of char- ually corrupts real data with Gaussian noise, ultimately transforming 
+acters and thoroughly considered the component styles between con- it into a simple prior distribution. The data generation process is mod-
+tent glyphs and reference glyphs, matching the best style reference eled as the reverse of this diffusion, implemented via learning a reverse 
+characters for each Chinese character. Markov chain that progressively reconstructs data samples from noise. 
+
+• We proposed a multi-character style aggregation module, which Building upon this framework, Ho et al. (2020) proposed the denois-
+learns fine-grained local styles at the component level between style ing diffusion probabilistic model (DDPM), which reframes the learning 
+and content glyphs, transferring detailed style features from refer- objective around denoising, thereby substantially simplifying training 
+ence characters to content characters. and achieving state-of-the-art performance in image generation tasks. 
+
+• We propose the deformable attention content aggregation module, Compared to GAN, diffusion models produce higher quality images and 
+which adaptively embeds glyph content features into the diffusion exhibit better training stability. Consequently, they have garnered in-
+model by applying offset-enhanced multi-head attention at different creasing attention in the field of image synthesis. Building on this, 
+sampling stages. the introduction of conditional constraints has further expanded their
+
+2 
+
+
+
+Y. Liu et al. Expert Systems With Applications 296 (2026) 128987 
+
+application scope, allowing models to generate corresponding outputs 3.  Method
+based on specific input conditions. Currently, conditional diffusion mod-
+els are widely used in tasks ranging from text-to-image generation. 3.1.  Method overview
+CTIG-DM (Zhu et al., 2023) introduces four types of text-image gen-
+eration modes in the diffusion model, using images, text, and styles as As shown in Fig. 1, our goal is to train a conditional diffusion model 
+conditions. DEADiff (Qi et al., 2024) proposes a mechanism to decouple so that the output image not only has the same content as 𝑥𝑐 but also 
+the style and semantics of the reference image, achieving an optimal aligns with the reference style (cf. Section 3.2). In the conditional diffu-
+balance between the inherent text controllability of text-to-image mod- sion model, given the content image 𝑥𝑐 , we first select 𝑘 style reference 
+els and the style similarity to the reference image. Although the above characters for each content character based on a content-style reference 
+methods have made remarkable achievements in image generation, they mapping (cf. Section 3.3). The styles from these 𝑘 reference characters 
+generally focus on generating based on global styles or under the guid- are transferred to the content character through a FGSA module (cf. 
+ance of text prompts. Section 3.4) . During the iterative denoising process, to maintain the 
+
+Due to its ability to generate higher-quality images and better train- consistency of the character content, we design a DACA module that 
+ing stability, it has gradually been applied in the field of Chinese font injects multi-scale global and local content features into the encoder of 
+generation. Diff-Font (He et al., 2024) introduces stroke or component the U-Net in the diffusion model (cf. Section 3.5).
+inputs as fine-grained conditions in the diffusion model to generate 
+fonts. Fontdiffuser (Yang et al., 2024) handles complex characters and 3.2.  Conditional diffusion for font generation
+large-scale style variations by introducing a multi-scale content aggre-
+gation module and style contrast optimization module. MSD-Font (Fu Our model employs U-Net as the generator. The diffusion process 
+et al., 2024) proposes an efficient two-stage diffusion model to gener- consists of two phases: forward diffusion and backward diffusion. We 
+ate stylized font images from limited reference samples. However, these consider real images determined by two attributes, content 𝑥𝑐 and 
+methods have not yet considered the uniqueness of the font genera- style 𝑥𝑠, as samples in the training data distribution, denoted as 𝑥0 ∼
+
+( )
+
+tion task. Font generation not only requires precise style transforma- 𝑞 𝑥0 ∣ 𝑓 (𝑥𝑐 , 𝑥𝑠) . During the forward diffusion process, within a total of 
+tion but also must maintain consistency in character content. In the 𝑇  time steps, random Gaussian noise   is gradually added to the real 
+early stages of diffusion model iteration, noise dominates, making it image 𝑥0 to transition it from a stable state to a chaotic state.
+difficult to reconstruct the character content. In the later stages, ex- Subsequently, through the inverse process of a long Markov Chain, 
+cessive content injection weakens the quality of the reconstructed font we can progressively restore from an isotropic Gaussian noise image 𝑥𝑇
+image (Fu et al., 2024; Yang et al., 2024). In our approach, we use back to the original real image 𝑥0.
+an adaptive fusion parameter-controlled content aggregation module, 𝑇
+
+∏
+( ) ( )
+
+which strengthens content guidance to aggregate style features in the 𝑞 𝑥1∶𝑇 ∣ 𝑥0 ∶= 𝑞 𝑥𝑡 ∣ 𝑥𝑡−1 , (1)
+early noise-dominated stage, and weakens content injection in the later 𝑡=1
+stages when clean signals dominate, avoiding content interference with ( )
+
+√
+( )
+
+𝑞 𝑥
+style aggregation. 𝑡 ∣ 𝑥𝑡−1 =  𝑥𝑡; 1 − 𝛽𝑡𝑥𝑡−1, 𝛽𝑡I , (2)
+
+where 𝑡 ∈ {1,… , 𝑇 } and 𝛽1 < … < 𝛽𝑇  are predefined parameters used 
+to control the mean and variance of the noise. Based on Eq. (2), we can 
+obtain an image 𝑥𝑡 at any time step.
+
+2.3.  Attention mechanism ( )
+
+√ √ √ √
+
+𝑥𝑡 = 𝛼̄𝑡𝑥0 + 1 − 𝛼̄𝑡𝜖𝑡 ∼  𝑥𝑡; 𝛼̄𝑡𝑥0, 1 − 𝛼̄𝑡I , (3)
+The attention mechanism plays a crucial role in the field of artificial ∏
+
+where 𝛼 𝑡
+intelligence. It was initially introduced to handle sequential tasks, im- 𝑡 = 1 − 𝛽𝑡,𝛼̄𝑡 = 𝑠=1 𝛼𝑠.
+
+Since the forward process is a linear Gaussian chain, the conditional 
+proving neural networks’ ability to manage long-distance dependencies. posterior of 𝑥
+In traditional neural networks structures, models often lose long-range 𝑡−1 given 𝑥𝑡 and the clean image 𝑥0 admits a closed-form 
+
+expression. Applying Bayes’ rule and completing the square yields:
+contextual information when processing sequential data. The Trans-
+
+( ) ( )
+
+former model proposed by Vaswani et al. (2017) utilizes self-attention 𝑞 𝑥𝑡−1 ∣ 𝑥𝑡, 𝑥0 =  𝑥𝑡−1; 𝜇̃𝑡(𝑥𝑡, 𝑥0), 𝛽𝑡𝐈 , (4)
+mechanisms, allowing the model to consider the entire sequence’s in- where the posterior mean and variance are given by :
+formation when processing each element, significantly enhancing its 
+
+√ √
+
+capability to handle long-distance dependencies. The Attention Mech- 𝛼𝑡𝛽𝑡 𝛼̄ (1 − 𝛼 )
+𝜇̃
+
+anism is widely applied not only in natural language processing but 𝑡(𝑥𝑡, 𝑥0) = 𝑥 + 𝑡−1 𝑡 1 − 𝛼̄
+𝑥 , 𝛽 = 𝑡−1 𝛽 . (5)
+
+1 − 𝛼̄ 0
+𝑡 1 − 𝛼̄ 𝑡 𝑡
+
+𝑡 1 − 𝛼̄ 𝑡
+𝑡
+
+also in various visual tasks, including font generation (Jia et al., 2021; In the backward diffusion process , we perform denoising on the 
+Li et al., 2022; Yang et al., 2023). RDGAN (Huang et al., 2020) uses isotropic Gaussian noise 𝑥𝑇  conditioned on a latent variable 𝑧. This la-
+the attention mechanism to extract coarse radicals from content char- tent variable 𝑧 represents features extracted by content and style en-
+acters and render them in the target style. HWT (Bhunia et al., 2021) coders. Through iterative denoising of 𝑥𝑇 , we ultimately obtain new 
+employs transformer blocks to bridge the gap between images and text, data that conforms to specific styles and contents. This process ensures 
+enabling the generation of stylized handwritten English text images. that the generated data not only follows the given noise pattern but also 
+Deepvecfont-v2 (Wang et al., 2023b) significantly enhances the model’s accurately reflects the content and style information provided by the 
+ability and stability to synthesize long and complex contours by utiliz- encoders.
+ing the attention mechanism. Yu et al. (2024a) synthesize high-quality The inverse process involves computing the posterior distribution 
+vector fonts by comprehensively using sequence and image modalities ( )
+
+𝑞 𝑥𝑡−1 ∣ 𝑥𝑡  over the entire dataset, which is computationally infeasible. 
+through the attention mechanism. Elegantly Written (Liu et al., 2024) )
+
+Therefore, we approximate the posterior distribution (
+
+𝑞 𝑥𝑡−1 ∣ 𝑥𝑡  with a 
+and EHW-font (Lei et al., 2025) aggregate style features for content )
+
+trainable neural network modeled distribution (
+
+𝑝𝜃 𝑥𝑡−1 ∣ 𝑥𝑡 , expressed 
+glyphs via cross-attention. In these methods, the attention mechanism as:
+helps models capture critical information, thereby improving overall ( ) ( ( ) ( ))
+
+performance and efficiency. In our approach, the attention mechanism 𝑝𝜃 𝑥𝑡−1 ∣ 𝑥𝑡, 𝑧 =  𝜇𝜃 𝑥𝑡, 𝑡, 𝑧 ,Σ𝜃 𝑥𝑡, 𝑡, 𝑧 , (6)
+embeds font content and style features into the U-Net of the diffusion where 𝜇𝜃 and Σ𝜃 represent the predicted mean and variance of the noise.
+model, guiding the model to generate fonts with arbitrary style-content To simplify the model, we set the variance as a constant and train 
+combinations. the model to learn the mean. To recover denoised data, most methods 
+
+3 
+
+
+
+Y. Liu et al. Expert Systems With Applications 296 (2026) 128987 
+
+Fig. 1. Overview of our proposed method. Our conditional diffusion model is based on the U-Net architecture, with the conditioning network comprising a content 
+encoder 𝐸𝑐 and a style encoder 𝐸𝑠. We select 𝑘 style reference characters for the content character through content-style reference mapping. The FGSA module 
+extracts style features from these 𝑘 style reference characters and integrates multi-scale reference styles into the fine-grained style representation of the given content 
+image. To enhance the structural integrity of the characters, we propose the DACA module, which injects multi-scale global and local content features into the U-Net 
+of the diffusion model.
+
+(
+
+subtract the estimated noise )
+
+𝜖𝜃 𝑥𝑡, 𝑡  from the noisy data at time 𝑡. To where 𝜇 and 𝜎 are the mean and standard deviation of 𝑧′ respectively, 
+adapt to font generation tasks, our model directly estimates the final tar- ⊙ denotes the Hadamard product. Our optimization objective is:
+
+(
+
+get result )
+
+𝑥̂0 𝑥𝑡, 𝑡, 𝜃  at each time step, potentially enhancing the quality [ ]
+
+( ) 2
+of generated images and reducing error accumulation during the gener- MSE = 𝔼 ‖
+
+𝑡,𝑥 ‖𝑥0 − 𝑥̂0 𝑥𝑡, 𝑡, 𝜃
+‖
+
+‖ . (10)
+0
+‖ ‖
+
+ation process.
+Replacing 𝑥0 in 𝜇̃𝑡 with its model prediction 𝑥̂0(𝑥𝑡, 𝑡, 𝜃) and drawing During training, 𝑇  is set to 1000 steps. During inference, DDIM (Song 
+
+a single sample from the Gaussian posterior leads to et al., 2021) is used to accelerate the sampling process. First, we sam-
+[
+
+ple a subsequence ]
+
+𝜏 = 𝜏𝑠, 𝜏𝑠−1,… , 𝜏1  from 𝐿 = [𝑇 , 𝑇 − 1,… , 1], where 
+√
+
+( ( ))
+
+𝑥𝑡−1 = 𝜇̃𝑡 𝑥𝑡, 𝑥̂0 𝑥𝑡, 𝑡, 𝜃 + 𝛽𝑡 𝜖𝑡, 𝜖𝑡 ∼  (𝟎, 𝐈), (7) the length of dim(𝜏) << dim(𝐿). We construct the subsequence linearly 
+as 𝜏𝑖 = ⌊𝑐𝑖⌋, where 𝑐 = 10. Sampling is then performed according to the 
+
+Collecting the coefficients of 𝑥̂0 and 𝑥𝑡 in the above expression yields the constructed sequence 𝜏. DDIM chooses to use a deterministic sampling 
+practical update that we employ to approximate the inverse diffusion path, i.e., setting the variance term to zero or a constant, further simpli-
+step: fying the sampling process.
+
+√ DDIM introduces a noise-scaling parameter 𝜂 ∈ [0, 1] that controls 
+( )
+
+√ √
+
+𝛼̄
+𝑥𝑡−1 =
+
+𝑡−1𝛽𝑡 𝛼𝑡 1 − 𝛼̄
+( ) 𝑡−1 1 − 𝛼̄
+
+𝑥̂ 𝑥 , 𝑡, 𝜃 + 𝑥 + 𝑡−1
+1 − 𝛼̄ 0 𝑡 𝛽
+
+𝑡 1 − 𝛼̄ 𝑡 𝜖 . (8) the amount of stochasticity injected at each step; setting 𝜂 = 0 leads to 
+𝑡 1 − 𝛼̄ 𝑡 𝑡
+
+𝑡 a deterministic trajectory that preserves all forward marginals. Substi-
+tuting 𝑥̂0 into the generic DDIM update and simplifying yields the coef-
+
+During the iterative process, the model needs to optimize the current ficients:
+diffusion step. We use Adaptive Layer Normalization(AdaLN) (Peebles 
+
+√ √
+
+& Xie, 2023) to incorporate the diffusion timestep 𝑡 into the model. For 𝛼̄𝜏 √ 1 − 𝛼̄
+𝑎𝑖 =
+
+𝑖−1 𝜏
+the features 𝑧′ output by different layers of the U-Net, the timestep 𝑡 is , 𝑏
+
+𝛼̄ 𝑖 = 1 − 𝛼̄𝜏 − 𝑖 , (11)
+𝑖−1
+
+𝜏 𝛼̄
+𝑖 𝜏𝑖
+
+used with an MLP to learn modulation parameters 𝛾 and 𝛽, which adjust 
+the normalized features 𝑧′ to inject timestep information. which define the following recursive sampling scheme:
+
+√ √
+
+( )
+
+𝑧′ − 𝜇 𝛼̄ ⎛
+√ 1 − 𝛼̄ ⎞
+
+𝜏 𝜏
+AdaLN(𝑧′, 𝑡) = 𝛾(𝑡)⊙ + 𝛽(𝑡), (9) 𝑥𝜏 = 𝑖−1 𝑥̂ , , 𝜃 +
+
+𝑖− 𝛼̄ 0(𝑥𝜏 𝜏
+1 𝑖 𝑖 ) ⎜ 1 − 𝛼̄ ⎟
+
+𝜏 − 𝑖 𝑥𝜏 . (12)
+𝜎 𝑖−1
+
+⎜ 𝛼̄ 𝑖
+𝜏 𝜏 ⎟
+
+𝑖 𝑖
+⎝ ⎠
+
+4 
+
+
+
+Y. Liu et al. Expert Systems With Applications 296 (2026) 128987 
+
+3.3.  Style reference character selection steps. After selecting 𝑘 style reference glyphs for each content glyph 𝑐𝑖, 
+the style reference set 𝑆 is sorted according to usage frequency to ensure 
+
+In the FFG method, the model randomly selects one or more char- that each style character has the opportunity to be selected. Through 
+acters from a style reference set at each iteration. While this approach this process, 𝑘 corresponding style reference glyphs are selected for each 
+increases the model’s robustness, it also poses challenges. Due to the content glyph. An example of style reference glyph selection is shown 
+random selection of style references, the model struggles to effectively in Fig. 2(b). The specific process is as follows Algorithm 1.
+learn how to accurately extract and apply style features from a di-
+verse combination of style reference characters. To address this chal-
+lenge, we introduce a strategy: first, define a fixed style reference set Algorithm 1: Content-Style Reference Set Mappings with 
+
+{ }
+
+𝑆 = 𝑠1, 𝑠2, 𝑠3,… , 𝑠𝑛  comprising 300 characters. Then design a content- Usage-Based Sorting
+style reference mapping to select 𝑘 style reference characters for each Input: 𝐶 = {𝑐𝑖}: High-frequency characters list.
+content character. 𝑆 = {𝑠𝑗}: Style reference character list.
+
+𝑇 = {𝑇 𝑝; 𝑇 ℎ}: Chinese character structure component set.
+𝐾: Number of style reference characters.
+
+3.3.1.  Decomposition of Chinese characters Output: 𝑈̂ : Content-Style Reference Set.
+According to the “Standard for Components and Component Names 2 Initialize:
+
+of Modern Common Characters” issued by the Department of Lan- 𝑆_𝑐𝑜𝑢𝑛𝑡[𝑠𝑗 ] ← 0, ∀𝑠𝑗 ∈ 𝑆
+guage and Information Management of the Ministry of Education of 3 Function mapping(𝑐𝑖, 𝑇̂ ):
+the People’s Republic of China and the National Language and Writing 4 𝑅𝑐 ← ∅
+
+𝑖
+
+Work Committee in 2009 (Department of Language Information Man- 5 𝑘 ← 0
+6 𝑇
+
+agement, Ministry of Education of the People’s Republic of China, Na- 𝑐 ← 𝑇̂ (𝑐 )
+𝑖 𝑖
+
+7 𝑆sorted ← argsort𝑠𝑗∈𝑆 (𝑆_𝑐𝑜𝑢𝑛𝑡[𝑠𝑗 ])tional Language Commission, 2009), each Chinese character is decom-
+posed into a set of components 𝑇 𝑝 and a set of strokes 𝑇 ℎ, forming a 8 for 𝑡𝑙 ∈ 𝑇𝑐  do
+
+𝑖
+9 for 𝑠𝑧 ∈ 𝑆sorted do
+
+decomposition set 𝑇  based on the components and strokes of the char- 10 𝑇𝑠 ← 𝑇̂ (𝑠
+acter. An example of character decomposition is illustrated in Fig. 2(a). 𝑧 𝑧)
+
+11 for 𝑡𝑚 ∈ 𝑇𝑠  do
+During the decomposition process, the components first separated are 𝑧
+
+12 if 𝑡𝑙 = 𝑡𝑚 and 𝑠𝑧 ∉ 𝑅𝑐  then
+𝑖
+
+defined as the components set 𝑇 𝑝, and the strokes obtained from further 13 𝑅𝑐 ← 𝑅 ∪ 𝑠
+𝑖 𝑐 { }
+
+𝑖 𝑧
+decomposition of components are defined as the strokes set 𝑇 ℎ. The com- 14 𝑘 ← 𝑘 + 1
+ponents set contains structures that can be more easily transferred from 15 𝑆_𝑐𝑜𝑢𝑛𝑡[𝑠𝑧] ← 𝑆_𝑐𝑜𝑢𝑛𝑡[𝑠𝑧] + 1
+the style reference set to the target set. The strokes set ensures that each 16 end 
+character can choose 𝑘 reference characters from the style reference 17 if 𝑘 ≥ 𝐾 then
+
+18 return 𝑅
+set. 𝑐𝑖
+
+119 end 
+3.3.2.  20 end 
+
+Content-Style reference mapping 21 end 
+We select 2000 commonly used Chinese characters as the content 22 end 
+
+character set 𝐶. According to the principle of shared components, we 23 return 𝑅𝑐
+map 𝐾 style reference characters for each content glyph. Specifically, 𝑖
+
+24 return 𝑅𝑐
+we first obtain the components set 𝑇 𝑝
+
+𝑐  𝑖
+of the content glyph 𝑐𝑖, and then 𝑖 25 Function Main():
+
+obtain the components set 𝑇 𝑝
+𝑠  of each character 𝑠𝑧 in the style reference 26 𝑅 ← ∅
+𝑧
+
+set 𝑆. In each search step, we search for style reference characters 𝑠 27 for 𝑐𝑖 ∈ 𝐶 do
+𝑧
+
+with the same components as 𝑐𝑖 and select them as style reference char- 28 𝑅𝑐 ← mapping(𝑐𝑖, 𝑇 𝑝)
+𝑖
+
+acters. If there are fewer than 𝑘 glyphs in the style reference character 29 if Len(𝑅𝑐 ) < 𝐾 then
+𝑖
+
+set, the search is performed in the stroke set according to the above 30 𝑅𝑐 ← 𝑅 mapping(𝑐
+𝑖 𝑐 ∪ 𝑖, 𝑇 ℎ)
+
+𝑖
+31 if Len(𝑅𝑐 ) < 𝐾 then
+
+𝑖
+32 𝑆sorted ← argsort𝑠𝑗∈𝑆 (𝑆_𝑐𝑜𝑢𝑛𝑡[𝑠𝑗 ])
+33 𝑅𝑐 ← 𝑅𝑐 ∪ random(𝑆
+
+𝑖 sorted, 𝐾 − Len(𝑅𝑐 ))𝑖 𝑖
+34 for 𝑠 ∈ 𝑅𝑐  newly added do
+
+𝑖
+35 𝑆_𝑐𝑜𝑢𝑛𝑡[𝑠] ← 𝑆_𝑐𝑜𝑢𝑛𝑡[𝑠] + 1
+36 end 
+37 end 
+38 end 
+39 𝑅 ← 𝑅 ∪ {𝑅𝑐 }𝑖
+40 end 
+41 return 𝑅
+42 return 𝑅
+
+3.4.  Fine-grained style aggregation module
+
+As shown in Fig. 5(a), the style of Chinese characters is reflected in 
+the deformation of strokes, with short-distance correspondences exist-
+ing between each stroke. Based on this observation, we first match each 
+content character with the optimal style reference character and propose 
+the FGSA module to inject style features into different layers of the U-
+
+Fig. 2. (a) An example of decomposing Chinese characters into component sets Net network’s decoder. FGSA extracts style features from multiple style 
+and stroke sets. (b) An example of selecting style reference characters for content reference character images and aggregates these reference styles into a 
+characters based on the maximization of components principle. fine-grained style representation for the given content image, enabling 
+
+5 
+
+
+
+Y. Liu et al. Expert Systems With Applications 296 (2026) 128987 
+
+containing two channels), resulting in the fused feature representation 
+𝐹𝑎 ∈ ℝ𝐻×𝑊 ×𝐶 .
+
+2
+∑
+
+𝐹𝑎(𝑖, 𝑗, 𝑔) = 𝑊𝑔(𝑘) ⋅ 𝐹𝑐𝑠(𝑖, 𝑗, 2𝑔 − 2 + 𝑘), (13)
+𝑘=1
+
+where 𝑊𝑔(𝑘) represents the convolutional kernel weights for the 𝑔th 
+channel of the 𝑔th group. 𝐹𝑐𝑠(𝑖, 𝑗, 2𝑔 − 2 + 𝑘) denotes the value of the 
+2𝑔 − 2 + 𝑘th channel of the input feature map at position (𝑖, 𝑗).
+
+To achieve feature interaction across different spatial locations in 
+𝐹𝑎, we employ a 7 × 7 Depthwise Separable Convolution (DSC) for in-
+formation fusion between spatial and channel dimensions. First, a 7 × 7
+convolutional kernel is applied to each channel of 𝐹𝑎 individually, facil-
+
+Fig. 3. Structure diagram of the FGSA module. This module extracts style fea- itating spatial information interaction. Subsequently, a 1 × 1 pointwise 
+tures from multiple style reference character images and aggregates the refer- convolution performs linear combinations across channels, enabling 
+ence styles into the fine-grained style representation for the given content image. inter-channel information fusion. The attention matrix 𝐴 ∈ ℝ𝐻×𝑊 ×𝐶
+
+is generated via a Sigmoid function. Once the attention matrix 𝐴 is 
+obtained, it is applied to the Value features 𝐹𝑠 for weighted fusion,the model to learn the extraction and application of specific style fea- aggregating style features. Finally, through a residual connection, the
+
+tures more effectively. resulting feature 𝐹𝑟 retains content information while incorporating Style reference characters obtain style features 𝐹𝑠 containing 𝐾 char- style characteristics.
+acters through a style encoder. To aggregate the style features into the 
+U-Net decoder, a common approach is to flatten the style features 𝐹𝑠
+and content features 𝐹𝑐 into vectors and 
+
+3.5.  Deformable attention content aggregation module
+fuse them via a cross-attention 
+
+mechanism (Park et al., 2021b). However, this method significantly in- In the font generation task based on diffusion models, ensuring con-
+creases computational complexity when handling high-dimensional fea- sistency in character content while achieving accurate style transfer is 
+tures. Moreover, long-distance dependencies can introduce excessive ir- a challenging task (Yu et al., 2024b; Zeng et al., 2021). In the early 
+relevant information, diluting attention on key features. stages of sampling, the model inputs images containing a large amount 
+
+We propose a complexity-friendly FGSA module, as illustrated in of noise, making it difficult for the FGSA module to guide the atten-
+Fig. 3. We treat the content features 𝐹𝑐 as Query 𝑄 and the style tion mechanism to focus on relevant style features (Fu et al., 2024; 
+features 𝐹𝑠 as Key 𝐾. We alternate the concatenation of 𝐹𝑐 and 𝐹𝑠 Yang et al., 2024). As shown in Fig. 4, to appropriately aggregate font 
+along the channel dimension to obtain 𝐹𝑐𝑠 ∈ ℝ𝐻×𝑊 ×2𝐶 . Then, we apply 
+a 1 × 1 convolution with 𝑐 groups to linearly combine each group content features at different sampling stages and generate font images 
+
+(each with a style consistent with the reference characters, we propose the 
+
+Fig. 4. Schematic diagram of the DACA module. This module injects global and local content features of different scales into the U-Net of the diffusion model.
+6 
+
+
+
+Y. Liu et al. Expert Systems With Applications 296 (2026) 128987 
+
+Fig. 5. (a) Geometric deformations of the same character in two different fonts. Each stroke of the same character has short-distance correspondences. (b) By 
+adding offsets to sampling points, the sampling points effectively capture the local correlations between character strokes, thereby better handling subtle geometric 
+deformations between different font styles.
+
+DACA module, which injects global and local content features at differ- Specifically, for the 𝑖th layer feature 𝐹𝑥 ∈ ℝ𝐶×𝐻×𝑊  from the U-Net 
+ent scales into the U-Net of the diffusion model. encoder, the DACA module is used to inject the content feature 𝐹𝑐 ∈
+
+The content image is first passed through a content encoder 𝐸𝑐 to ex- ℝ𝐶×𝐻×𝑊 . Let the content feature 𝐹𝑐 be used as the Value and Key in 
+tract content features at different scales. These features are then injected the attention mechanism, while the feature 𝐹𝑥 is set as the Query. If 𝑅
+into the U-Net encoder through three DACA modules. However, when sampling points are used for querying, the computation can be carried 
+injecting content features into the U-Net encoder, a key challenge needs out in two steps. First, the feature map 𝐹𝑐 is sampled at 𝑅 points, and 
+to be overcome: the content font and the input font belong to different then the sampled values are weighted and summed, with the weight 
+styles. For the font style transfer task, there are usually geometric defor- denoted by 𝑊 . For each sampling point, we introduce 𝑀 heads. The 
+mations between two fonts of the same character, and each stroke has computation is as follows:
+only short-distance correspondences (as shown in Fig. 5(b)). Traditional 𝑀 [ 𝑅 ]
+
+convolutional methods extract features extensively by fixing sampling ∑ ∑
+
+𝐹 ′
+locations, but in this scenario, they struggle to accurately capture details 𝑒 (𝑝) 𝑊 𝑚 𝑚( ) ( )
+
+= ℎ 𝑊𝑝 𝑝𝑟 ⋅ 𝐹𝑐 𝑝 + 𝑝𝑟 + Δ𝑝𝑚𝑟 ⋅ 𝐴𝑚
+𝑟 , (14)
+
+𝑚=1 𝑟=1
+and local variations (Cha et al., 2020; Kong et al., 2022). where 𝑝 represents the spatial coordinates of the current pixel on the 
+
+To address this issue, an effective approach is to introduce de- query feature map; 𝑝𝑟 denotes the relative position offset of the 𝑟th pre-formable convolution (Dai et al., 2017; Xie et al., 2021; Yu et al., 2024b). defined sampling point relative to this coordinate, used to determine the 
+By generating dynamic offsets for the convolution kernel sampling posi- position of the local sampling point.
+tions, deformable convolution can adaptively adjust the sampling posi- Since there are small-range offsets for each stroke in the character 
+tions, allowing for a greater focus on the structural features of the font. 
+However, we observed content image and the target image, it is unnecessary to add an offset 
+
+that for a 2 × 2 convolution kernel, its offsets for each individual sampling point 𝑅. Instead, we share a single offset 
+only shift within a small range, as shown in Fig. 6. Therefore, adding 
+offsets to Δ𝑝 = (Δ𝑥,Δ𝑦) and weight 𝐴 for all the sampling points 𝑅. This can be 
+
+every position in the convolution kernel is unnecessary (Xie represented by Eq. (14):
+et al., 2021; Yu et al., 2024b). In contrast, adding a shared offset to the 
+entire convolution kernel ensures greater consistency in sampling posi- 𝑀 [ 𝑅 ]
+
+∑ ∑
+) ( )
+
+𝐹 ′
+tions, thus avoiding the issue of uneven or overlapping sampling point 𝑒 (𝑝) = 𝑊 𝑚 𝑊 𝑚(
+
+𝑝 𝑝𝑟 ⋅ 𝐹𝑐 𝑝 + 𝑝𝑟 + Δ𝑝𝑚 ⋅ 𝐴𝑚 , (15)
+𝑚=1 𝑟=1
+
+distribution caused by independent offsets for each kernel position.
+where 𝑊 𝑚 is used to integrate features from different heads. The scalar 
+attention weight 𝐴𝑚 lies in the range [0, 1], with the initial value set 
+to 0.5. By adding offsets to the sampling points, the sampling positions 
+can dynamically adjust based on the Key 𝐹𝑐 and Query 𝐹𝑥, which helps 
+better handle the subtle geometric deformations between different font 
+styles. Specifically, for the Key 𝐹𝑐 and Query 𝐹𝑥 features, we alternately 
+arrange them along the channel dimension to obtain 𝐹𝑠 ∈ ℝ𝐻×𝑊 ×2𝐶 . For 
+the 𝑖th channel of 𝐹𝑐 , we learn an offset Δ𝑃𝑖 ∈ ℝ2×𝑀×𝐻×𝑊  and weight 
+𝐴𝑖Δ𝑃 ∈ ℝ1×𝑀×𝐻×𝑊  at the 2 × 𝑖 − 1 and 2 × 𝑖 channels of 𝐹𝑠. This offset 
+guides the query sampling positions, enabling the retrieval of character 
+content features from the Value 𝐹𝑐 . The initial value is set to 0.
+
+During the early, high-noise stage of diffusion, outputs remain over-
+whelmingly noisy, hindering accurate recovery of character content; 
+conversely, injecting too much semantic information in later iterations 
+
+Fig. 6. Visualization of deformable convolution sampling points. Blue points can degrade the reconstructed font’s clarity. To address this, at each 
+indicate standard sampling locations; red points denote sampling locations from timestep 𝑡 we first embed 𝑡 and pass it through a multilayer perceptron 
+a 2 × 2 deformable convolution, with limited local offsets. (MLP) to predict an adaptive fusion weight 𝛼. This weight governs the 
+
+7 
+
+
+
+Y. Liu et al. Expert Systems With Applications 296 (2026) 128987 
+
+interpolation between the noisy feature 𝐹𝑥 and the semantic feature 𝐹 ′
+𝑒 , those generated characters that showed no significant differences from 
+
+yielding a fused representation: the target font. We then calculated the average number of characters 
+𝐹 ′ identified as correct by the 20 experts, and this average value was used 
+𝑥 = 𝛼 𝐹 ′
+
+𝑒 + (1 − 𝛼)𝐹𝑥, (16)
+as a quantitative metric to assess the quality of the generated characters. 
+
+which is then forwarded to the next layer of the U-Net encoder. This statistical method ensures both the objectivity and reliability of the 
+As Δ𝑃 ∈ ℝ2 is an unconstrained two-dimensional real number, we results, while effectively reflecting the performance of each method in 
+
+impose a constraint on Δ𝑃  to better deform the spatial structure of font practical applications.
+images in the feature space. This constraint is utilized as a loss function 
+during neural network training. 4.2.  Implementation details
+offset = 1
+
+‖Δ𝑃‖1, (17)
+|𝑅| We used the AdamW optimizer to train the model, with 𝛽1 = 0.9 and 
+
+where Δ𝑃  represents the offset of sampling positions, and  represents 𝛽2 = 0.999. The image size was set to 256 × 256. Moreover, following Ho 
+the number of sampling positions. et al. (2020), we simply dropped out the source image and the reference 
+
+Since the offsets 𝑝𝑟 + Δ𝑝𝑚𝑟  are fractional, we employ bilinear inter- image with a probability of 0.1. We trained the model with a batch size 
+polation when (
+
+calculating 𝐹 of 16 for 400 epochs on 1800 characters across 250 fonts. The model 
+𝑐 𝑝 + 𝑝𝑟 + Δ𝑝𝑚
+
+)
+
+. This allows us to gather in-
+formation from the surrounding four points of the sampling position was trained using the PyTorch framework on 4 RTX 4090 GPUs for 60h. 
+𝑝 + 𝑝𝑟 + Δ𝑝𝑚, obtaining information on a larger scale. During training, the standard forward diffusion process was used, with 
+
+a total of 𝑇 = 1000 steps.
+3.6.  Loss function During the inference phase, we accelerated sampling using DDIM 
+
+(Song et al., 2021), setting the noise scale parameter 𝜂 to 0 to achieve a 
+We achieve font generation through denoising diffusion models, and completely deterministic sampling path. We selected time steps from the 
+
+the overall loss function of the proposed training framework is: original 𝑇 = 1000 at regular intervals, setting the interval step size 𝑐 =
+10, thus constructing a subsequence 𝜏 of length 100, so that the image 
+
+ = 𝜆MSE MSE + 𝜆off offset + 𝜆𝑐𝑝𝑐𝑝, (18) generation process can be completed using only 100 steps, significantly 
+in which, improving inference efficiency. On a single RTX 4090, with a batch size 
+
+[ ]
+
+( ) ( ( )) of 1, and setting the font image to a 256 × 256 resolution, 𝑘 = 3 style 
+ ‖
+
+𝑐𝑝 = 𝔼𝑡,𝑥 ‖ 𝑥0 −  𝑥̂
+0 0 𝑥𝑡, 𝑡, 𝜃
+
+‖
+
+‖ , (19)
+‖ ‖ reference characters, the full diffusion inference time for 100 steps is less 
+
+where (⋅) represents the features obtained by the VGG encoder.  than 2 s. Although our model is not advantageous in terms of inference 
+𝑐𝑝
+
+penalizes the inconsistency between the generated image t and the cor- speed and memory usage, the quality of the generated fonts directly 
+responding target image in terms of content. determines whether they can truly be put into production. Therefore, 
+
+in both experiments and applications, we always prioritize generation 
+4.  Experiment quality.
+
+4.1.  Datasets and evaluation metrics 4.3.  Comparison with state-of-the-art method
+
+4.1.1.  Character dataset In this subsection, we will compare our model with the following 
+We selected the top 300 Chinese characters with the highest coverage font generation methods:
+
+according to the structure decomposition table of Chinese characters 
+as the style reference character set. Additionally, we selected another 1. CG-GAN (Kong et al., 2022), which separates content and style ef-
+2000 Chinese characters based on the frequency of usage in the Modern fectively at a fine-grained level through component-level supervision 
+Chinese Commonly Used Character Table as the content character set. and adversarial learning, significantly improving the performance of 
+
+few-shot font generation.
+4.1.2.  Font dataset 2. FS-Font (Tang et al., 2022), which enhances performance and style 
+
+We collected a Chinese font dataset consisting of 300 different fonts, consistency by learning fine-grained local styles of reference glyphs 
+including standard fonts, calligraphy fonts, and handwritten fonts, to and spatial correspondences between content glyphs and reference 
+evaluate the network’s generalization capability on different characters glyphs.
+and fonts. We randomly selected 250 fonts (referred to as “Seen Fonts”) 3. CF-Font (Wang et al., 2023a), which projects content features into a 
+and 1800 Chinese characters (referred to as “Seen Characters”) as the linear space defined by the content features of base fonts and utilizes 
+training set. We evaluated the methods on two test sets: one test set in- the distance between two distributions as the reconstruction loss, ef-
+cluded 50 randomly selected seen fonts, containing 200 characters un- fectively improving the accuracy and effectiveness of font style trans-
+seen during training (referred to as “SFUC”); the other test set included fer.
+50 unseen fonts and 200 unseen characters (referred to as “UFUC”). 4. Diff-Font (He et al., 2024) incorporates additional stroke or com-
+
+ponent inputs as fine-grained conditions to generate fonts using a 
+4.1.3.  Evaluation metrics diffusion model.
+
+We evaluated the quality of generated font images through both 5. Fontdiffuser (Yang et al., 2024), which effectively handles complex 
+qualitative and quantitative methods. For quantitative evaluation, we characters and large style variations by introducing multi-scale con-
+employed four metrics: FID, SSIM, LPIPS, and L1 loss. SSIM and L1 loss tent aggregation blocks and style contrast refinement modules.
+at the pixel level evaluate the pixel consistency between target font 6. MSD-Font (Fu et al., 2024) is a multi-stage diffusion model frame-
+images and generated font images. LPIPS and FID measure the visual work that efficiently generates stylized font images from limited ref-
+similarity between two images, similar to human visual perception, by erence samples by sequentially constructing structure, transferring 
+understanding the perceptual differences in image content using deep style, and refining details using a dual-branch network.
+learning models.
+
+In order to evaluate the actual effects of different methods in gener- 4.3.1.  Quantitative comparison
+ating characters, we designed a user study. Specifically, we invited 20 In the experiments, we conducted quantitative comparisons on the 
+experts with extensive font design experience to evaluate 100 charac- SFUC and UFUC test sets separately. Our method outperforms previ-
+ters generated by each method. The experts marked as “correct” only ous methods on all metrics from pixel-level to perceptual-level. Overall, 
+
+8 
+
+
+
+Y. Liu et al. Expert Systems With Applications 296 (2026) 128987 
+
+Table 1 
+Quantitative comparison on SFUC and UFUC datasets.
+
+ SFUC  UFUC
+Methods
+
+ L1 ↓  SSIM ↑  FID ↓  LPIPS ↓  User ↑  L1 ↓  SSIM ↑  FID ↓  LPIPS ↓  User ↑
+ CG-GAN (Kong et al., 2022)  0.0725  0.501  95.21  0.1801  12.2  0.0778  0.485  99.34  0.2021  7.2
+ CF-Font (Wang et al., 2023a)  0.0701  0.522  91.43  0.1678  11.2  0.0742  0.501  93.43  0.1878  9.2
+ FS-Font (Tang et al., 2022)  0.0688  0.544  88.67  0.1586  21.3  0.0765  0.524  92.67  0.1726  8.7
+ Diff-Font (He et al., 2024)  0.0643  0.591  79.45  0.1456  31.2  0.0693  0.561  81.45  0.1563  30.8
+ Fontdiffuser (Yang et al., 2024)  0.0601  0.617  72.54  0.1324  57.5  0.0621  0.597  73.54  0.1344  51.5
+ MSD-Font (Fu et al., 2024)  0.0559  0.672  53.23  0.1123  65.4  0.0589  0.689  55.23  0.1423  63.4
+ Ours  0.0481  0.719  46.23  0.0917  69.5  0.0497  0.728  48.01  0.1102  66.5
+
+diffusion-based font generation methods outperform GAN-based meth- generalization. The accuracy of CG-GAN (Kong et al., 2022) and CF-Font 
+ods. The diffusion model decomposes the learning process into a step-by- (Wang et al., 2023a) in generating font images significantly decreases. 
+step denoising maximum likelihood estimation, with the loss function This phenomenon indicates that simply increasing the complexity of the 
+being mean squared error (Dhariwal & Nichol, 2021; Ho et al., 2020). network is not sufficient to address the complex challenges in font gen-
+There is no zero-sum game between the generator and the discrimina- eration. FS-Font (Tang et al., 2022) remains relatively stable due to its 
+tor, thus avoiding issues such as gradient vanishing or explosion and learning of styles across multiple characters.Diff-Font (He et al., 2024) 
+mode collapse. Additionally, our model receives content and style fea- incorporates strokes or components as fine-grained condition inputs; 
+tures at each time step through the FGSA and DACA modules, achieving however, this method fails to fully capture rich style features, leading 
+step-by-step fusion from coarse to fine. Compared to GANs, which de- to poorer performance in user evaluations compared to other diffusion-
+termine both shape and style in a single forward step, this multi-stage based methods. MSD-Font (Fu et al., 2024) experiences significant per-
+conditional injection provides self-correction opportunities for subse- formance degradation when generating unseen fonts due to the cumu-
+quent sampling, gradually eliminating early noise or local errors, further lative errors across multiple stages.
+enhancing the model’s training stability and multi-style font generation 
+capability. 4.3.2.  Qualitative comparison
+
+As shown in Table 1, the performance of other methods signif- In the experiments, we conducted qualitative comparisons on the 
+icantly drops in the UFUC and SFUC settings, indicating their lim- SFUC and UFUC settings separately. We selected ten different fonts, in-
+ited generalization capability when dealing with new fonts. In con- cluding print fonts, calligraphy fonts, and handwritten fonts, to evaluate 
+trast, our method exhibits only slight degradation, demonstrating strong the performance of all compared methods on different fonts. For each 
+
+Fig. 7. Qualitative comparison on SFUC and UFUC. Our method exhibits significant advantages in generating complex characters and handling substantial style 
+variations.
+
+9 
+
+
+
+Y. Liu et al. Expert Systems With Applications 296 (2026) 128987 
+
+font, we showcase three simple characters and two complex characters 
+to comprehensively evaluate the effects of each compared method.
+
+As shown in Fig. 7, in the SFUC setting, CG-GAN (Kong et al., 2022) 
+and CF-Font (Wang et al., 2023a) can only generate simple characters, 
+and when the character strokes are complex, the generated character im-
+ages contain unreasonable structures. FS-Font (Tang et al., 2022) gener-
+ated characters can maintain the complete structure. However, for fonts 
+with more complex strokes, the generated character images have miss-
+ing strokes. Diff-Font (He et al., 2024) and Fontdiffuser (Yang et al., 
+2024) can generate characters that are close to the target, but they suf-
+fer from issues like stroke adhesion and blurring. MSD-Font (Fu et al., 
+2024) can also generate characters close to the target, but it lacks rich 
+font details.
+
+As shown in Fig. 7, in the UFUC setting. The characters generated by 
+CG-GAN (Kong et al., 2022), CF-Font (Wang et al., 2023a), and FS-Font 
+(Tang et al., 2022) have incomplete structures. The characters gener-
+ated by Diff-Font (He et al., 2024), Fontdiffuser (Yang et al., 2024), 
+and MSD-Font (Fu et al., 2024) suffer from issues like stroke adhesion Fig. 8. We visually compare two fonts. We overlay the generated font images 
+and blurring, making it impossible to clearly recover the details of un- with real font images, showing only minor differences between the generated 
+seen fonts.Our method demonstrates significant advantages in generat- font images and the real ones.
+ing complex characters and handling substantial style variations, while 
+other methods still exhibit issues such as missing strokes, blurriness, and 
+inconsistent styles. are shown in Table 2, where the model with the added FGSA module 
+
+Analysis combining Table 1 and Fig. 7 shows that learning the spa- performs better on pixel-level evaluation metrics such as L1 and SSIM. 
+tial correspondence between content glyphs and reference glyphs (FS- However, FID, LPIPS, and user studies provide stronger evidence of its 
+Font Tang et al., 2022) is more effective than supervision through effectiveness.
+component-level information (CG-GAN (Kong et al., 2022)). The intro-
+duction of font component information as fine-grained conditions (Diff- 4.4.2.  The effectiveness of DACA
+Font He et al., 2024) results in higher font quality generated by the The DACA module is mainly used to maintain the structural integrity 
+diffusion model compared to using only component information. This of characters during style conversion. As shown in Table 2, there is 
+indicates that the diffusion model is more likely to generate high-quality a slight improvement in FID and LPIPS evaluation metrics, indicating 
+font images. MSD-Font (Fu et al., 2024), through a multi-stage diffusion minimal visual perceptual differences in the generated font images and 
+model framework, first completes structural construction, style transfer, minor impacts on style. However, there is a significant improvement 
+and detail optimization sequentially, efficiently generating stylized font in L1, SSIM, and user studies, suggesting that the character structure is 
+images. This fully demonstrates the importance of restoring character more complete. Additionally, Fig. 9 provides more intuitive results.
+structure in the early stages of iteration. Additionally, we compared the impact of no attention, global atten-
+
+Our method, through an adaptive fusion parameter-controlled con- tion, and deformable attention on the quality of generated fonts. The 
+tent aggregation module and style aggregation module, strengthens con- results, as shown in Table 3, reveal that the attention mechanism has 
+tent guidance to aggregate style features in the early noise-dominant 
+phase, while weakening content injection in the later stages when clean Table 2 
+signals dominate. It shows significant advantages under both the SFUC Effectiveness ablation experiments of FGSA and DACA modules.
+and UFUC test settings. Our method clearly alleviates issues such as 
+stroke missing, stroke sticking, and font detail loss Evaluation  Effectiveness of FGSA  Effectiveness of DACA
+
+in generated char- metrics
+acters.  w/o FGSA  w/ FGSA  w/o DACA  w/ DACA
+
+ L1 ↓  0.0552  0.0492  0.0583  0.0486
+4.3.3.  Visually compare  SSIM ↑  0.664  0.721  0.628  0.718
+
+To better demonstrate the consistency between the font images gen-  FID ↓  62.82  47.45  54.67  47.64
+erated by our method and the real font images, we compare them by  LPIPS ↓  0.1243  0.0926  0.1132  0.0938
+
+ User ↑  57.4  68.2  55.6  68.8
+overlaying the real font images onto the generated font images for five 
+fonts of different thicknesses. As shown in Fig. 8, the font images gener- Table 3 
+ated by our method exhibit only minor differences compared to the real 
+font images, indicating excellent performance in font image generation. Effects of various attention mechanisms on the quality of generated 
+
+fonts.
+As shown in Fig. 8, our method exhibits excellent performance in font 
+generation tasks with different stroke thicknesses. The generated font  Attention  L1 ↓  SSIM ↑  FID ↓  LPIPS ↓
+images only show slight differences compared to real font images, fully  w/o Attention  0.0583  0.628  54.67  0.1132
+indicating that the method is capable of generating family fonts with  Global Attention  0.0475  0.721  47.54  0.0901
+various stroke thicknesses.  w/ FGSA  0.0481  0.719  46.23  0.0917
+
+4.4.  Ablation studies Table 4 
+Effect of different fusion functions on reconstruction quality.
+
+4.4.1.  The effectiveness of FGSA  Method  L1 ↓  SSIM ↑  FID ↓  LPIPS ↓
+To validate the effectiveness of the proposed FGSA module, we com- 𝛼 = 0  0.0601  0.617  56.78  0.1285
+
+pared the performance of two models: one with the FGSA module added 𝛼 = 1  0.0533  0.643  51.56  0.1133
+and the other with the FGSA module removed. After removing the FGSA 𝛼 = 𝑥2  0.0519  0.691  49.89  0.1095
+module, we concatenated the style features with the decoder features, 𝛼 = 𝑒− ln(100)⋅𝑥  0.0581  0.608  53.83  0.1202
+while keeping other settings unchanged. The quantitative comparisons  Adaptive 𝛼  0.0489  0.711  47.92  0.0951
+
+10 
+
+
+
+Y. Liu et al. Expert Systems With Applications 296 (2026) 128987 
+
+Fig. 9. Validation of the effectiveness of the DACA module. The module better preserves the structural integrity of characters, especially in terms of details.
+
+In addition, we also tested several commonly used functions, includ-
+ing linear functions, constant functions, quadratic functions, exponen-
+tial functions, and trigonometric functions, as shown in Fig. 11. We per-
+formed a quantitative analysis on these six functions and the 𝛼 learned 
+through MLP. The experimental results are shown in Table 4. Among 
+all the functions, focusing on content-guided features in the early stages 
+yields better results compared to focusing on noise features. This indi-
+rectly confirms that noise features are ineffective in aggregating style. 
+While carefully designed fusion functions have the potential to achieve 
+better results, using adaptive fusion is a simpler and more efficient ap-
+proach.
+
+4.5.  Analysis
+
+Fig. 10. Fusion parameter visualization. 4.5.1.  The influence of DACA hyperparameters on generated font quality
+Within the proposed DACA module, we set two hyperparameters: 
+
+the number of sampling points 𝑟 and the attention heads 𝑚. To in-
+vestigate the impact of 𝑟 and 𝑚 on the quality of generated fonts, 
+we conducted an experiment by setting different numbers of sampling 
+points and attention heads, respectively, and trained and evaluated the 
+model under the same training data and other hyperparameter set-
+tings. The results are shown in Fig. 12. We chose 𝑟 = 4 sampling points. 
+
+Fig. 11. Fusion function.
+
+a significant impact on font generation quality, with all four metrics 
+significantly improved after introducing the attention mechanism. Our 
+method achieved experimental results comparable to those of global at-
+tention, but with only linear-level computational overhead, avoiding the 
+quadratic computational complexity (𝑁2) of global cross-attention.
+
+4.4.3.  Fusion parameter analysis
+We visualize the values of the fusion parameter 𝛼 at different sam-
+
+pling stages. As shown in Fig. 10, in the early stages of sampling, the 
+value of 𝛼 is relatively large, indicating that the model tends to rely on 
+content-guided character aggregation for style features. In later stages, 
+the value of 𝛼 gradually decreases, suggesting that the model increas- Fig. 12. Effects of different numbers of sampling points and attention heads on 
+ingly depends on the reconstructed content-aggregated style features. generated font quality.
+
+11 
+
+
+
+Y. Liu et al. Expert Systems With Applications 296 (2026) 128987 
+
+Table 5 
+Quantitative comparison of the influence of fixed and randomly selected style 
+reference characters on style learning ability.
+
+Random style reference Fixed style reference 
+Method
+
+characters characters
+
+ L1 ↑  SSIM ↓  L1 ↑  SSIM ↓
+ CG-GAN (Kong et al., 2022)  0.0732  0.512  0.0711  0.532
+ CF-Font (Wang et al., 2023a)  0.0713  0.523  0.0692  0.542
+ FS-Font (Tang et al., 2022)  0.0694  0.574  0.0673  0.541
+ Diff-Font (He et al., 2024)  0.0653  0.596  0.0632  0.622
+ Fontdiffuser (Yang et al., 2024)  0.0611  0.612  0.0562  0.685
+ MSD-Font (Fu et al., 2024)  0.0553  0.671  0.0512  0.688
+ Ours  0.0514  0.683  0.0486  0.714
+
+4.5.3.  Visualization of FGSA module
+To validate the effectiveness of the FGSA module, we demonstrate 
+
+attention feature maps. As depicted in Fig. 13, we illustrate attention 
+feature maps of two different difficulty characters on four font styles, 
+showing that the proposed style aggregation module enables the model 
+to focus on correct component-level styles within style reference char-
+acters and to extract fine-grained local style representations for content.
+
+4.5.4.  Backward process: FGSA attention and font quality
+To verify the font image generation quality at different time steps 
+
+Fig. 13. Visualization of the FGSA Module. during the backward process and the attention capability of the FGSA 
+module for font structural details, we demonstrate the generated font 
+images and the attention feature maps of the FGSA module at different 
+
+Although better results can be achieved at 𝑟 = 6, this requires more time steps on two fonts.
+parameters. We selected 𝑚 = 3 attention heads. As the number of at- The experimental results are shown in Fig. 14. At step 0, the model 
+tention heads and sampling points increases, the complexity of the outputs an image containing a significant amount of noise. At this stage, 
+model significantly rises, leading to a deterioration in the quality of the FGSA module uses content characters to guide the FGSA module’s 
+generation. attention to the overall structure of the characters. During the iteration 
+
+process, the fusion coefficient 𝛼 gradually decreases to suppress the in-
+jection of content features by the DACA module. At this point, the FGSA 
+
+4.5.2.  Effect of different style inputs module is guided by the reconstructed font image, and the attention 
+To verify the effectiveness of the proposed style-content refer- focuses on the component-level features of the characters, while gradu-
+
+ence mapping in enhancing style learning and content retention abil- ally improving the quality of the generated fonts. In the later stages of 
+ities, a quantitative comparison was conducted between the effects iteration, the FGSA module clearly guides the attention to focus on the 
+of fixed style reference characters and randomly selected style ref- common component parts.
+erence characters. As shown in Table 5, compared to randomly
+selected style reference characters, fixed style reference characters out- 4.6.  Extended experiments
+perform on all the evaluation metrics. The fixed style reference char-
+acter set provides the model with a stable and representative set 4.6.1.  Transferring arbitrary font styles
+of style samples, aiding the model in more effectively learning style Our model is capable of generating fonts with arbitrary style-content 
+features. combinations. For qualitative and quantitative comparisons, we train 
+
+Fig. 14. Font image generation results at different iteration steps and FGSA module attention feature maps.
+
+12 
+
+
+
+Y. Liu et al. Expert Systems With Applications 296 (2026) 128987 
+
+Fig. 15. Multiple-to-Multiple character transformation. Our model can transform font styles between any two fonts.
+
+Fig. 16. Validation experiment on pseudo-characters obtained through manual manipulation. (a) Validation of content effectiveness. (b) Validation of style effec-
+tiveness.
+
+Fig. 17. Transferring Chinese font styles to Japanese and Korean fonts.
+
+the model using Song typeface to maintain consistency with other meth- strokes of Chinese characters, we create some unseen pseudo-characters, 
+ods. To verify the influence of different style content font combinations which are used as content and style characters separately.
+on the generation quality, we train the model using randomly selected First, we use pseudo-characters as content characters and conduct 
+content and style font combinations. As shown in Fig. 15, we can gen- experiments on three different font styles. The experimental results in 
+erate character images with specified styles and content, regardless of Fig. 16(a) show excellent content consistency, indicating that our con-
+the style of content fonts. tent encoder is a universal network capable of effectively capturing char-
+
+acter content, irrespective of stroke layout, character recognizability, 
+and other factors. Next, we use pseudo-characters as style characters 
+
+4.6.2.  Pseudo-Chinese character experiment and normal characters as content characters. The generated results, as 
+In the pseudo-Chinese character experiment, to validate whether our shown in Fig. 16(b), exhibit the same font style as the style charac-
+
+method explicitly separates content and style, we conduct a pseudo- ters, regardless of whether the stroke of the style characters is complete. 
+character verification experiment. By changing or removing some These experiments on pseudo-characters strongly demonstrate that our 
+
+13 
+
+
+
+Y. Liu et al. Expert Systems With Applications 296 (2026) 128987 
+
+4.6.4.  Generation of multiple style fonts
+The above experiments demonstrate the effectiveness of the method 
+
+proposed in this paper for font generation. This section further show-
+cases the generation results on a greater variety of font styles. As shown 
+in Fig. 19, by comparing the target fonts with the generated fonts, it can 
+be seen that the method proposed in this paper achieves good results 
+in generating fonts with different styles, proving that the method has 
+strong generalization ability and can adapt well to various font styles.
+
+5.  Limitations
+
+As depicted in Fig. 20(a), due to the morphological similarity of 
+Fig. 18. Transferring Chinese font styles to Arabic and Indic scripts. many strokes, transitions from one font style to another can be consid-
+
+ered as variations of the same stroke style. This may result in different 
+stroke categories being misidentified as the same category, leading to 
+
+model is capable of inference rather than memorization of existing data erroneous stroke generation. As shown in Fig. 20(b), our method fails 
+distributions. to handle irregular calligraphy fonts. This is primarily because the same 
+
+stroke in calligraphy fonts has inconsistent forms across different charac-
+4.6.3.  Cross-language font generation ters, making it difficult to learn stable style features. We hope to address 
+
+Most font generation methods focus only on converting font styles these issues in future work.
+within the same language. However, in many languages similar to Chi-
+nese, different styles may exist due to cultural variations. Expanding 6.  Conclusion
+Chinese font styles to other languages enriches their font styles. To vali-
+date the ability of our method in cross-language style transfer, we utilize In this paper, we propose a diffusion-based image-to-image font gen-
+our method to learn styles from Chinese characters and transfer them to eration method capable of generating fonts with arbitrary style-content 
+characters in other languages. combinations. Specifically, we set a small character set as the style ref-
+
+In the experiment, Japanese and Korean fonts are used as the font erence set and match the best style reference character for each Chinese 
+content images, while Chinese fonts serve as the style images. As shown character based on the proposed content-style reference mapping. We 
+in Fig. 17, our method can generate Japanese and Korean fonts consis- further propose the FGSA module to transfer styles from multiple refer-
+tent with Chinese font styles. High-quality cross-language style transfer ence characters to the content character. We also introduce the DACA 
+contributes to the advancement of cross-language font generation and module, which utilizes an offset-enhanced multi-head Attention Mecha-
+offers more possibilities for font design and applications. nism to handle geometric deformations between fonts, ensuring consis-
+
+To further validate the cross-script generalization ability, we addi- tency in character content during iterative denoising.
+tionally constructed Arabic and Indian font datasets, each containing The experimental results show that, compared to GAN models, the 
+50 common fonts, with 100 characters per font. As shown in Fig. 18, diffusion model’s step-by-step denoising mechanism can self-correct 
+the experimental results indicate that despite significant structural dif- content and style in each iteration to generate high-quality Chinese 
+ferences in strokes between Arabic, Indian, and East Asian scripts, our fonts. By fixing the style character set, a balanced and representative 
+method can still robustly separate “content” and “style” and synthesize sample distribution is provided for component-level style learning. The 
+high-quality cross-script fonts without introducing any domain adapta- proposed DACA injects multi-scale content features in the early stages 
+tion strategies. of iteration to guide the FGSA module to focus on the overall style 
+
+Fig. 19. The generation results of different style fonts using the method in this paper.
+14 
+
+
+
+Y. Liu et al. Expert Systems With Applications 296 (2026) 128987 
+
+Fig. 20. (a) Some strokes of the fonts may contain errors due to the similarity of certain strokes, leading to misidentification. (b) The same stroke in calligraphy 
+fonts does not have a consistent form across different characters.
+
+of the character. As the fusion coefficient gradually decreases to sup- Dai, J., Qi, H., Xiong, Y., Li, Y., Zhang, G., Hu, H., & Wei, Y. (2017). Deformable convo-
+press content information, the generated font image aggregates the style. lutional networks. In Proceedings of the IEEE international conference on computer vision 
+The proposed DACA and FGSA modules, in collaboration with the de- (pp. 764–773). https://doi.org/10.1109/iccv.2017.89
+
+Department of Language Information Management, Ministry of Education of the Peo-
+noising process of the diffusion model, significantly enhance the qual- ple’s Republic of China, National Language Commission (2009). Specification of com-
+ity of Chinese font image generation. Extensive experiments demon- monly used Chinese character components and component names (GF 0014-2009). 
+strate the effectiveness of our method. Additionally, its applicability in https://www.moe.gov.cn/jyb_sjzl/ziliao/A19/201001/t20100115_75696.html.
+
+Dhariwal, P., & Nichol, A. (2021). Diffusion models beat gans on image synthesis. Advances 
+cross-language font generation tasks is verified. The proposed method in Neural Information Processing Systems, 34, 8780–8794. 
+is an important application for font designers and personalized font Fu, B., Yu, F., Liu, A., Wang, Z., Wen, J., He, J., & Qiao, Y. (2024). Generate like experts: 
+users. Multi-stage font generation by incorporating font transfer process into diffusion mod-
+
+els. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition 
+(pp. 6892–6901). https://doi.org/10.1109/cvpr52733.2024.00658
+
+CRediT authorship contribution statement Gao, S., Liu, X., Zeng, B., Xu, S., Li, Y., Luo, X., Liu, J., Zhen, X., & Zhang, B. (2023). Im-
+plicit diffusion models for continuous super-resolution. In Proceedings of the IEEE/CVF 
+conference on computer vision and pattern recognition (pp. 10021–10030). https://doi.
+
+Yu Liu: Conceptualization, Methodology, Writing – original draft; org/10.1109/CVPR52729.2023.00966
+Yang Ding: Data curation, Formal analysis, Visualization; Fatimah Gao, Y., Guo, Y., Lian, Z., Tang, Y., & Xiao, J. (2019). Artistic glyph image synthesis 
+Binti Khalid: Software, Validation; Cunrui Wang: Supervision, Project via one-stage few-shot learning. ACM Transactions on Graphics (TOG), 38(6), 1–12. 
+
+https://doi.org/10.1145/3355089.3356574
+administration, Funding acquisition, Writing – review & editing; Lei Gao, Y., & Wu, J. (2020). Gan-based unpaired chinese character image translation via 
+Wang: Investigation, Resources. skeleton transformation and stroke rendering. In Proceedings of the AAAI conference 
+
+on artificial intelligence (pp. 646–653). (vol. 34). https://doi.org/10.1609/aaai.v34i01.
+5405
+
+Data availability Goodfellow, Ian J., Pouget-Abadie, J., Mirza, M., Xu, B., Warde-Farley, D., Ozair, S., 
+Courville, A., & Bengio, Y. (2014). Generative adversarial nets. In Z.Ghahramani, 
+
+Data will be made available on request. M.Welling, C.Cortes, N.Lawrence, & K.Q.Weinberger (Eds.), Advances in Neural Infor-
+mation Processing Systems (pp. 1–9). (vol. 27). Curran Associates, Inc. 
+
+Hassan, A. U., Ahmed, H., & Choi, J. (2021). Unpaired font family synthesis using 
+Declaration of competing interest conditional generative adversarial networks. Knowledge-Based Systems, 229, 107304. 
+
+https://doi.org/10.1016/j.knosys.2021.107304
+He, H., Chen, X., Wang, C., Liu, J., Du, B., Tao, D., & Yu, Q. (2024). Diff-font: Diffusion 
+
+The authors declare that they have no known competing financial model for robust one-shot font generation. International Journal of Computer Vision, (pp. 
+interests or personal relationships that could have appeared to influence 1–15). 132(11). https://doi.org/10.1007/s11263-024-02137-0
+
+Ho, J., Jain, A., & Abbeel, P. (2020). Denoising diffusion probabilistic models. Advances 
+the work reported in this paper. in Neural Information Processing Systems, 33, 6840–6851. 
+
+Huang, Y., He, M., Jin, L., & Wang, Y. (2020). Rd-gan: Few/zero-shot chinese character 
+Acknowledgements style transfer via radical decomposition and rendering. In Computer vision–ECCV 2020: 
+
+16th European conference, Glasgow, UK, August 23–28, 2020, proceedings, part VI 16
+(pp. 156–172). Springer. https://doi.org/10.1007/978-3-030-58539-6_10
+
+This study was supported in part by Liaoning Provincial Science and Hwang, J.-S., Lee, S.-H., & Lee, S.-W. (2024). Hiddensinger: High-quality singing voice syn-
+Technology Plan Joint Program (Technology R&D Program Project) un- thesis via neural audio codec and latent diffusion models. Neural Networks, (p. 106762). 
+
+(vol. 181). https://doi.org/10.1016/j.neunet.2024.106762
+der Grants 2024JH2/102600108, the Science and Technology Innova- Isola, P., Zhu, J.-Y., Zhou, T., & Efros, A. A. (2017). Image-to-image translation with con-
+tion Fundation of Dalian under Grant 2023JJ12GX026, and in part by ditional adversarial networks. In Proceedings of the IEEE conference on computer vision 
+the Foundation of Key Laboratory of Education Informatization for Na- and pattern recognition (pp. 1125–1134). https://doi.org/10.1109/CVPR.2017.632
+
+Jia, C., Yang, Y., Xia, Y., Chen, Y.-T., Parekh, Z., Pham, H., Le, Q., Sung, Y.-H., Li, Z., & 
+tionalities (Yunnan Normal University, Ministry of Education.) under Duerig, T. (2021). Scaling up visual and vision-language representation learning with 
+Grant EIN2024B002. noisy text supervision. In International conference on machine learning (pp. 4904–4916). 
+
+PMLR. 
+Jiang, Y., Lian, Z., Tang, Y., & Xiao, J. (2019). Scfont: Structure-guided chinese font
+
+References generation via deep stacked networks. In Proceedings of the AAAI conference on arti-
+ficial intelligence (pp. 4015–4022). AAAI Press. https://doi.org/10.1609/aaai.v33i01.
+
+Bhunia, A. K., Khan, S., Cholakkal, H., Anwer, R. M., Khan, F. S., & Shah, M. (2021). 33014015
+Handwriting transformers. In Proceedings of the IEEE/CVF international conference on Kim, M., & Choi, H.-C. (2021). Uncorrelated feature encoding for faster image style trans-
+computer vision (pp. 1086–1094). https://doi.org/10.1109/iccv48922.2021.00112 fer. Neural Networks, 140, 148–157. https://doi.org/10.1016/j.neunet.2021.03.007
+
+Cha, J., Chun, S., Lee, G., Lee, B., Kim, S., & Lee, H. (2020). Few-shot compositional Ko, K., Yeom, T., & Lee, M. (2023). Superstargan: Generative adversarial networks for 
+font generation with dual memory. In Computer vision – ECCV 2020 (pp. 735–751). image-to-image translation in large-scale domains. Neural Networks, 162, 330–339. 
+Springer. https://doi.org/10.1007/978-3-030-58529-7_43 https://doi.org/10.1016/j.neunet.2023.02.042
+
+15 
+
+
+
+Y. Liu et al. Expert Systems With Applications 296 (2026) 128987 
+
+Kong, Y., Luo, C., Ma, W., Zhu, Q., Zhu, S., Yuan, N., & Jin, L. (2022). Look closer Wang, L., Liu, Y., Sharum, M. Y., Yaako, R. B., Kasmiranm, K. A., & Wang, C. (2025). 
+to supervise better: One-shot font generation via component-based discriminator. Deep learning for chinese font generation: A survey. Expert Systems with Applications, 
+In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition (p. 127105). (vol. 276). https://doi.org/10.1016/j.eswa.2025.127105
+(pp. 13482–13491). https://doi.org/10.1109/cvpr52688.2022.01312 Wang, Y., Wang, Y., Yu, L., Zhu, Y., & Lian, Z. (2023b). Deepvecfont-v2: Exploiting 
+
+Lei, W., Cunrui, W., & Yu, L. (2025). Ehw-font: A handwriting enhancement approach transformers to synthesize vector fonts with higher quality. In Proceedings of the 
+mimicking human writing processes. Expert Systems with Applications, (p. 127278). IEEE/CVF conference on computer vision and pattern recognition (pp. 18320–18328). 
+(vol. 278). https://doi.org/10.1016/j.eswa.2025.127278 https://doi.org/10.1109/cvpr52729.2023.01757
+
+Li, J., Li, D., Xiong, C., & Hoi, S. (2022). Blip: Bootstrapping language-image pre-training Wen, C., Pan, Y., Chang, J., Zhang, Y., Chen, S., Wang, Y., Han, M., & Tian, Q. 
+for unified vision-language understanding and generation. In International conference (2021a). Handwritten chinese font generation with collaborative stroke refinement. 
+on machine learning (pp. 12888–12900). PMLR. In Proceedings of the IEEE/CVF winter conference on applications of computer vision
+
+Liu, M.-Y., Huang, X., Mallya, A., Karras, T., Aila, T., Lehtinen, J., & Kautz, J. (2019). (pp. 3882–3891). https://doi.org/10.1109/WACV48630.2021.00393
+Few-shot unsupervised image-to-image translation. In Proceedings of the IEEE/CVF in- Wen, Q., Li, S., Han, B., & Yuan, Y. (2021b). Zigan: Fine-grained chinese calligraphy font 
+ternational conference on computer vision (pp. 10551–10560). generation via a few-shot style transfer approach. In Proceedings of the 29th ACM in-
+
+Liu, X., Meng, G., Chang, J., Hu, R., Xiang, S., & Pan, C. (2022). Decoupled representation ternational conference on multimedia (pp. 621–629). https://doi.org/10.1145/3474085.
+learning for character glyph synthesis. IEEE Transactions on Multimedia, 24, 1787–1799. 3475225
+https://doi.org/10.1109/tmm.2021.3072449 Xie, Y., Chen, X., Sun, L., & Lu, Y. (2021). Dg-font: Deformable generative networks for 
+
+Liu, Y., Fatimah, B. K., Wang, L., Zhang, Y., & Wang, C. (2024). Elegantly written: Dis- unsupervised font generation. In Proceedings of the IEEE/CVF winter conference on ap-
+entangling writer and character styles for enhancing online chinese handwriting. In plications of computer vision (pp. 735–751). IEEE. https://doi.org/10.1109/cvpr46437.
+European conference on computer vision (pp. 409–425). Springer. https://doi.org/10. 2021.00509
+1007/978-3-031-73242-3_23 Yang, Y., Huang, W., Wei, Y., Peng, H., Jiang, X., Jiang, H., Wei, F., Wang, Y., Hu, H., 
+
+Liu, Y., & Lian, Z. (2024). Deepcallifont: Few-shot chinese calligraphy font synthesis by Qiu, L. et al. (2023). Attentive mask clip. In Proceedings of the IEEE/CVF international 
+integrating dual-modality generative models. In Proceedings of the AAAI conference on conference on computer vision (pp. 2771–2781). https://doi.org/10.1109/iccv51070.
+artificial intelligence (pp. 3774–3782). (vol. 38). https://doi.org/10.1609/aaai.v38i4. 2023.00260
+28168 Yang, Z., Peng, D., Kong, Y., Zhang, Y., Yao, C., & Jin, L. (2024). Fontdiffuser: One-
+
+Park, S., Chun, S., Cha, J., Lee, B., & Shim, H. (2021a). Few-shot font generation with shot font generation via denoising diffusion with multi-scale content aggregation and 
+localized style representations and factorization. In Proceedings of the AAAI conference style contrastive learning. In Proceedings of the AAAI conference on artificial intelligence
+on artificial intelligence (pp. 2393–2402). AAAI Press. https://doi.org/10.1609/aaai. (pp. 6603–6611). (vol. 38). https://doi.org/10.1609/aaai.v38i7.28482
+v35i3.16340 Yao, M., Zhang, Y., Lin, X., Li, X., & Zuo, W. (2024). Vq-font: Few-shot font generation with 
+
+Park, S., Chun, S., Cha, J., Lee, B., & Shim, H. (2021b). Multiple heads are better than structure-aware enhancement and quantization. In Proceedings of the AAAI conference 
+one: Few-shot font generation with multiple localized experts. In Proceedings of the on artificial intelligence (pp. 16407–16415). (vol. 38). https://doi.org/10.1609/aaai.
+IEEE/CVF international conference on computer vision (pp. 13900–13909). https://doi. v38i15.29577
+org/10.1109/iccv48922.2021.01364 Yi, Z., Zhang, H., Tan, P., & Gong, M. (2017). Dualgan: Unsupervised dual learning for 
+
+Peebles, W., & Xie, S. (2023). Scalable diffusion models with transformers. In Proceedings image-to-image translation. In Proceedings of the IEEE international conference on com-
+of the IEEE/CVF international conference on computer vision (pp. 4195–4205). https:// puter vision (pp. 2849–2857). https://doi.org/10.1109/iccv.2017.310
+doi.org/10.1109/iccv51070.2023.00387 Yu, L., Fatimah, B. K., Mas Rina, B. M., & Azreen, B. A. (2024a). Dual-modality learning 
+
+Qi, T., Fang, S., Wu, Y., Xie, H., Liu, J., Chen, L., He, Q., & Zhang, Y. (2024). Deadiff: An and transformer-based approach for high-quality vector font generation. Expert Systems 
+efficient stylization diffusion model with disentangled representations. Proceedings of with Applications, 240, 122405. https://doi.org/10.1016/j.eswa.2023.122405
+the IEEE/CVF conference on computer vision and pattern recognition. https://doi.org/10. Yu, L., Fatimah, B. K., Wang, C., Mas Rina, B. M., & Azreen, B. A. (2024b). An end-to-end 
+1109/cvpr52733.2024.00830 chinese font generation network with stroke semantics and deformable attention skip-
+
+Rombach, R., Blattmann, A., Lorenz, D., Esser, P., & Ommer, B. (2022). High-resolution connection. Expert Systems with Applications, 237, 121407. https://doi.org/10.1016/j.
+image synthesis with latent diffusion models. In Proceedings of the IEEE/CVF conference eswa.2023.121407
+on computer vision and pattern recognition (pp. 10684–10695). https://doi.org/10.1101/ Zeng, J., Chen, Q., Liu, Y., Wang, M., & Yao, Y. (2021). StrokeGAN: Reducing mode col-
+2022.11.18.517004 lapse in chinese font generation via stroke encoding. In Proceedings of the AAAI con-
+
+Saharia, C., Chan, W., Saxena, S., Li, L., Whang, J., Denton, E. L., Ghasemipour, K., Gon- ference on artificial intelligence (pp. 3270–3277). https://doi.org/10.1609/aaai.v35i4.
+tijo Lopes, R., Karagol Ayan, B., Salimans, T. et al. (2022). Photorealistic text-to-image 16438
+diffusion models with deep language understanding. Advances in Neural Information Zeng, S., & Pan, Z. (2022). An unsupervised font style transfer model based on generative 
+Processing Systems, 35, 36479–36494. adversarial networks. Multimedia Tools and Applications, 81(4), 5305–5324. https://
+
+Sohl-Dickstein, J., Weiss, E., Maheswaranathan, N., & Ganguli, S. (2015). Deep unsuper- doi.org/10.1007/s11042-021-11777-0
+vised learning using nonequilibrium thermodynamics. In International conference on Zhang, Y., Tian, Y., & Hou, J. (2023). Csast: Content self-supervised and style contrastive 
+machine learning (pp. 2256–2265). PMLR. learning for arbitrary style transfer. Neural Networks, 164, 146–155. https://doi.org/
+
+Song, J., Meng, C., & Ermon, S. (2021). Denoising diffusion implicit models. In International 10.1016/j.neunet.2023.04.037
+conference on learning representations (ICLR). Zhang, Y., Zhang, Y., & Cai, W. (2018). Separating style and content for generalized style 
+
+Tang, L., Cai, Y., Liu, J., Hong, Z., Gong, M., Fan, M., Han, J., Liu, J., Ding, E., & Wang, J. transfer. In Proceedings of the IEEE/CVF winter conference on applications of computer 
+(2022). Few-shot font generation by learning fine-grained local styles. In Proceedings vision (pp. 8447–8455). IEEE. https://doi.org/10.1109/cvpr.2018.00881
+of the IEEE/CVF winter conference on applications of computer vision (pp. 7895–7904). Zhu, J.-Y., Park, T., Isola, P., & Efros, A. A. (2017). Unpaired image-to-image translation 
+IEEE. https://doi.org/10.1109/cvpr52688.2022.00774 using cycle-consistent adversarial networks. In Proceedings of the IEEE international con-
+
+Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A. N., Kaiser, Ł., & ference on computer vision (pp. 2223–2232). https://doi.org/10.1109/iccv.2017.244
+Polosukhin, I. (2017). Attention is all you need. Advances in Neural Information Pro- Zhu, Y., Li, Z., Wang, T., He, M., & Yao, C. (2023). Conditional text image generation 
+cessing Systems (pp. 1–11). (vol. 30). with diffusion models. In Proceedings of the IEEE/CVF conference on computer vision 
+
+Wang, C., Zhou, M., Ge, T., Jiang, Y., Bao, H., & Xu, W. (2023a). Cf-font: Content fusion and pattern recognition (pp. 14235–14245). https://doi.org/10.1109/cvpr52729.2023.
+for few-shot font generation. In Proceedings of the IEEE/CVF conference on computer 01368
+vision and pattern recognition (pp. 1858–1867). https://doi.org/10.1109/cvpr52729.
+2023.00185
+
+16

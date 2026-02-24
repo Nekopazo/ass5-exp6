@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Source-aligned FontDiffuser model with PartBank reference tokens.
+"""Source-aligned FontDiffuser model with PartBank reference part vectors.
 
 This module keeps the original FontDiffuser UNet/RSI/offset path and only
-replaces reference style-token construction with PartBank-derived features.
+replaces reference style conditioning with PartBank-derived part vectors.
 """
 
 from __future__ import annotations
@@ -20,8 +20,7 @@ class SourcePartRefUNet(nn.Module):
     def __init__(
         self,
         in_channels: int = 3,
-        image_size: int = 96,
-        style_k: int = 3,
+        image_size: int = 256,
         content_start_channel: int = 64,
         style_start_channel: int = 64,
         unet_channels: tuple[int, int, int, int] = (64, 128, 256, 512),
@@ -32,22 +31,19 @@ class SourcePartRefUNet(nn.Module):
         super().__init__()
         self.in_channels = int(in_channels)
         self.image_size = int(image_size)
-        self.style_k = int(style_k)
         self.content_encoder_downsample_size = int(content_encoder_downsample_size)
         self.cross_attention_dim = style_start_channel * 16
 
         profile = str(conditioning_profile).strip().lower()
-        if profile not in {"baseline", "token_only", "rsi_only", "full"}:
+        if profile not in {"baseline", "parts_vector_only", "rsi_only", "full"}:
             raise ValueError(
-                "conditioning_profile must be one of: baseline, token_only, rsi_only, full"
+                "conditioning_profile must be one of: baseline, parts_vector_only, rsi_only, full"
             )
         self.conditioning_profile = profile
-        self.enable_token_condition = profile in {"token_only", "full"}
+        self.enable_parts_vector_condition = profile in {"parts_vector_only", "full"}
         self.enable_rsi_condition = profile in {"rsi_only", "full"}
 
         self.content_encoder = ContentEncoder(G_ch=content_start_channel, resolution=self.image_size)
-        self.part_token_count = 8
-        self.part_token_heads = 8
         self.part_patch_encoder = nn.Sequential(
             nn.Conv2d(self.in_channels, 64, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(64),
@@ -63,18 +59,8 @@ class SourcePartRefUNet(nn.Module):
             nn.Linear(256, self.cross_attention_dim),
             nn.LayerNorm(self.cross_attention_dim),
         )
-        self.part_queries = nn.Parameter(torch.randn(self.part_token_count, self.cross_attention_dim) * 0.02)
-        self.part_tokenizer = nn.MultiheadAttention(
-            embed_dim=self.cross_attention_dim,
-            num_heads=self.part_token_heads,
-            batch_first=True,
-        )
-        self.part_token_refine = nn.Sequential(
-            nn.LayerNorm(self.cross_attention_dim),
-            nn.Linear(self.cross_attention_dim, self.cross_attention_dim),
-            nn.GELU(),
-            nn.Linear(self.cross_attention_dim, self.cross_attention_dim),
-        )
+        # Null parts_vector used by strict unconditional branch in CFG sampling.
+        self.null_part_vector = nn.Parameter(torch.zeros(self.cross_attention_dim))
         self.unet = UNet(
             sample_size=self.image_size,
             in_channels=self.in_channels,
@@ -99,12 +85,77 @@ class SourcePartRefUNet(nn.Module):
         )
         self.last_offset_loss = torch.tensor(0.0)
 
-    def _resize(self, x: torch.Tensor) -> torch.Tensor:
-        if x.shape[-1] == self.image_size and x.shape[-2] == self.image_size:
-            return x
-        return F.interpolate(x, size=(self.image_size, self.image_size), mode="bilinear", align_corners=False)
+    def _copy_overlap(self, dst: torch.Tensor, src: torch.Tensor) -> int:
+        slices = tuple(slice(0, min(int(a), int(b))) for a, b in zip(dst.shape, src.shape))
+        if any(s.stop <= 0 for s in slices):
+            return 0
+        with torch.no_grad():
+            dst[slices].copy_(src[slices].to(dtype=dst.dtype, device=dst.device))
+        n = 1
+        for s in slices:
+            n *= int(s.stop - s.start)
+        return int(n)
 
-    def _part_tokens(
+    def load_part_vector_pretrained(self, ckpt_path: str) -> None:
+        """Load part-vector branch pretrain weights.
+
+        Supported formats:
+        1) split component checkpoint: {"component":"trainable_vector_cnn","state_dict": ...}
+        2) part_style pretrain checkpoint: {"part_style_encoder": {"part_cnn": ..., "part_fc": ...}}
+        """
+        try:
+            obj = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        except TypeError:
+            obj = torch.load(ckpt_path, map_location="cpu")
+
+        if not isinstance(obj, dict):
+            raise RuntimeError(f"Unsupported part-vector checkpoint format: {type(obj)}")
+
+        # Case 1: exact state dict from split-save component.
+        if "state_dict" in obj and isinstance(obj.get("state_dict"), dict):
+            state = obj["state_dict"]
+            self.load_state_dict(state, strict=False)
+            return
+
+        # Case 2: checkpoint directly stores current vector-branch keys.
+        if any(str(k).startswith("part_patch_encoder.") for k in obj.keys()):
+            self.load_state_dict(obj, strict=False)
+            return
+
+        # Case 3: legacy part_style pretrain (partial warm-start by overlap copy).
+        pstate = obj.get("part_style_encoder", obj)
+        if not isinstance(pstate, dict):
+            raise RuntimeError("part-vector checkpoint missing dict state")
+        pc = pstate.get("part_cnn")
+        if not isinstance(pc, dict):
+            raise RuntimeError("part-vector checkpoint missing 'part_style_encoder.part_cnn'")
+
+        # map conv weights by overlap: old conv0/2/4 -> new conv0/3/6
+        mapping = [
+            ("0.weight", "part_patch_encoder.0.weight"),
+            ("2.weight", "part_patch_encoder.3.weight"),
+            ("4.weight", "part_patch_encoder.6.weight"),
+        ]
+        dst_state = self.state_dict()
+        copied = 0
+        for src_k, dst_k in mapping:
+            src_w = pc.get(src_k)
+            dst_w = dst_state.get(dst_k)
+            if isinstance(src_w, torch.Tensor) and isinstance(dst_w, torch.Tensor):
+                copied += self._copy_overlap(dst_w, src_w)
+        self.load_state_dict(dst_state, strict=False)
+        if copied <= 0:
+            raise RuntimeError("No overlapping conv weights copied from part-style pretrain checkpoint.")
+
+    def _check_hw(self, x: torch.Tensor, name: str) -> None:
+        h, w = int(x.shape[-2]), int(x.shape[-1])
+        if h != self.image_size or w != self.image_size:
+            raise ValueError(
+                f"{name} must be {self.image_size}x{self.image_size}, got {h}x{w}. "
+                "Online resize is disabled."
+            )
+
+    def _part_vector(
         self,
         part_imgs: torch.Tensor,
         part_mask: Optional[torch.Tensor],
@@ -112,7 +163,7 @@ class SourcePartRefUNet(nn.Module):
         b, p, c, h, w = part_imgs.shape
         if c != self.in_channels:
             raise ValueError(f"part_imgs channels mismatch: got {c}, expected {self.in_channels}")
-        x = self._resize(part_imgs.view(b * p, c, h, w))
+        x = part_imgs.view(b * p, c, h, w)
         z = self.part_patch_encoder(x).view(b, p, self.cross_attention_dim)
 
         if part_mask is None:
@@ -121,58 +172,66 @@ class SourcePartRefUNet(nn.Module):
             if part_mask.shape != (b, p):
                 raise ValueError(f"part_mask shape must be {(b, p)}, got {tuple(part_mask.shape)}")
             mask = part_mask.to(device=z.device) > 0
-        # MultiheadAttention uses True for padded (invalid) positions.
-        key_padding_mask = ~mask
-        all_invalid = key_padding_mask.all(dim=1)
-        if all_invalid.any():
-            key_padding_mask = key_padding_mask.clone()
-            key_padding_mask[all_invalid, 0] = False
+        # DeepSets-style set aggregation: masked sum + unit-norm projection.
+        g = (z * mask.to(dtype=z.dtype).unsqueeze(-1)).sum(dim=1)
+        g = F.normalize(g, dim=-1)
+        return g
 
-        q = self.part_queries.unsqueeze(0).expand(b, -1, -1)
-        tokens, _ = self.part_tokenizer(q, z, z, key_padding_mask=key_padding_mask, need_weights=False)
-        tokens = tokens + self.part_token_refine(tokens)
-        return tokens
-
-    def encode_part_tokens(
+    def encode_part_vector(
         self,
         part_imgs: torch.Tensor,
         part_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        if not self.enable_token_condition:
-            raise RuntimeError("encode_part_tokens is unavailable when token conditioning is disabled.")
-        return self._part_tokens(part_imgs, part_mask)
+        if not self.enable_parts_vector_condition:
+            raise RuntimeError("encode_part_vector is unavailable when parts_vector conditioning is disabled.")
+        return self._part_vector(part_imgs, part_mask)
 
-    def _part_style_states(
+    def _parts_vector_hidden_states(
         self,
         part_imgs: torch.Tensor,
         part_mask: Optional[torch.Tensor],
-    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[list[torch.Tensor]]]:
-        # part_imgs: (B,P,C,H,W)
+    ) -> torch.Tensor:
         b, p, c, h, w = part_imgs.shape
         if c != self.in_channels:
             raise ValueError(f"part_imgs channels mismatch: got {c}, expected {self.in_channels}")
+        part_style_vec = self._part_vector(part_imgs, part_mask)
+        # Keep UNet interface unchanged: pass a length-1 condition sequence.
+        return part_style_vec.unsqueeze(1)
 
-        style_hidden_states = self._part_tokens(part_imgs, part_mask) if self.enable_token_condition else None
-        style_img_feature = None
+    def _null_parts_vector_hidden_states(
+        self,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        null_vec = self.null_part_vector.to(device=device, dtype=dtype)
+        return null_vec.view(1, 1, -1).expand(batch_size, 1, -1)
 
-        if part_mask is None:
-            w_mask = torch.ones((b, p), dtype=part_imgs.dtype, device=part_imgs.device)
+    def _rsi_content_features(
+        self,
+        style_img: torch.Tensor,
+        batch_size: int,
+    ) -> list[torch.Tensor]:
+        # use reference style glyph image(s) -> content encoder -> structure features.
+        if style_img.dim() != 4:
+            raise ValueError(f"style_img must be 4D, got {tuple(style_img.shape)}")
+        sb, sck, sh, sw = style_img.shape
+        if sb != batch_size:
+            raise ValueError(f"style_img batch mismatch: got {sb}, expected {batch_size}")
+        if sck == self.in_channels:
+            style_ref = style_img
+        elif sck % self.in_channels == 0:
+            sk = sck // self.in_channels
+            style_ref = style_img.view(batch_size, sk, self.in_channels, sh, sw)[:, 0]
         else:
-            w_mask = part_mask.to(dtype=part_imgs.dtype, device=part_imgs.device)
-            if w_mask.shape != (b, p):
-                raise ValueError(f"part_mask shape must be {(b, p)}, got {tuple(w_mask.shape)}")
+            raise ValueError(
+                f"style_img channels mismatch: got {sck}, expected {self.in_channels} or multiple of it"
+            )
 
-        denom = w_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
-        w5 = w_mask.view(b, p, 1, 1, 1)
-
-        style_content_res_features = None
-        if self.enable_rsi_condition:
-            part_proxy = (part_imgs * w5).sum(dim=1) / denom.view(b, 1, 1, 1)
-            part_proxy = self._resize(part_proxy)
-            style_content_feature, style_content_res_features = self.content_encoder(part_proxy)
-            style_content_res_features.append(style_content_feature)
-
-        return style_img_feature, style_hidden_states, style_content_res_features
+        self._check_hw(style_ref, "style_img")
+        style_content_feature, style_content_res_features = self.content_encoder(style_ref)
+        style_content_res_features.append(style_content_feature)
+        return style_content_res_features
 
     def forward(
         self,
@@ -182,24 +241,32 @@ class SourcePartRefUNet(nn.Module):
         style_img: Optional[torch.Tensor],
         part_imgs: Optional[torch.Tensor] = None,
         part_mask: Optional[torch.Tensor] = None,
-        class_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        del style_img, class_ids
-
         out_h, out_w = int(x_t.shape[-2]), int(x_t.shape[-1])
-        x_t = self._resize(x_t)
-        content_img = self._resize(content_img)
+        self._check_hw(x_t, "x_t")
+        self._check_hw(content_img, "content_img")
         content_img_feature, content_residual_features = self.content_encoder(content_img)
         content_residual_features.append(content_img_feature)
 
-        style_img_feature = None
+        if self.enable_rsi_condition and style_img is None:
+            raise ValueError("style_img is required when RSI conditioning is enabled.")
+
         style_hidden_states = None
         style_content_res_features = None
-        if part_imgs is not None and (self.enable_token_condition or self.enable_rsi_condition):
-            style_img_feature, style_hidden_states, style_content_res_features = self._part_style_states(part_imgs, part_mask)
+        if self.enable_parts_vector_condition:
+            if part_imgs is not None:
+                style_hidden_states = self._parts_vector_hidden_states(part_imgs, part_mask)
+            else:
+                style_hidden_states = self._null_parts_vector_hidden_states(
+                    batch_size=int(x_t.shape[0]),
+                    device=x_t.device,
+                    dtype=x_t.dtype,
+                )
+        if self.enable_rsi_condition and style_img is not None:
+            style_content_res_features = self._rsi_content_features(style_img, int(x_t.shape[0]))
 
         encoder_hidden_states = [
-            style_img_feature,
+            None,
             content_residual_features,
             style_hidden_states,
             style_content_res_features,
@@ -213,5 +280,7 @@ class SourcePartRefUNet(nn.Module):
         )
         self.last_offset_loss = offset_out_sum
         if out.shape[-2] != out_h or out.shape[-1] != out_w:
-            out = F.interpolate(out, size=(out_h, out_w), mode="bilinear", align_corners=False)
+            raise RuntimeError(
+                f"UNet output size mismatch: got {tuple(out.shape[-2:])}, expected {(out_h, out_w)}"
+            )
         return out

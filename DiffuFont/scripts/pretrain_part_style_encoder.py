@@ -84,23 +84,34 @@ def encode_part_set(
     return z
 
 
-def split_fonts_for_val(font_names: List[str], val_ratio: float, seed: int) -> Tuple[List[str], List[str]]:
-    if val_ratio <= 0.0 or len(font_names) < 4:
-        return font_names, []
+def split_parts_within_font(
+    bank: Dict[str, List[Path]],
+    val_ratio: float,
+    seed: int,
+) -> Tuple[Dict[str, List[Path]], Dict[str, List[Path]]]:
+    """Split each font's part paths into train/val by ratio (e.g. 80/20)."""
+    if val_ratio <= 0.0:
+        return {k: list(v) for k, v in bank.items()}, {}
 
-    names = list(font_names)
-    rng = random.Random(seed + 1009)
-    rng.shuffle(names)
-
-    val_count = int(round(len(names) * val_ratio))
-    val_count = max(2, val_count)
-    val_count = min(len(names) - 2, val_count)
-    if val_count <= 0:
-        return font_names, []
-
-    val_fonts = names[:val_count]
-    train_fonts = names[val_count:]
-    return train_fonts, val_fonts
+    train_bank: Dict[str, List[Path]] = {}
+    val_bank: Dict[str, List[Path]] = {}
+    for i, (font, paths) in enumerate(sorted(bank.items(), key=lambda x: x[0])):
+        pool = list(paths)
+        if len(pool) < 2:
+            train_bank[font] = pool
+            continue
+        rng = random.Random(seed + 1009 + i * 17)
+        rng.shuffle(pool)
+        val_n = int(round(len(pool) * float(val_ratio)))
+        val_n = max(1, min(len(pool) - 1, val_n))
+        val_split = pool[:val_n]
+        train_split = pool[val_n:]
+        if not train_split:
+            train_split = [val_split.pop()]
+        train_bank[font] = train_split
+        if val_split:
+            val_bank[font] = val_split
+    return train_bank, val_bank
 
 
 def resolve_path(root: Path, path_value: Path) -> Path:
@@ -257,14 +268,8 @@ def main() -> None:
         raise RuntimeError("Part bank has too few fonts for contrastive pretraining.")
 
     font_names = sorted(bank.keys())
-    train_fonts, val_fonts = split_fonts_for_val(font_names, args.val_ratio, args.seed)
-    has_val = len(val_fonts) >= 2
-    if has_val:
-        train_bank = {k: bank[k] for k in train_fonts}
-        val_bank = {k: bank[k] for k in val_fonts}
-    else:
-        train_bank = bank
-        val_bank = {}
+    train_bank, val_bank = split_parts_within_font(bank, args.val_ratio, args.seed)
+    has_val = len(val_bank) >= 2
 
     if len(train_bank) < 2:
         raise RuntimeError("Train split has too few fonts for contrastive pretraining.")
@@ -282,7 +287,10 @@ def main() -> None:
         log_fp.write(line + "\n")
         log_fp.flush()
 
-    log(f"Loaded part bank: total_fonts={len(font_names)} train_fonts={len(train_bank)} val_fonts={len(val_bank)}")
+    log(
+        f"Loaded part bank: total_fonts={len(font_names)} train_fonts={len(train_bank)} val_fonts={len(val_bank)} "
+        f"split=per-font-part(1-{int((1.0-args.val_ratio)*100)}/{int(args.val_ratio*100)})"
+    )
     log(f"Using device={device}, monitor={monitor_name}, steps={args.steps}, batch_size={args.batch_size}")
 
     min_k = max(1, args.min_set_size)

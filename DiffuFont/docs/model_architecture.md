@@ -9,17 +9,17 @@ Current training path:
 Use `--conditioning-profile` in `train.py`:
 
 - `baseline`:
-  - token conditioning: OFF
+  - parts_vector conditioning: OFF
   - RSI conditioning: OFF
   - behavior: only content/source path is used
-- `token_only`:
-  - token conditioning: ON
+- `parts_vector_only`:
+  - parts_vector conditioning: ON
   - RSI conditioning: OFF
 - `rsi_only`:
-  - token conditioning: OFF
+  - parts_vector conditioning: OFF
   - RSI conditioning: ON
 - `full` (default):
-  - token conditioning: ON
+  - parts_vector conditioning: ON
   - RSI conditioning: ON
 
 ## Style Path Update
@@ -28,17 +28,16 @@ The old style-image encoder branch (`E_s(x_s)`) has been removed from the runtim
 
 Style conditioning is now built from PartBank part sets:
 
-1. `parts -> patch encoder -> per-part embeddings Z`
-2. `learnable queries Q + cross-attention(Q, Z, Z) -> fixed M style tokens T`
-3. `T` is injected as cross-attention context in MCA/mid/down/up style attention points when token conditioning is enabled.
+1. `parts -> patch encoder -> per-part embeddings z_i`
+2. `DeepSets-style masked sum + L2 norm -> part style vector g`
+3. `g` is reshaped to a length-1 conditioning sequence for MCA cross-attention when parts_vector conditioning is enabled.
 
 ## RSI Path
 
-RSI still uses style-structure features derived from aggregated part proxy inputs.
+RSI uses style-structure features derived from `style_img` via `ContentEncoder`.
 When `rsi_only` or `full` is enabled:
 
-- `parts (+mask)` are aggregated into a proxy image
-- proxy image passes through `ContentEncoder`
+- `style_img` passes through `ContentEncoder`
 - resulting style-structure features are used by up-block offset/deform logic
 
 When RSI is disabled, up-blocks skip offset/deform and continue with standard skip concat.
@@ -50,13 +49,13 @@ Main training loss in `DiffusionTrainer`:
 - `loss_mse`: reconstruction MSE
 - `loss_off`: RSI offset regularization from source path
 - `loss_cp`: perceptual loss (VGG19)
-- `loss_cons` (optional): token consistency loss between two part subsets from same font
+- `loss_cons` (optional): part-vector consistency loss between two part subsets from same font
 
 Total:
 
 `L = lambda_mse * loss_mse + lambda_off * loss_off + lambda_cp * loss_cp + lambda_cons * loss_cons`
 
-`lambda_cons` is automatically forced to `0` when token conditioning is disabled.
+`lambda_cons > 0` is only valid when parts_vector conditioning is enabled; otherwise training raises an error.
 
 ## Logging / Saving Defaults
 

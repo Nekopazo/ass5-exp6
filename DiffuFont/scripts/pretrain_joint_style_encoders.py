@@ -76,15 +76,34 @@ def scan_lmdb_font_chars(
     return out
 
 
-def split_fonts(font_names: Sequence[str], val_ratio: float, seed: int) -> Tuple[List[str], List[str]]:
-    names = list(sorted(font_names))
-    if val_ratio <= 0.0 or len(names) < 10:
-        return names, []
-    rng = random.Random(seed + 13)
-    rng.shuffle(names)
-    val_n = int(round(len(names) * val_ratio))
-    val_n = min(max(2, val_n), len(names) - 2)
-    return names[val_n:], names[:val_n]
+def split_chars_within_font(
+    chars_by_font: Dict[str, List[str]],
+    val_ratio: float,
+    seed: int,
+) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
+    """Split each font's chars into train/val by ratio (e.g. 80/20)."""
+    if val_ratio <= 0.0:
+        return {k: list(v) for k, v in chars_by_font.items()}, {}
+
+    train_chars: Dict[str, List[str]] = {}
+    val_chars: Dict[str, List[str]] = {}
+    for i, (font, chars) in enumerate(sorted(chars_by_font.items(), key=lambda x: x[0])):
+        pool = list(chars)
+        if len(pool) < 2:
+            train_chars[font] = pool
+            continue
+        rng = random.Random(seed + 1009 + i * 17)
+        rng.shuffle(pool)
+        val_n = int(round(len(pool) * float(val_ratio)))
+        val_n = max(1, min(len(pool) - 1, val_n))
+        val_split = sorted(pool[:val_n])
+        train_split = sorted(pool[val_n:])
+        if not train_split:
+            train_split = [val_split.pop()]
+        if val_split:
+            val_chars[font] = val_split
+        train_chars[font] = train_split
+    return train_chars, val_chars
 
 
 def pick_font_classes(chars_by_font: Dict[str, List[str]], num_classes: int) -> List[str]:
@@ -229,13 +248,10 @@ def main() -> None:
         raise RuntimeError("Too few usable fonts in TrainFont.lmdb for font classification.")
 
     chars_by_font = {f: all_chars_by_font[f] for f in usable_fonts}
-    train_fonts, val_fonts = split_fonts(usable_fonts, args.val_ratio, args.seed)
-    if len(train_fonts) < 2:
-        raise RuntimeError("Train split has too few fonts.")
-
     font_to_label = {f: i for i, f in enumerate(usable_fonts)}
-    train_chars = {f: chars_by_font[f] for f in train_fonts}
-    val_chars = {f: chars_by_font[f] for f in val_fonts}
+    train_fonts = list(usable_fonts)
+    train_chars, val_chars = split_chars_within_font(chars_by_font, args.val_ratio, args.seed)
+    val_fonts = sorted([f for f in train_fonts if f in val_chars and len(val_chars[f]) > 0])
     has_val = len(val_fonts) >= 2
     monitor_name = args.monitor if has_val else "train_loss"
 
@@ -265,7 +281,8 @@ def main() -> None:
 
     log(
         f"device={device} usable_fonts={len(usable_fonts)} train_fonts={len(train_fonts)} "
-        f"val_fonts={len(val_fonts)} backbone={args.backbone} monitor={monitor_name}"
+        f"val_fonts={len(val_fonts)} split=per-font-char(1-{int((1.0-args.val_ratio)*100)}/"
+        f"{int(args.val_ratio*100)}) backbone={args.backbone} monitor={monitor_name}"
     )
 
     best_metric: float | None = None

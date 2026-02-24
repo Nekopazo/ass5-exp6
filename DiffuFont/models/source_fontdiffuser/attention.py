@@ -232,14 +232,30 @@ class CrossAttention(nn.Module):
         return self.to_out(hidden_states)
 
     def _attention(self, query, key, value):
-        # TODO: use baddbmm for better performance
-        attention_scores = torch.matmul(query, key.transpose(-1, -2)) * self.scale
-        attention_probs = attention_scores.softmax(dim=-1)
-        # compute attention output
-        hidden_states = torch.matmul(attention_probs, value)
-        # reshape hidden_states
-        hidden_states = self.reshape_batch_dim_to_heads(hidden_states)
-        return hidden_states
+        # Use PyTorch SDPA to avoid explicitly materializing large attention score tensors.
+        try:
+            batch_heads, sequence_length, head_dim = query.shape
+            if batch_heads % self.heads != 0:
+                raise ValueError(f"Invalid attention shape: batch_heads={batch_heads}, heads={self.heads}")
+            batch_size = batch_heads // self.heads
+
+            q = query.view(batch_size, self.heads, sequence_length, head_dim)
+            k = key.view(batch_size, self.heads, key.shape[1], head_dim)
+            v = value.view(batch_size, self.heads, value.shape[1], head_dim)
+
+            hidden_states = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False
+            )
+            hidden_states = hidden_states.reshape(batch_heads, sequence_length, head_dim)
+            hidden_states = self.reshape_batch_dim_to_heads(hidden_states)
+            return hidden_states
+        except Exception:
+            # Fallback path for environments where SDPA kernel is unavailable.
+            attention_scores = torch.matmul(query, key.transpose(-1, -2)) * self.scale
+            attention_probs = attention_scores.softmax(dim=-1)
+            hidden_states = torch.matmul(attention_probs, value)
+            hidden_states = self.reshape_batch_dim_to_heads(hidden_states)
+            return hidden_states
 
     def _sliced_attention(self, query, key, value, sequence_length, dim):
         batch_size_attention = query.shape[0]

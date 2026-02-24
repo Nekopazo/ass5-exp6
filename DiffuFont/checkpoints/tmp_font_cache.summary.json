@@ -1,9 +1,0 @@
-{
-  "lmdb": "/scratch/yangximing/code/ass5-exp6/DiffuFont/DataPreparation/LMDB/TrainFont.lmdb",
-  "ep_ckpt": "/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/tmp_e_p.pt",
-  "num_fonts": 168,
-  "embedding_dim": 256,
-  "chars_per_font": 2,
-  "min_chars_per_font": 2,
-  "out_npz": "/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/tmp_font_cache.npz"
-}

@@ -2,10 +2,10 @@
 
 This branch uses a source-aligned FontDiffuser backbone with configurable conditioning:
 
-- `baseline`: no token, no RSI
-- `token_only`: token on, RSI off
-- `rsi_only`: token off, RSI on
-- `full` (default): token on, RSI on
+- `baseline`: no parts_vector, no RSI
+- `parts_vector_only`: parts_vector on, RSI off
+- `rsi_only`: parts_vector off, RSI on
+- `full` (default): parts_vector on, RSI on
 
 The old style-image `E_s(x_s)` conditioning path has been removed from runtime conditioning.
 
@@ -13,7 +13,7 @@ The old style-image `E_s(x_s)` conditioning path has been removed from runtime c
 
 - `train.py`: main training entry
 - `dataset.py`: dataset and PartBank retrieval
-- `models/source_part_ref_unet.py`: token/RSI conditioning wrapper
+- `models/source_part_ref_unet.py`: parts_vector/RSI conditioning wrapper
 - `models/source_fontdiffuser/`: source UNet/RSI blocks
 - `models/model.py`: trainer, logging, sampling, checkpoints
 - `docs/model_architecture.md`: latest architecture notes

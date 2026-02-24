@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+import torch.nn.functional as F
 from torchvision.ops import DeformConv2d
 
 from .attention import (SpatialTransformer, 
@@ -208,7 +209,7 @@ class UNetMidMCABlock2D(nn.Module):
             # t_embed
             hidden_states = resnet(hidden_states, temb)
 
-            # style tokens are optional; when disabled we skip style cross-attention.
+            # parts_vector condition is optional; when disabled we skip style cross-attention.
             current_style_feature = None
             if encoder_hidden_states is not None and len(encoder_hidden_states) > 2:
                 current_style_feature = encoder_hidden_states[2]
@@ -323,7 +324,7 @@ class MCADownBlock2D(nn.Module):
             # t_embed
             hidden_states = resnet(hidden_states, temb)
 
-            # style tokens are optional; when disabled we skip style cross-attention.
+            # parts_vector condition is optional; when disabled we skip style cross-attention.
             current_style_feature = None
             if encoder_hidden_states is not None and len(encoder_hidden_states) > 2:
                 current_style_feature = encoder_hidden_states[2]
@@ -544,15 +545,44 @@ class StyleRSIUpBlock2D(nn.Module):
     ):
         total_offset = 0
 
-        style_content_feat = None
-        if style_structure_features is not None:
-            style_content_feat = style_structure_features[-self.upblock_index-2]
-
         for i, (sc_inter_offset, dcn_deform, resnet, attn) in \
             enumerate(zip(self.sc_interpreter_offsets, self.dcn_deforms, self.resnets, self.attentions)):
             # pop res hidden states 
             res_hidden_states = res_hidden_states_tuple[-1]
             res_hidden_states_tuple = res_hidden_states_tuple[:-1]
+
+            style_content_feat = None
+            if style_structure_features is not None:
+                expected_style_c = int(sc_inter_offset.gnorm_s.num_channels)
+                expected_h = int(res_hidden_states.shape[-2])
+                expected_w = int(res_hidden_states.shape[-1])
+                # Prefer exact channel+spatial match to keep RSI semantics explicit.
+                for feat in reversed(style_structure_features):
+                    if not isinstance(feat, torch.Tensor) or feat.dim() != 4:
+                        continue
+                    if int(feat.shape[1]) != expected_style_c:
+                        continue
+                    if int(feat.shape[-2]) == expected_h and int(feat.shape[-1]) == expected_w:
+                        style_content_feat = feat
+                        break
+                # Fallback: channel match only, then resize to current feature map size.
+                if style_content_feat is None:
+                    for feat in reversed(style_structure_features):
+                        if not isinstance(feat, torch.Tensor) or feat.dim() != 4:
+                            continue
+                        if int(feat.shape[1]) != expected_style_c:
+                            continue
+                        style_content_feat = feat
+                        break
+                    if style_content_feat is not None and (
+                        int(style_content_feat.shape[-2]) != expected_h or int(style_content_feat.shape[-1]) != expected_w
+                    ):
+                        style_content_feat = F.interpolate(
+                            style_content_feat,
+                            size=(expected_h, expected_w),
+                            mode="bilinear",
+                            align_corners=False,
+                        )
             
             # RSI branch is optional.
             if style_content_feat is not None:

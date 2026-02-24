@@ -161,7 +161,7 @@ class AttnXGatedFusion(nn.Module):
 
 
 class GlobalStyleFusion(nn.Module):
-    """Inject global style tokens/vectors by cross-attention + FiLM."""
+    """Inject global style parts_vector conditions by cross-attention + FiLM."""
 
     def __init__(
         self,
