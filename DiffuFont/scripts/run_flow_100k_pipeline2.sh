@@ -93,6 +93,7 @@ echo "[pipeline] log_file=${ROOT}/${LOG_FILE}"
 # Require pretrained CNN checkpoints (skip any pretrain stage).
 EP_CKPT="checkpoints/e_p_font_encoder_best.pt"
 PV_CKPT="checkpoints/part_style_encoder_pretrain_best.pt"
+
 if [[ ! -f "${EP_CKPT}" ]]; then
   echo "[pipeline] missing checkpoint: ${EP_CKPT}"
   exit 1
@@ -104,7 +105,6 @@ fi
 echo "[pipeline] found pretrained checkpoints:"
 echo "[pipeline]   ${EP_CKPT}"
 echo "[pipeline]   ${PV_CKPT}"
-
 # Fixed 100k-step schedule under current default data config.
 TARGET_STEPS=100000
 EPOCHS=39
@@ -116,29 +116,27 @@ for BATCH_SIZE in 8; do
   set +e
   python train.py \
     --trainer flow_matching \
-    --device cuda:1 \
+    --device cuda:0 \
     --precision bf16 \
     --batch "${BATCH_SIZE}" \
     --epochs "${EPOCHS}" \
     --lr-tmax-steps "${TARGET_STEPS}" \
-    --part-retrieval-ep-ckpt "${EP_CKPT}" \
-    --part-vector-pretrain-ckpt "${PV_CKPT}" \
     --num-workers 0 \
     --part-image-cache-size 20000 \
     --lmdb-decode-cache-size 50000 \
     --use-style-plan-cache \
     --style-prefetch-limit 20000 \
-    --save-dir checkpoints/fullflow_default_100k \
+    --save-dir checkpoints/baselineflow_default_100k \
     --disable-self-attn \
     --attn-scales 32,64 \
     --lite-daca \
     --lite-daca-scales 32,64 \
     --lite-daca-heads 2 \
     --lite-daca-points 4 \
-    --part-retrieval-device cuda:1 \
     --lambda-cp 0.003 \
-    --lambda-cons 0.01 \
-    --log-every-steps 10 
+    --lambda-cons 0 \
+    --log-every-steps 10 \
+    --conditioning-profile baseline
   RC=$?
   set -e
   if [[ "${RC}" -eq 0 ]]; then

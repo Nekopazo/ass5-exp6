@@ -107,6 +107,23 @@ def _to_jsonable(v: Any) -> Any:
     return v
 
 
+def _parse_int_csv(raw: str | None) -> tuple[int, ...] | None:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    vals = []
+    for token in text.split(","):
+        t = token.strip()
+        if not t:
+            continue
+        vals.append(int(t))
+    if not vals:
+        return None
+    return tuple(vals)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-root", type=Path, default=Path("."))
@@ -148,10 +165,38 @@ def main() -> None:
         choices=["baseline", "parts_vector_only", "rsi_only", "full"],
         help="baseline=no parts_vector/no RSI; parts_vector_only=parts_vector on RSI off; rsi_only=RSI on parts_vector off; full=both on.",
     )
+    parser.add_argument(
+        "--disable-self-attn",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Disable self-attention inside SpatialTransformer blocks and keep cross-attention only.",
+    )
+    parser.add_argument(
+        "--attn-scales",
+        type=str,
+        default="",
+        help="Comma-separated resolutions where style attention is enabled, e.g. '32,64'. Empty means all scales.",
+    )
+    parser.add_argument(
+        "--lite-daca",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable lightweight DACA branch in RSI up blocks.",
+    )
+    parser.add_argument(
+        "--lite-daca-scales",
+        type=str,
+        default="",
+        help="Comma-separated resolutions where LiteDACA is enabled, e.g. '32,64'. Empty means all RSI scales.",
+    )
+    parser.add_argument("--lite-daca-heads", type=int, default=2)
+    parser.add_argument("--lite-daca-points", type=int, default=4)
 
     parser.add_argument("--part-bank-manifest", type=str, default="DataPreparation/PartBank/manifest.json")
     parser.add_argument("--part-bank-lmdb", type=str, default="DataPreparation/LMDB/PartBank.lmdb")
     parser.add_argument("--part-retrieval-ep-ckpt", type=str, default=None)
+    parser.add_argument("--part-retrieval-device", type=str, default="",
+                        help="Device for online part-retrieval CNN inference. Empty means follow --device.")
     parser.add_argument("--part-set-size", type=int, default=9)
     parser.add_argument("--part-set-min-size", type=int, default=1)
     parser.add_argument("--part-set-sampling", type=str, default="random", choices=["deterministic", "random"])
@@ -197,6 +242,8 @@ def main() -> None:
 
     resolved_ep_ckpt: Path | None = None
     resolved_part_vector_ckpt: Path | None = None
+    attn_scales = _parse_int_csv(args.attn_scales)
+    lite_daca_scales = _parse_int_csv(args.lite_daca_scales)
     if use_part_bank:
         if not args.part_retrieval_ep_ckpt:
             raise ValueError("--part-retrieval-ep-ckpt is required when parts_vector conditioning is enabled.")
@@ -214,6 +261,12 @@ def main() -> None:
 
     device = resolve_device(args.device)
     print(f"[train] device={device} precision={args.precision}")
+    retrieval_device = args.part_retrieval_device if str(args.part_retrieval_device).strip() else str(device)
+    if str(retrieval_device).startswith("cuda") and int(args.num_workers) > 0:
+        raise ValueError(
+            "part-retrieval on CUDA requires --num-workers 0, "
+            "because Dataset-side CUDA in multiprocessing workers is unsupported."
+        )
 
     run_cfg: Dict[str, Any] = {k: _to_jsonable(v) for k, v in vars(args).items()}
     run_cfg.update(
@@ -241,6 +294,7 @@ def main() -> None:
         part_bank_manifest=args.part_bank_manifest,
         part_bank_lmdb=args.part_bank_lmdb,
         part_retrieval_ep_ckpt=args.part_retrieval_ep_ckpt,
+        part_retrieval_device=retrieval_device,
         part_set_size=args.part_set_size,
         part_set_min_size=args.part_set_min_size,
         part_set_sampling=args.part_set_sampling,
@@ -273,6 +327,9 @@ def main() -> None:
     print(
         "[train] "
         f"conditioning_profile={args.conditioning_profile} "
+        f"disable_self_attn={bool(args.disable_self_attn)} "
+        f"attn_scales={attn_scales} "
+        f"lite_daca={bool(args.lite_daca)} lite_daca_scales={lite_daca_scales} "
         "part_retrieval_policy=top1_gate_top3_fixed "
         f"steps_per_epoch={steps_per_epoch} total_steps={total_train_steps} lr_tmax_steps={lr_tmax_steps}"
     )
@@ -286,6 +343,12 @@ def main() -> None:
         content_encoder_downsample_size=3,
         channel_attn=True,
         conditioning_profile=args.conditioning_profile,
+        disable_self_attn=bool(args.disable_self_attn),
+        attn_scales=attn_scales,
+        lite_daca_enabled=bool(args.lite_daca),
+        lite_daca_scales=lite_daca_scales,
+        lite_daca_heads=int(args.lite_daca_heads),
+        lite_daca_points=int(args.lite_daca_points),
     )
     if resolved_part_vector_ckpt is not None:
         model.load_part_vector_pretrained(str(resolved_part_vector_ckpt))

@@ -67,6 +67,7 @@ class FontImageDataset(Dataset):
         part_bank_manifest: Optional[Union[str, Path]] = None,
         part_bank_lmdb: Optional[Union[str, Path]] = None,
         part_retrieval_ep_ckpt: Optional[Union[str, Path]] = None,
+        part_retrieval_device: Optional[str] = None,
         part_set_size: int = 9,
         part_set_min_size: int = 1,
         part_set_sampling: str = "random",
@@ -95,6 +96,7 @@ class FontImageDataset(Dataset):
         self.use_part_bank = bool(use_part_bank)
         self.part_env = None
         self.part_retrieval_ep_ckpt = part_retrieval_ep_ckpt
+        self.part_retrieval_device = str(part_retrieval_device).strip() if part_retrieval_device else "cpu"
         self.part_retrieval_conf_threshold = 0.85
         self.part_retrieval_margin_threshold = 0.25
         self.part_retrieval_temperature = 0.7
@@ -394,6 +396,12 @@ class FontImageDataset(Dataset):
 
         model = FontClassifier(in_channels=3, num_fonts=len(class_fonts), backbone=backbone)
         model.load_state_dict(state, strict=False)
+        try:
+            model = model.to(self.part_retrieval_device)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to move part retrieval model to device='{self.part_retrieval_device}'."
+            ) from e
         model.eval()
 
         candidate_labels = [
@@ -405,7 +413,11 @@ class FontImageDataset(Dataset):
 
         self.part_retrieval_model = model
         self.part_retrieval_class_fonts = class_fonts
-        self.part_retrieval_candidate_labels = torch.tensor(candidate_labels, dtype=torch.long)
+        self.part_retrieval_candidate_labels = torch.tensor(
+            candidate_labels,
+            dtype=torch.long,
+            device=self.part_retrieval_device,
+        )
 
     def _predict_part_font_from_styles(
         self,
@@ -419,7 +431,7 @@ class FontImageDataset(Dataset):
             raise RuntimeError("part retrieval expects tensor style images; check transform pipeline.")
 
         with torch.no_grad():
-            x = torch.stack(style_imgs, dim=0)
+            x = torch.stack(style_imgs, dim=0).to(self.part_retrieval_device, non_blocking=True)
             logits = self.part_retrieval_model(x)
             probs = torch.softmax(logits, dim=-1).mean(dim=0)
             cand_probs = probs.index_select(0, self.part_retrieval_candidate_labels)

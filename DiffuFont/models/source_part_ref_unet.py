@@ -27,6 +27,12 @@ class SourcePartRefUNet(nn.Module):
         content_encoder_downsample_size: int = 3,
         channel_attn: bool = True,
         conditioning_profile: str = "full",
+        disable_self_attn: bool = False,
+        attn_scales: Optional[tuple[int, ...]] = None,
+        lite_daca_enabled: bool = False,
+        lite_daca_scales: Optional[tuple[int, ...]] = None,
+        lite_daca_heads: int = 2,
+        lite_daca_points: int = 4,
     ):
         super().__init__()
         self.in_channels = int(in_channels)
@@ -82,6 +88,12 @@ class SourcePartRefUNet(nn.Module):
             content_encoder_downsample_size=self.content_encoder_downsample_size,
             content_start_channel=content_start_channel,
             reduction=32,
+            disable_self_attn=disable_self_attn,
+            attn_scales=attn_scales,
+            lite_daca_enabled=lite_daca_enabled,
+            lite_daca_scales=lite_daca_scales,
+            lite_daca_heads=lite_daca_heads,
+            lite_daca_points=lite_daca_points,
         )
         self.last_offset_loss = torch.tensor(0.0)
 

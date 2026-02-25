@@ -52,12 +52,24 @@ class UNet(ModelMixin, ConfigMixin):
         content_encoder_downsample_size: int = 4,
         content_start_channel: int = 16,
         reduction: int = 32,
+        disable_self_attn: bool = False,
+        attn_scales: Optional[Tuple[int, ...]] = None,
+        lite_daca_enabled: bool = False,
+        lite_daca_scales: Optional[Tuple[int, ...]] = None,
+        lite_daca_heads: int = 2,
+        lite_daca_points: int = 4,
     ):
         super().__init__()
 
         self.content_encoder_downsample_size = content_encoder_downsample_size
 
         self.sample_size = sample_size
+        self.disable_self_attn = bool(disable_self_attn)
+        self.lite_daca_enabled = bool(lite_daca_enabled)
+        self.lite_daca_heads = int(lite_daca_heads)
+        self.lite_daca_points = int(lite_daca_points)
+        self._attn_scales = set(int(x) for x in attn_scales) if attn_scales else None
+        self._lite_daca_scales = set(int(x) for x in lite_daca_scales) if lite_daca_scales else None
         time_embed_dim = block_out_channels[0] * 4
 
         # input
@@ -73,8 +85,21 @@ class UNet(ModelMixin, ConfigMixin):
         self.mid_block = None
         self.up_blocks = nn.ModuleList([])
 
+        def _style_attn_enabled(resolution: Optional[int]) -> bool:
+            if resolution is None or self._attn_scales is None:
+                return True
+            return int(resolution) in self._attn_scales
+
+        def _lite_daca_for_scale(resolution: Optional[int]) -> bool:
+            if not self.lite_daca_enabled:
+                return False
+            if resolution is None or self._lite_daca_scales is None:
+                return True
+            return int(resolution) in self._lite_daca_scales
+
         # down
         output_channel = block_out_channels[0]
+        current_resolution = int(self.sample_size) if isinstance(self.sample_size, int) else None
         for i, down_block_type in enumerate(down_block_types):
             input_channel = output_channel
             output_channel = block_out_channels[i]
@@ -102,10 +127,15 @@ class UNet(ModelMixin, ConfigMixin):
                 content_channel=content_channel,
                 reduction=reduction,
                 channel_attn=channel_attn,
+                enable_style_attn=_style_attn_enabled(current_resolution),
+                disable_self_attn=self.disable_self_attn,
             )
             self.down_blocks.append(down_block)
+            if current_resolution is not None and not is_final_block:
+                current_resolution //= 2
 
         # mid
+        mid_resolution = current_resolution
         self.mid_block = UNetMidMCABlock2D(
             in_channels=block_out_channels[-1],
             temb_channels=time_embed_dim,
@@ -119,6 +149,8 @@ class UNet(ModelMixin, ConfigMixin):
             resnet_groups=norm_num_groups,
             content_channel=content_start_channel*(2**(content_encoder_downsample_size - 1)),
             reduction=reduction,
+            enable_style_attn=_style_attn_enabled(mid_resolution),
+            disable_self_attn=self.disable_self_attn,
         )
 
         # count how many layers upsample the images
@@ -127,6 +159,7 @@ class UNet(ModelMixin, ConfigMixin):
         # up
         reversed_block_out_channels = list(reversed(block_out_channels))
         output_channel = reversed_block_out_channels[0]
+        up_resolution = mid_resolution
         for i, up_block_type in enumerate(up_block_types):
             is_final_block = i == len(block_out_channels) - 1
 
@@ -158,9 +191,16 @@ class UNet(ModelMixin, ConfigMixin):
                 cross_attention_dim=cross_attention_dim,
                 attn_num_head_channels=attention_head_dim,
                 upblock_index=i,
+                enable_style_attn=_style_attn_enabled(up_resolution),
+                disable_self_attn=self.disable_self_attn,
+                use_lite_daca=_lite_daca_for_scale(up_resolution),
+                lite_daca_heads=self.lite_daca_heads,
+                lite_daca_points=self.lite_daca_points,
             )
             self.up_blocks.append(up_block)
             prev_output_channel = output_channel
+            if up_resolution is not None and add_upsample:
+                up_resolution *= 2
 
         # out
         self.conv_norm_out = nn.GroupNorm(num_channels=block_out_channels[0], num_groups=norm_num_groups, eps=norm_eps)

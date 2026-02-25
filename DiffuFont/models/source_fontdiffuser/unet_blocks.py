@@ -11,6 +11,97 @@ from .resnet import (Downsample2D,
                      Upsample2D)
 
 
+class LiteDACA(nn.Module):
+    """Lightweight DACA-style content aggregation with offset sampling."""
+
+    def __init__(
+        self,
+        res_in_channels: int,
+        style_feat_in_channels: int,
+        temb_channels: int,
+        num_heads: int = 2,
+        num_points: int = 4,
+    ):
+        super().__init__()
+        self.res_in_channels = int(res_in_channels)
+        self.style_feat_in_channels = int(style_feat_in_channels)
+        self.num_heads = int(num_heads)
+        self.num_points = int(num_points)
+
+        self.style_proj = nn.Conv2d(self.style_feat_in_channels, self.res_in_channels, kernel_size=1, bias=True)
+        self.offset_conv = nn.Conv2d(
+            self.res_in_channels + self.style_feat_in_channels,
+            2 * self.num_heads,
+            kernel_size=3,
+            padding=1,
+            bias=True,
+        )
+        self.attn_conv = nn.Conv2d(
+            self.res_in_channels + self.style_feat_in_channels,
+            self.num_heads,
+            kernel_size=3,
+            padding=1,
+            bias=True,
+        )
+        self.Wp = nn.Parameter(torch.ones(self.num_heads, self.num_points) / float(self.num_points))
+        self.head_fuse = nn.Conv2d(self.num_heads * self.res_in_channels, self.res_in_channels, kernel_size=1, bias=True)
+        self.t_gate = nn.Sequential(nn.SiLU(), nn.Linear(temb_channels, 1), nn.Sigmoid())
+
+        if self.num_points == 4:
+            base_pts = torch.tensor(
+                [[-0.5, -0.5], [-0.5, 0.5], [0.5, -0.5], [0.5, 0.5]],
+                dtype=torch.float32,
+            )
+        else:
+            side = int(self.num_points ** 0.5)
+            if side * side != self.num_points:
+                raise ValueError("lite_daca_points must be a square number when not equal to 4.")
+            ys = torch.linspace(-0.5, 0.5, side)
+            xs = torch.linspace(-0.5, 0.5, side)
+            base_pts = torch.stack(torch.meshgrid(ys, xs), dim=-1).reshape(-1, 2)
+        self.register_buffer("base_pts", base_pts)
+
+    def forward(
+        self,
+        res_hidden_states: torch.Tensor,
+        style_content_hidden_states: torch.Tensor,
+        temb: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        b, c, h, w = res_hidden_states.shape
+        style_proj = self.style_proj(style_content_hidden_states)
+        mix = torch.cat([res_hidden_states, style_content_hidden_states], dim=1)
+        offsets = self.offset_conv(mix).view(b, self.num_heads, 2, h, w)
+        attn = torch.sigmoid(self.attn_conv(mix)).view(b, self.num_heads, 1, h, w)
+
+        ys = torch.linspace(-1.0, 1.0, h, device=res_hidden_states.device, dtype=res_hidden_states.dtype)
+        xs = torch.linspace(-1.0, 1.0, w, device=res_hidden_states.device, dtype=res_hidden_states.dtype)
+        base_grid = torch.stack(torch.meshgrid(ys, xs), dim=-1)[None, None]  # (1,1,H,W,2)
+        off = offsets.permute(0, 1, 3, 4, 2)  # (B,M,H,W,2)
+        v_rep = style_proj.unsqueeze(1).repeat(1, self.num_heads, 1, 1, 1).view(b * self.num_heads, c, h, w)
+
+        sampled = []
+        for r in range(self.num_points):
+            dp = self.base_pts[r].view(1, 1, 1, 1, 2).to(device=off.device, dtype=off.dtype)
+            grid = (base_grid + dp + off).view(b * self.num_heads, h, w, 2)
+            s = F.grid_sample(v_rep, grid, mode="bilinear", padding_mode="zeros", align_corners=True)
+            sampled.append(s.view(b, self.num_heads, c, h, w))
+
+        stacked = torch.stack(sampled, dim=0)  # (R,B,M,C,H,W)
+        wp = self.Wp.t().unsqueeze(1).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)  # (R,1,M,1,1,1)
+        head_vals = (stacked * wp * attn.unsqueeze(0)).sum(dim=0)  # (B,M,C,H,W)
+        fused = self.head_fuse(head_vals.view(b, self.num_heads * c, h, w))
+
+        alpha = self.t_gate(temb).view(b, 1, 1, 1)
+        out = alpha * fused + (1.0 - alpha) * res_hidden_states
+        offset_loss = torch.mean(torch.abs(offsets))
+        return out, offset_loss
+
+
+class PassthroughSpatialTransformer(nn.Module):
+    def forward(self, hidden_states, context=None):
+        return hidden_states
+
+
 def get_down_block(
     down_block_type,
     num_layers,
@@ -26,7 +117,9 @@ def get_down_block(
     downsample_padding=None,
     channel_attn=False,
     content_channel=32,
-    reduction=32):
+    reduction=32,
+    enable_style_attn=True,
+    disable_self_attn=False):
 
     down_block_type = down_block_type[7:] if down_block_type.startswith("UNetRes") else down_block_type
     if down_block_type == "DownBlock2D":
@@ -57,7 +150,9 @@ def get_down_block(
             cross_attention_dim=cross_attention_dim,
             attn_num_head_channels=attn_num_head_channels,
             content_channel=content_channel,
-            reduction=reduction)
+            reduction=reduction,
+            enable_style_attn=enable_style_attn,
+            disable_self_attn=disable_self_attn)
     else:
         raise ValueError(f"{down_block_type} does not exist.")
 
@@ -76,7 +171,12 @@ def get_up_block(
     upblock_index,
     resnet_groups=None,
     cross_attention_dim=None,
-    structure_feature_begin=64):
+    structure_feature_begin=64,
+    enable_style_attn=True,
+    disable_self_attn=False,
+    use_lite_daca=False,
+    lite_daca_heads=2,
+    lite_daca_points=4):
 
     up_block_type = up_block_type[7:] if up_block_type.startswith("UNetRes") else up_block_type
     if up_block_type == "UpBlock2D":
@@ -104,7 +204,12 @@ def get_up_block(
             cross_attention_dim=cross_attention_dim,
             attn_num_head_channels=attn_num_head_channels,
             structure_feature_begin=structure_feature_begin,
-            upblock_index=upblock_index)
+            upblock_index=upblock_index,
+            enable_style_attn=enable_style_attn,
+            disable_self_attn=disable_self_attn,
+            use_lite_daca=use_lite_daca,
+            lite_daca_heads=lite_daca_heads,
+            lite_daca_points=lite_daca_points)
     else:
         raise ValueError(f"{up_block_type} does not exist.")
 
@@ -128,12 +233,15 @@ class UNetMidMCABlock2D(nn.Module):
         cross_attention_dim=1280,
         content_channel=256,
         reduction=32,
+        enable_style_attn: bool = True,
+        disable_self_attn: bool = False,
         **kwargs,
     ):
         super().__init__()
 
         self.attention_type = attention_type
         self.attn_num_head_channels = attn_num_head_channels
+        self.enable_style_attn = bool(enable_style_attn)
         resnet_groups = resnet_groups if resnet_groups is not None else min(in_channels // 4, 32)
 
         resnets = [
@@ -163,16 +271,20 @@ class UNetMidMCABlock2D(nn.Module):
                     reduction=reduction,
                 )
             )
-            style_attentions.append(
-                SpatialTransformer(
-                    in_channels,
-                    attn_num_head_channels,
-                    in_channels // attn_num_head_channels,
-                    depth=1,
-                    context_dim=cross_attention_dim,
-                    num_groups=resnet_groups,
+            if self.enable_style_attn:
+                style_attentions.append(
+                    SpatialTransformer(
+                        in_channels,
+                        attn_num_head_channels,
+                        in_channels // attn_num_head_channels,
+                        depth=1,
+                        context_dim=cross_attention_dim,
+                        num_groups=resnet_groups,
+                        use_self_attn=not disable_self_attn,
+                    )
                 )
-            )
+            else:
+                style_attentions.append(PassthroughSpatialTransformer())
             resnets.append(
                 ResnetBlock2D(
                     in_channels=in_channels,
@@ -213,7 +325,7 @@ class UNetMidMCABlock2D(nn.Module):
             current_style_feature = None
             if encoder_hidden_states is not None and len(encoder_hidden_states) > 2:
                 current_style_feature = encoder_hidden_states[2]
-            if current_style_feature is not None:
+            if style_attn is not None and current_style_feature is not None:
                 hidden_states = style_attn(hidden_states, context=current_style_feature)
 
         return hidden_states
@@ -241,6 +353,8 @@ class MCADownBlock2D(nn.Module):
         add_downsample=True,
         content_channel=16,
         reduction=32,
+        enable_style_attn: bool = True,
+        disable_self_attn: bool = False,
     ):
         super().__init__()
         content_attentions = []
@@ -249,6 +363,7 @@ class MCADownBlock2D(nn.Module):
 
         self.attention_type = attention_type
         self.attn_num_head_channels = attn_num_head_channels
+        self.enable_style_attn = bool(enable_style_attn)
 
         for i in range(num_layers):
             in_channels = in_channels if i == 0 else out_channels
@@ -276,17 +391,21 @@ class MCADownBlock2D(nn.Module):
                     pre_norm=resnet_pre_norm,
                 )
             )
-            print("The style_attention cross attention dim in Down Block {} layer is {}".format(i+1, cross_attention_dim))
-            style_attentions.append(
-                SpatialTransformer(
-                    out_channels,
-                    attn_num_head_channels,
-                    out_channels // attn_num_head_channels,
-                    depth=1,
-                    context_dim=cross_attention_dim,
-                    num_groups=resnet_groups,
+            if self.enable_style_attn:
+                print("The style_attention cross attention dim in Down Block {} layer is {}".format(i+1, cross_attention_dim))
+                style_attentions.append(
+                    SpatialTransformer(
+                        out_channels,
+                        attn_num_head_channels,
+                        out_channels // attn_num_head_channels,
+                        depth=1,
+                        context_dim=cross_attention_dim,
+                        num_groups=resnet_groups,
+                        use_self_attn=not disable_self_attn,
+                    )
                 )
-            )
+            else:
+                style_attentions.append(PassthroughSpatialTransformer())
         self.content_attentions = nn.ModuleList(content_attentions)
         self.style_attentions = nn.ModuleList(style_attentions)
         self.resnets = nn.ModuleList(resnets)
@@ -328,7 +447,7 @@ class MCADownBlock2D(nn.Module):
             current_style_feature = None
             if encoder_hidden_states is not None and len(encoder_hidden_states) > 2:
                 current_style_feature = encoder_hidden_states[2]
-            if current_style_feature is not None:
+            if style_attn is not None and current_style_feature is not None:
                 hidden_states = style_attn(hidden_states, context=current_style_feature)
 
             output_states += (hidden_states,)
@@ -445,6 +564,11 @@ class StyleRSIUpBlock2D(nn.Module):
         structure_feature_begin=64, 
         upblock_index=1,
         add_upsample=True,
+        enable_style_attn: bool = True,
+        disable_self_attn: bool = False,
+        use_lite_daca: bool = False,
+        lite_daca_heads: int = 2,
+        lite_daca_points: int = 4,
     ):
         super().__init__()
         resnets = []
@@ -455,29 +579,43 @@ class StyleRSIUpBlock2D(nn.Module):
         self.attention_type = attention_type
         self.attn_num_head_channels = attn_num_head_channels
         self.upblock_index = upblock_index
+        self.enable_style_attn = bool(enable_style_attn)
+        self.use_lite_daca = bool(use_lite_daca)
 
         for i in range(num_layers):
             res_skip_channels = in_channels if (i == num_layers - 1) else out_channels
             resnet_in_channels = prev_output_channel if i == 0 else out_channels
             
-            sc_interpreter_offsets.append(
-                OffsetRefStrucInter(
-                    res_in_channels=res_skip_channels,
-                    style_feat_in_channels=int(structure_feature_begin * 2 / upblock_index),
-                    n_heads=attn_num_head_channels,
-                    num_groups=resnet_groups,
+            if self.use_lite_daca:
+                sc_interpreter_offsets.append(
+                    LiteDACA(
+                        res_in_channels=res_skip_channels,
+                        style_feat_in_channels=int(structure_feature_begin * 2 / upblock_index),
+                        temb_channels=temb_channels,
+                        num_heads=lite_daca_heads,
+                        num_points=lite_daca_points,
+                    )
                 )
-            )
-            dcn_deforms.append(
-                DeformConv2d(
-                    in_channels=res_skip_channels,
-                    out_channels=res_skip_channels,
-                    kernel_size=(3, 3),
-                    stride=1,
-                    padding=1,
-                    dilation=1,
+                dcn_deforms.append(nn.Identity())
+            else:
+                sc_interpreter_offsets.append(
+                    OffsetRefStrucInter(
+                        res_in_channels=res_skip_channels,
+                        style_feat_in_channels=int(structure_feature_begin * 2 / upblock_index),
+                        n_heads=attn_num_head_channels,
+                        num_groups=resnet_groups,
+                    )
                 )
-            )
+                dcn_deforms.append(
+                    DeformConv2d(
+                        in_channels=res_skip_channels,
+                        out_channels=res_skip_channels,
+                        kernel_size=(3, 3),
+                        stride=1,
+                        padding=1,
+                        dilation=1,
+                    )
+                )
 
             resnets.append(
                 ResnetBlock2D(
@@ -493,16 +631,20 @@ class StyleRSIUpBlock2D(nn.Module):
                     pre_norm=resnet_pre_norm,
                 )
             )
-            attentions.append(
-                SpatialTransformer(
-                    out_channels,
-                    attn_num_head_channels,
-                    out_channels // attn_num_head_channels,
-                    depth=1,
-                    context_dim=cross_attention_dim,
-                    num_groups=resnet_groups,
+            if self.enable_style_attn:
+                attentions.append(
+                    SpatialTransformer(
+                        out_channels,
+                        attn_num_head_channels,
+                        out_channels // attn_num_head_channels,
+                        depth=1,
+                        context_dim=cross_attention_dim,
+                        num_groups=resnet_groups,
+                        use_self_attn=not disable_self_attn,
+                    )
                 )
-            )
+            else:
+                attentions.append(PassthroughSpatialTransformer())
         self.sc_interpreter_offsets = nn.ModuleList(sc_interpreter_offsets)
         self.dcn_deforms = nn.ModuleList(dcn_deforms)
         self.attentions = nn.ModuleList(attentions)
@@ -530,7 +672,8 @@ class StyleRSIUpBlock2D(nn.Module):
             )
 
         for attn in self.attentions:
-            attn._set_attention_slice(slice_size)
+            if hasattr(attn, "_set_attention_slice"):
+                attn._set_attention_slice(slice_size)
 
         self.gradient_checkpointing = False
 
@@ -553,7 +696,10 @@ class StyleRSIUpBlock2D(nn.Module):
 
             style_content_feat = None
             if style_structure_features is not None:
-                expected_style_c = int(sc_inter_offset.gnorm_s.num_channels)
+                if hasattr(sc_inter_offset, "style_feat_in_channels"):
+                    expected_style_c = int(sc_inter_offset.style_feat_in_channels)
+                else:
+                    expected_style_c = int(sc_inter_offset.gnorm_s.num_channels)
                 expected_h = int(res_hidden_states.shape[-2])
                 expected_w = int(res_hidden_states.shape[-1])
                 # Prefer exact channel+spatial match to keep RSI semantics explicit.
@@ -586,12 +732,16 @@ class StyleRSIUpBlock2D(nn.Module):
             
             # RSI branch is optional.
             if style_content_feat is not None:
-                offset = sc_inter_offset(res_hidden_states, style_content_feat)
-                offset = offset.contiguous()
-                offset_sum = torch.mean(torch.abs(offset))
-                total_offset += offset_sum
-                res_hidden_states = res_hidden_states.contiguous()
-                res_hidden_states = dcn_deform(res_hidden_states, offset)
+                if self.use_lite_daca:
+                    res_hidden_states, offset_sum = sc_inter_offset(res_hidden_states, style_content_feat, temb)
+                    total_offset += offset_sum
+                else:
+                    offset = sc_inter_offset(res_hidden_states, style_content_feat)
+                    offset = offset.contiguous()
+                    offset_sum = torch.mean(torch.abs(offset))
+                    total_offset += offset_sum
+                    res_hidden_states = res_hidden_states.contiguous()
+                    res_hidden_states = dcn_deform(res_hidden_states, offset)
             # concat as input
             hidden_states = torch.cat([hidden_states, res_hidden_states], dim=1)
 
@@ -604,13 +754,13 @@ class StyleRSIUpBlock2D(nn.Module):
                     return custom_forward
 
                 hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(resnet), hidden_states, temb)
-                if encoder_hidden_states is not None:
+                if attn is not None and encoder_hidden_states is not None:
                     hidden_states = torch.utils.checkpoint.checkpoint(
                         create_custom_forward(attn), hidden_states, encoder_hidden_states
                     )
             else:
                 hidden_states = resnet(hidden_states, temb)
-                if encoder_hidden_states is not None:
+                if attn is not None and encoder_hidden_states is not None:
                     hidden_states = attn(hidden_states, context=encoder_hidden_states)
 
         if self.upsamplers is not None:

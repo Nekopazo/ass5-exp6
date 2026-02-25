@@ -28,6 +28,7 @@ class SpatialTransformer(nn.Module):
         dropout: float = 0.0,
         num_groups: int = 32,
         context_dim: Optional[int] = None,
+        use_self_attn: bool = True,
     ):
         super().__init__()
         self.n_heads = n_heads
@@ -40,7 +41,14 @@ class SpatialTransformer(nn.Module):
 
         self.transformer_blocks = nn.ModuleList(
             [
-                BasicTransformerBlock(inner_dim, n_heads, d_head, dropout=dropout, context_dim=context_dim)
+                BasicTransformerBlock(
+                    inner_dim,
+                    n_heads,
+                    d_head,
+                    dropout=dropout,
+                    context_dim=context_dim,
+                    use_self_attn=use_self_attn,
+                )
                 for d in range(depth)
             ]
         )
@@ -89,11 +97,15 @@ class BasicTransformerBlock(nn.Module):
         context_dim: Optional[int] = None,
         gated_ff: bool = True,
         checkpoint: bool = True,
+        use_self_attn: bool = True,
     ):
         super().__init__()
-        self.attn1 = CrossAttention(
-            query_dim=dim, heads=n_heads, dim_head=d_head, dropout=dropout
-        )  # is a self-attention
+        self.use_self_attn = bool(use_self_attn)
+        self.attn1 = (
+            CrossAttention(query_dim=dim, heads=n_heads, dim_head=d_head, dropout=dropout)
+            if self.use_self_attn
+            else None
+        )  # self-attention (optional)
         self.ff = FeedForward(dim, dropout=dropout, glu=gated_ff)
         self.attn2 = CrossAttention(
             query_dim=dim, context_dim=context_dim, heads=n_heads, dim_head=d_head, dropout=dropout
@@ -104,12 +116,14 @@ class BasicTransformerBlock(nn.Module):
         self.checkpoint = checkpoint
 
     def _set_attention_slice(self, slice_size):
-        self.attn1._slice_size = slice_size
+        if self.attn1 is not None:
+            self.attn1._slice_size = slice_size
         self.attn2._slice_size = slice_size
 
     def forward(self, hidden_states, context=None):
         hidden_states = hidden_states.contiguous() if hidden_states.device.type == "mps" else hidden_states
-        hidden_states = self.attn1(self.norm1(hidden_states)) + hidden_states   # hidden_states: torch.Size([1, 4096, 128])
+        if self.attn1 is not None:
+            hidden_states = self.attn1(self.norm1(hidden_states)) + hidden_states
         hidden_states = self.attn2(self.norm2(hidden_states), context=context) + hidden_states
         hidden_states = self.ff(self.norm3(hidden_states)) + hidden_states
         return hidden_states

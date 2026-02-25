@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import shutil
+import time
 from typing import Dict, List
 
 import torch
@@ -119,6 +120,11 @@ class DiffusionTrainer:
         self.global_step = 0
         self.local_step = 0  # batch idx within current epoch
         self.current_epoch = 0
+        self._step_data_time = 0.0
+        self._step_train_time = 0.0
+        self._step_data_time_ema = 0.0
+        self._step_train_time_ema = 0.0
+        self._time_ema_decay = 0.9
         self.save_every_steps = save_every_steps
         self.checkpoint_dir: Path | None = None
         self.step_log_file: Path | None = None
@@ -179,6 +185,7 @@ class DiffusionTrainer:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def train_step(self, batch: Dict[str, torch.Tensor], grad_clip: float | None = 1.0):
+        _train_t0 = time.perf_counter()
         self.model.train()
         self._clear_offset()
         x0 = batch["target"].to(self.device)  # clean target image
@@ -269,6 +276,14 @@ class DiffusionTrainer:
 
         self.global_step += 1
         self.local_step += 1
+        self._step_train_time = float(time.perf_counter() - _train_t0)
+        decay = float(self._time_ema_decay)
+        if self.global_step <= 1:
+            self._step_data_time_ema = float(self._step_data_time)
+            self._step_train_time_ema = float(self._step_train_time)
+        else:
+            self._step_data_time_ema = decay * self._step_data_time_ema + (1.0 - decay) * float(self._step_data_time)
+            self._step_train_time_ema = decay * self._step_train_time_ema + (1.0 - decay) * float(self._step_train_time)
 
         # automatic sampling triggered by batch counter
         if (
@@ -298,6 +313,10 @@ class DiffusionTrainer:
                 "loss_cons": float(loss_cons.item()),
                 "cfg_dropped": int(cfg_mask.sum().item()),
                 "lr": float(self.lr_schedule.get_last_lr()[0]),
+                "data_time": float(self._step_data_time),
+                "train_time": float(self._step_train_time),
+                "data_time_ema": float(self._step_data_time_ema),
+                "train_time_ema": float(self._step_train_time_ema),
             }
             if grad_norm is not None:
                 log_row["grad_norm"] = float(grad_norm)
@@ -307,7 +326,9 @@ class DiffusionTrainer:
                 f"[debug-step] gstep={self.global_step} epoch={self.current_epoch} estep={self.local_step} "
                 f"loss={loss.item():.4f} mse={loss_mse.item():.4f} off={loss_off.item():.4f} "
                 f"cp={loss_cp.item():.4f} cons={loss_cons.item():.4f} "
-                f"cfg_drop={int(cfg_mask.sum().item())}/{int(B)} lr={self.lr_schedule.get_last_lr()[0]:.6e}"
+                f"cfg_drop={int(cfg_mask.sum().item())}/{int(B)} lr={self.lr_schedule.get_last_lr()[0]:.6e} "
+                f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s "
+                f"data_t_ema={self._step_data_time_ema:.3f}s train_t_ema={self._step_train_time_ema:.3f}s"
             )
             if grad_norm is not None:
                 msg += f" grad_norm={grad_norm:.4f}"
@@ -335,6 +356,10 @@ class DiffusionTrainer:
             "loss_cons": loss_cons.item(),
             "cfg_dropped": int(cfg_mask.sum().item()),
             "lr": self.lr_schedule.get_last_lr()[0],
+            "data_time": float(self._step_data_time),
+            "train_time": float(self._step_train_time),
+            "data_time_ema": float(self._step_data_time_ema),
+            "train_time_ema": float(self._step_train_time_ema),
         }
 
     # --------------------- sampling (DDIM简化) --------------------- #
@@ -557,7 +582,15 @@ class DiffusionTrainer:
         logs: List[Dict] = []
         self.current_epoch = epoch
         self.local_step = 0
-        for batch in dataloader:
+        it = iter(dataloader)
+        while True:
+            t_data_start = time.perf_counter()
+            try:
+                batch = next(it)
+            except StopIteration:
+                break
+            data_time = time.perf_counter() - t_data_start
+            self._step_data_time = float(data_time)
             out = self.train_step(batch, grad_clip=grad_clip)
             logs.append(out)
 
@@ -676,6 +709,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
         self.lambda_fm = float(lambda_fm)
 
     def train_step(self, batch: Dict[str, torch.Tensor], grad_clip: float | None = 1.0):
+        _train_t0 = time.perf_counter()
         self.model.train()
         self._clear_offset()
         x0 = batch["target"].to(self.device)  # data sample
@@ -763,6 +797,14 @@ class FlowMatchingTrainer(DiffusionTrainer):
 
         self.global_step += 1
         self.local_step += 1
+        self._step_train_time = float(time.perf_counter() - _train_t0)
+        decay = float(self._time_ema_decay)
+        if self.global_step <= 1:
+            self._step_data_time_ema = float(self._step_data_time)
+            self._step_train_time_ema = float(self._step_train_time)
+        else:
+            self._step_data_time_ema = decay * self._step_data_time_ema + (1.0 - decay) * float(self._step_data_time)
+            self._step_train_time_ema = decay * self._step_train_time_ema + (1.0 - decay) * float(self._step_train_time)
 
         if (
             self.sample_every_steps
@@ -791,6 +833,10 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 "loss_cons": float(loss_cons.item()),
                 "cfg_dropped": int(cfg_mask.sum().item()),
                 "lr": float(self.lr_schedule.get_last_lr()[0]),
+                "data_time": float(self._step_data_time),
+                "train_time": float(self._step_train_time),
+                "data_time_ema": float(self._step_data_time_ema),
+                "train_time_ema": float(self._step_train_time_ema),
             }
             if grad_norm is not None:
                 log_row["grad_norm"] = float(grad_norm)
@@ -800,7 +846,9 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 f"[fm-step] gstep={self.global_step} epoch={self.current_epoch} estep={self.local_step} "
                 f"loss={loss.item():.4f} fm={loss_fm.item():.4f} off={loss_off.item():.4f} "
                 f"cp={loss_cp.item():.4f} cons={loss_cons.item():.4f} "
-                f"cfg_drop={int(cfg_mask.sum().item())}/{int(b)} lr={self.lr_schedule.get_last_lr()[0]:.6e}"
+                f"cfg_drop={int(cfg_mask.sum().item())}/{int(b)} lr={self.lr_schedule.get_last_lr()[0]:.6e} "
+                f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s "
+                f"data_t_ema={self._step_data_time_ema:.3f}s train_t_ema={self._step_train_time_ema:.3f}s"
             )
             if grad_norm is not None:
                 msg += f" grad_norm={grad_norm:.4f}"
@@ -814,6 +862,10 @@ class FlowMatchingTrainer(DiffusionTrainer):
             "loss_cons": loss_cons.item(),
             "cfg_dropped": int(cfg_mask.sum().item()),
             "lr": self.lr_schedule.get_last_lr()[0],
+            "data_time": float(self._step_data_time),
+            "train_time": float(self._step_train_time),
+            "data_time_ema": float(self._step_data_time_ema),
+            "train_time_ema": float(self._step_train_time_ema),
         }
 
     @torch.no_grad()

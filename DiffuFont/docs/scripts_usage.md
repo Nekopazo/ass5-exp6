@@ -316,3 +316,36 @@ Default launch profile:
 - `--log-every-steps 100`
 - `--save-every-steps 5000`
 - `--save-every-epochs 0`
+
+## 11) `scripts/build_part_bank_component_aware.py`
+
+Purpose: component-aware PartBank generation (connected components + balanced diversity selection).
+
+Minimal:
+
+```bash
+python scripts/build_part_bank_component_aware.py --project-root .
+```
+
+Recommended (drop-in for current training pipeline):
+
+```bash
+python scripts/build_part_bank_component_aware.py \
+  --project-root . \
+  --output-dir DataPreparation/PartBank_component_aware \
+  --parts-per-font 64 \
+  --patch-size 64
+
+python scripts/build_part_bank_lmdb.py \
+  --project-root . \
+  --manifest DataPreparation/PartBank_component_aware/manifest.json \
+  --out-lmdb DataPreparation/LMDB/PartBank_component_aware.lmdb
+```
+
+Notes:
+
+- This script targets better structure coverage than keypoint-only extraction.
+- Output `manifest` format is compatible with existing `dataset.py` / `train.py` inputs.
+- To use in training, set:
+  - `--part-bank-manifest DataPreparation/PartBank_component_aware/manifest.json`
+  - `--part-bank-lmdb DataPreparation/LMDB/PartBank_component_aware.lmdb`
