@@ -349,3 +349,24 @@ Notes:
 - To use in training, set:
   - `--part-bank-manifest DataPreparation/PartBank_component_aware/manifest.json`
   - `--part-bank-lmdb DataPreparation/LMDB/PartBank_component_aware.lmdb`
+
+## 12) `scripts/build_part_bank_component_aware_from_images.py`
+
+Purpose: build component-aware PartBank directly from generated glyph images (no font rendering).
+
+Minimal:
+
+```bash
+python scripts/build_part_bank_component_aware_from_images.py --project-root .
+```
+
+Recommended:
+
+```bash
+python scripts/build_part_bank_component_aware_from_images.py \
+  --project-root . \
+  --glyph-root DataPreparation/Generated/TrainFonts \
+  --output-dir DataPreparation/PartBank_component_aware \
+  --parts-per-font 64 \
+  --patch-size 64
+```
