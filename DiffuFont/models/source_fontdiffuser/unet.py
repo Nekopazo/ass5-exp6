@@ -14,6 +14,7 @@ from .embeddings import TimestepEmbedding, Timesteps
 from .unet_blocks import (DownBlock2D,
                           UNetMidMCABlock2D,
                           UpBlock2D,
+                          StyleUpBlock2D,
                           get_down_block,
                           get_up_block)
 
@@ -291,7 +292,6 @@ class UNet(ModelMixin, ConfigMixin):
             )
 
         # 5. up
-        offset_out_sum = 0
         for i, upsample_block in enumerate(self.up_blocks):
             is_final_block = i == len(self.up_blocks) - 1
 
@@ -303,19 +303,18 @@ class UNet(ModelMixin, ConfigMixin):
             if not is_final_block and forward_upsample_size:
                 upsample_size = down_block_res_samples[-1].shape[2:]
 
-            if (
-                hasattr(upsample_block, "style_cross_attentions")
-                and upsample_block.style_cross_attentions is not None
-            ):
-                sample, offset_out = upsample_block(
+            if isinstance(upsample_block, StyleUpBlock2D):
+                # Style cross-attention tokens (from parts_vector).
+                style_tokens = None
+                if encoder_hidden_states is not None and len(encoder_hidden_states) > 2:
+                    style_tokens = encoder_hidden_states[2]
+                sample = upsample_block(
                     hidden_states=sample,
                     temb=emb,
                     res_hidden_states_tuple=res_samples,
-                    style_structure_features=encoder_hidden_states[3],
-                    encoder_hidden_states=encoder_hidden_states[2],
+                    encoder_hidden_states=style_tokens,
                     upsample_size=upsample_size,
                 )
-                offset_out_sum += offset_out
             else:
                 sample = upsample_block(
                     hidden_states=sample, temb=emb, res_hidden_states_tuple=res_samples, upsample_size=upsample_size
@@ -327,6 +326,6 @@ class UNet(ModelMixin, ConfigMixin):
         sample = self.conv_out(sample)
 
         if not return_dict:
-            return (sample, offset_out_sum)
+            return (sample,)
 
         return UNetOutput(sample=sample)

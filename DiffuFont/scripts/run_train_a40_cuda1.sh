@@ -9,7 +9,6 @@ LOG_DIR="$PROJECT_ROOT/logs"
 CKPT_DIR="$PROJECT_ROOT/checkpoints/$RUN_NAME"
 LOG_FILE="$CKPT_DIR/train.log"
 LOG_LINK="$LOG_DIR/$RUN_NAME.log"
-EP_CKPT="${EP_CKPT:-checkpoints/e_p_font_encoder_best.pt}"
 
 mkdir -p "$LOG_DIR" "$CKPT_DIR"
 cd "$PROJECT_ROOT"
@@ -19,14 +18,13 @@ CMD=(
   --data-root .
   --device cuda:0
   --precision bf16
-  --font-mode random
   --conditioning-profile full
   --batch 48
   --num-workers 0
   --epochs 50
-  --part-set-min-size 2
-  --part-set-size 10
-  --part-retrieval-ep-ckpt "$EP_CKPT"
+  --part-set-min 1
+  --part-set-max 8
+  --lambda-nce 0.05
   --sample-every-steps 300
   --log-every-steps 100
   --detailed-log

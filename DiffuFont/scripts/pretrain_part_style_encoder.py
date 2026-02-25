@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""Contrastive pretraining for PartStyleEncoder.
+"""Contrastive pretraining for the PartBank encoder head.
 
-Input: DataPreparation/PartBank/manifest.json
-Output: checkpoint containing part_cnn and part_fc weights.
+Trains part_patch_encoder, part_set_norm, style_token_mlp, and contrastive_head
+with the **same architecture** as SourcePartRefUNet so that the pretrained
+weights can be loaded directly into the full model.
+
+Input:  DataPreparation/PartBank/manifest.json
+Output: checkpoint with keys that map 1-to-1 to SourcePartRefUNet state dict.
 """
 
 from __future__ import annotations
@@ -13,10 +17,11 @@ import json
 import random
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 
@@ -24,8 +29,77 @@ PROJECT_ROOT_FALLBACK = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT_FALLBACK) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT_FALLBACK))
 
-from models.font_diffusion_unet import PartStyleEncoder
 
+# ---------------------------------------------------------------------------
+# Lightweight replica of the part-encoder from SourcePartRefUNet
+# ---------------------------------------------------------------------------
+
+class PartEncoderModule(nn.Module):
+    """Minimal standalone module matching SourcePartRefUNet part-related layers."""
+
+    def __init__(
+        self,
+        in_channels: int = 3,
+        style_token_dim: int = 256,
+        style_token_count: int = 8,
+    ):
+        super().__init__()
+        self.in_channels = in_channels
+        self.style_token_dim = style_token_dim
+        self.style_token_count = style_token_count
+
+        # Same architecture as SourcePartRefUNet.part_patch_encoder
+        self.part_patch_encoder = nn.Sequential(
+            nn.Conv2d(in_channels, 64, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.SiLU(inplace=True),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(256, style_token_dim),
+        )
+        self.part_set_norm = nn.LayerNorm(style_token_dim)
+        self.style_token_mlp = nn.Sequential(
+            nn.Linear(style_token_dim, style_token_dim * 4),
+            nn.SiLU(inplace=True),
+            nn.Linear(style_token_dim * 4, style_token_count * style_token_dim),
+        )
+        self.contrastive_head = nn.Sequential(
+            nn.LayerNorm(style_token_dim),
+            nn.Linear(style_token_dim, style_token_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(style_token_dim, style_token_dim),
+        )
+
+    def encode_contrastive_z(
+        self,
+        part_imgs: torch.Tensor,
+        part_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """(B, P, C, H, W) + mask (B, P) -> L2-normalised embedding (B, D)."""
+        b, p, c, h, w = part_imgs.shape
+        x = part_imgs.view(b * p, c, h, w)
+        z = self.part_patch_encoder(x).view(b, p, self.style_token_dim)  # (B, P, D)
+
+        mask_f = part_mask.to(dtype=z.dtype, device=z.device).unsqueeze(-1)  # (B, P, 1)
+        denom = mask_f.sum(dim=1).clamp_min(1.0)  # (B, 1)
+        pooled = (z * mask_f).sum(dim=1) / denom  # (B, D)
+        pooled = self.part_set_norm(pooled)
+
+        tokens = self.style_token_mlp(pooled).view(b, self.style_token_count, self.style_token_dim)
+        pooled2 = tokens.mean(dim=1)  # (B, D)
+        out = self.contrastive_head(pooled2)  # (B, D)
+        return F.normalize(out, dim=-1)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
@@ -57,31 +131,20 @@ def load_part_bank(manifest_path: Path, root: Path) -> Dict[str, List[Path]]:
 def load_part_image(path: Path, patch_size: int) -> torch.Tensor:
     img = Image.open(path).convert("RGB").resize((patch_size, patch_size), Image.BILINEAR)
     arr = np.asarray(img, dtype=np.float32) / 255.0
-    arr = arr * 2.0 - 1.0  # match main training normalization range
-    t = torch.from_numpy(arr).permute(2, 0, 1).contiguous()
-    return t
+    arr = arr * 2.0 - 1.0  # match main training normalization range [-1, 1]
+    return torch.from_numpy(arr).permute(2, 0, 1).contiguous()
 
 
-def sample_paths(paths: List[Path], n: int, rng: random.Random) -> List[Path]:
+def sample_paths(paths: List[Path], n: int, rng: random.Random) -> Tuple[List[Path], List[float]]:
+    """Return n paths (with replacement if needed) and corresponding mask."""
     if len(paths) >= n:
-        return rng.sample(paths, n)
-    picked = list(paths)
-    while len(picked) < n:
-        picked.append(rng.choice(paths))
-    return picked
-
-
-def encode_part_set(
-    encoder: PartStyleEncoder,
-    part_paths: List[Path],
-    patch_size: int,
-    device: torch.device,
-) -> torch.Tensor:
-    imgs = torch.stack([load_part_image(p, patch_size) for p in part_paths], dim=0).to(device)
-    feat = encoder.part_cnn(imgs).flatten(1)
-    feat = encoder.part_fc(feat)
-    z = F.normalize(feat.sum(dim=0, keepdim=True), dim=-1)
-    return z
+        chosen = rng.sample(paths, n)
+    else:
+        chosen = list(paths)
+        while len(chosen) < n:
+            chosen.append(rng.choice(paths))
+    mask = [1.0] * len(chosen)
+    return chosen, mask
 
 
 def split_parts_within_font(
@@ -133,15 +196,12 @@ def is_improved(metric_name: str, new_value: float, best_value: float | None, mi
 
 
 def make_checkpoint(
-    encoder: PartStyleEncoder,
+    encoder: PartEncoderModule,
     args: argparse.Namespace,
-    extra: Dict,
-) -> Dict:
+    extra: Dict[str, Any],
+) -> Dict[str, Any]:
     return {
-        "part_style_encoder": {
-            "part_cnn": encoder.part_cnn.state_dict(),
-            "part_fc": encoder.part_fc.state_dict(),
-        },
+        "part_encoder": encoder.state_dict(),
         "config": {
             k: (str(v) if isinstance(v, Path) else v)
             for k, v in vars(args).items()
@@ -151,7 +211,7 @@ def make_checkpoint(
 
 
 def run_one_batch(
-    encoder: PartStyleEncoder,
+    encoder: PartEncoderModule,
     bank: Dict[str, List[Path]],
     font_pool: List[str],
     batch_size: int,
@@ -168,8 +228,11 @@ def run_one_batch(
     else:
         batch_fonts = [rng.choice(font_pool) for _ in range(batch_size)]
 
-    z1_list = []
-    z2_list = []
+    imgs1_list: List[torch.Tensor] = []
+    mask1_list: List[torch.Tensor] = []
+    imgs2_list: List[torch.Tensor] = []
+    mask2_list: List[torch.Tensor] = []
+
     for font in batch_fonts:
         part_paths = bank[font]
         ub = min(max_k, len(part_paths))
@@ -177,14 +240,29 @@ def run_one_batch(
         n1 = rng.randint(lb, ub)
         n2 = rng.randint(lb, ub)
 
-        set1 = sample_paths(part_paths, n1, rng)
-        set2 = sample_paths(part_paths, n2, rng)
+        set1, m1 = sample_paths(part_paths, n1, rng)
+        set2, m2 = sample_paths(part_paths, n2, rng)
 
-        z1_list.append(encode_part_set(encoder, set1, patch_size, device))
-        z2_list.append(encode_part_set(encoder, set2, patch_size, device))
+        # Pad to max_k so we can batch
+        while len(set1) < max_k:
+            set1.append(set1[0])
+            m1.append(0.0)
+        while len(set2) < max_k:
+            set2.append(set2[0])
+            m2.append(0.0)
 
-    z1 = torch.cat(z1_list, dim=0)
-    z2 = torch.cat(z2_list, dim=0)
+        imgs1_list.append(torch.stack([load_part_image(p, patch_size) for p in set1]))
+        mask1_list.append(torch.tensor(m1, dtype=torch.float32))
+        imgs2_list.append(torch.stack([load_part_image(p, patch_size) for p in set2]))
+        mask2_list.append(torch.tensor(m2, dtype=torch.float32))
+
+    imgs1 = torch.stack(imgs1_list).to(device)  # (B, max_k, C, H, W)
+    mask1 = torch.stack(mask1_list).to(device)   # (B, max_k)
+    imgs2 = torch.stack(imgs2_list).to(device)
+    mask2 = torch.stack(mask2_list).to(device)
+
+    z1 = encoder.encode_contrastive_z(imgs1, mask1)  # (B, D)
+    z2 = encoder.encode_contrastive_z(imgs2, mask2)
 
     logits = (z1 @ z2.t()) / temperature
     labels = torch.arange(logits.size(0), device=device)
@@ -231,7 +309,8 @@ def main() -> None:
     parser.add_argument("--early-stop-min-delta", type=float, default=1e-4)
 
     parser.add_argument("--patch-size", type=int, default=64)
-    parser.add_argument("--style-dim", type=int, default=256)
+    parser.add_argument("--style-token-dim", type=int, default=256)
+    parser.add_argument("--style-token-count", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--temperature", type=float, default=0.4)
 
@@ -301,16 +380,13 @@ def main() -> None:
         f"final_max={final_max_k}, warmup_steps={args.warmup_steps}"
     )
 
-    encoder = PartStyleEncoder(
+    encoder = PartEncoderModule(
         in_channels=3,
-        style_dim=args.style_dim,
-        patch_size=args.patch_size,
-        patch_stride=max(1, args.patch_size // 2),
-        min_patches_per_style=min_k,
-        max_patches_per_style=final_max_k,
+        style_token_dim=args.style_token_dim,
+        style_token_count=args.style_token_count,
     ).to(device)
 
-    params = list(encoder.part_cnn.parameters()) + list(encoder.part_fc.parameters())
+    params = list(encoder.parameters())
     opt = torch.optim.Adam(params, lr=args.lr)
 
     best_metric: float | None = None

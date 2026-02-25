@@ -380,8 +380,8 @@ class ContentEncoder(ModelMixin, ConfigMixin):
         elif self.resolution == 256:
             self.save_featrues = [0,1,2,3,4,5]
         
-        self.out_channel_nultipiler = 1
-        self.arch = content_encoder_arch(self.ch, self.out_channel_nultipiler,input_nc)[resolution]
+        self.out_channel_multiplier = 1
+        self.arch = content_encoder_arch(self.ch, self.out_channel_multiplier, input_nc)[resolution]
 
         if self.G_param == 'SN':
             self.which_conv = functools.partial(SNConv2d,

@@ -45,30 +45,31 @@ RSI uses style-structure features from `style_img` through `ContentEncoder`.
 - Attention placement (5 scales): `Down-32`, `Down-16`, `Mid-16`, `Up-16`, `Up-32`
 - Attention order inside each enabled block is fixed: `ResBlock -> Self-Attention -> Cross-Attention(style) -> ResBlock`
 
-## Dataset / Part Retrieval
+## Dataset / PartBank Sampling
 
-- Retrieval policy is unchanged: `top1 gate + top3 weighted mix`
-- Requested parts count is fixed to 32 by default (`--part-set-size=32`, `--part-set-min-size=32`)
-- Output remains variable-length if unique candidates are fewer than requested (no duplicate fill)
-- Collate pads to batch max and emits `part_mask`
+- Parts are sampled directly from the PartBank by font label (no retrieval CNN)
+- Random 1-8 parts per sample (`--part-set-min=1`, `--part-set-max=8`)
+- Two independent part sets (parts / parts_b) are drawn per sample for InfoNCE contrastive learning
+- Collate pads to batch max and emits `part_mask`; per-batch `font_ids` are computed for InfoNCE
 
 ## Losses
 
 Main training loss in `DiffusionTrainer`:
 
-- `loss_mse`: diffusion reconstruction MSE
+- `loss_mse`: diffusion reconstruction MSE (ε-prediction)
 - `loss_off`: RSI offset regularization
-- `loss_style` (optional): style consistency between generated image and GT image in style-encoder feature space
+- `loss_nce`: InfoNCE contrastive loss on dual part-set views (λ=0.05)
 
 Total:
 
-`L = lambda_mse * loss_mse + lambda_off * loss_off + lambda_style * loss_style`
+`L = lambda_mse * loss_mse + lambda_off * loss_off + lambda_nce * loss_nce`
 
 ## Runtime Defaults (train.py)
 
 - `conditioning_profile=parts_vector_only`
 - `attn_scales=16,32`
-- `part_set_size=32`
-- `part_set_min_size=32`
+- `part_set_max=8`
+- `part_set_min=1`
+- `lambda_nce=0.05`
 - `style_token_count=8`
 - `style_token_dim=256`

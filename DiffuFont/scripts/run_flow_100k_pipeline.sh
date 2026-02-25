@@ -90,21 +90,6 @@ echo "[pipeline] root=${ROOT}"
 echo "[pipeline] pid=$$"
 echo "[pipeline] log_file=${ROOT}/${LOG_FILE}"
 
-# Require pretrained CNN checkpoints (skip any pretrain stage).
-EP_CKPT="checkpoints/e_p_font_encoder_best.pt"
-PV_CKPT="checkpoints/part_style_encoder_pretrain_best.pt"
-if [[ ! -f "${EP_CKPT}" ]]; then
-  echo "[pipeline] missing checkpoint: ${EP_CKPT}"
-  exit 1
-fi
-if [[ ! -f "${PV_CKPT}" ]]; then
-  echo "[pipeline] missing checkpoint: ${PV_CKPT}"
-  exit 1
-fi
-echo "[pipeline] found pretrained checkpoints:"
-echo "[pipeline]   ${EP_CKPT}"
-echo "[pipeline]   ${PV_CKPT}"
-
 # Fixed 100k-step schedule under current default data config.
 TARGET_STEPS=100000
 EPOCHS=39
@@ -120,17 +105,16 @@ for BATCH_SIZE in 8; do
     --precision bf16 \
     --batch "${BATCH_SIZE}" \
     --epochs "${EPOCHS}" \
-    --lr-tmax-steps "${TARGET_STEPS}" \
-    --part-retrieval-ep-ckpt "${EP_CKPT}" \
-    --part-vector-pretrain-ckpt "${PV_CKPT}" \
+    --total-steps "${TARGET_STEPS}" \
+    --conditioning-profile full \
+    --part-set-max 8 \
+    --part-set-min 1 \
+    --lambda-nce 0.05 \
     --num-workers 0 \
     --part-image-cache-size 20000 \
     --lmdb-decode-cache-size 50000 \
-    --use-style-plan-cache \
-    --style-prefetch-limit 20000 \
     --save-dir checkpoints/fulldiffusion_default_100k \
     --attn-scales 16,32 \
-    --part-retrieval-device cuda:1 \
     --log-every-steps 10 
   RC=$?
   set -e

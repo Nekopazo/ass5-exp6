@@ -18,7 +18,6 @@ CMD=(
   --data-root .
   --device cuda:1
   --precision bf16
-  --font-mode random
   --conditioning-profile baseline
   --batch 48
   --num-workers 0
