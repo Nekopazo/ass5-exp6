@@ -14,8 +14,6 @@ from typing import Dict, List
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision import transforms as T
-from torchvision.models import VGG19_Weights, vgg19
 from torchvision.utils import save_image
 from diffusers import DPMSolverMultistepScheduler
 
@@ -56,28 +54,6 @@ class NoiseScheduler:
         return x_t, eps
 
 
-class VGGPerceptualLoss(nn.Module):
-    """Perceptual loss based on the first few layers of a pretrained VGG19 network."""
-
-    def __init__(self):
-        super().__init__()
-        vgg = vgg19(weights=VGG19_Weights.IMAGENET1K_V1).features[:16]  # till relu3_1
-        for p in vgg.parameters():
-            p.requires_grad = False
-        self.vgg = vgg
-        self.norm = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-
-    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        # Training tensors are in [-1, 1]; convert to [0, 1] before ImageNet normalization.
-        input_01 = ((input + 1.0) * 0.5).clamp(0.0, 1.0)
-        target_01 = ((target + 1.0) * 0.5).clamp(0.0, 1.0)
-        input_norm = self.norm(input_01)
-        target_norm = self.norm(target_01)
-        feat_in = self.vgg(input_norm)
-        feat_tg = self.vgg(target_norm)
-        return F.l1_loss(feat_in, feat_tg)
-
-
 class DiffusionTrainer:
     def __init__(
         self,
@@ -86,8 +62,7 @@ class DiffusionTrainer:
         lr: float = 2e-4,
         lambda_mse: float = 1.0,
         lambda_off: float = 0.5,
-        lambda_cp: float = 0.01,
-        lambda_cons: float = 0.0,
+        lambda_style: float = 0.0,
         cfg_drop_prob: float = 0.1,
         T: int = 1000,
         lr_tmax: int | None = None,
@@ -113,10 +88,8 @@ class DiffusionTrainer:
         self.scheduler = NoiseScheduler(self.diffusion_steps).to(device)
         self.lambda_mse = lambda_mse
         self.lambda_off = lambda_off
-        self.lambda_cp = lambda_cp
-        self.lambda_cons = float(lambda_cons)
+        self.lambda_style = float(lambda_style)
         self.cfg_drop_prob = float(cfg_drop_prob)
-        self.perc_loss_fn = VGGPerceptualLoss().to(device) if float(self.lambda_cp) > 0.0 else None
         self.global_step = 0
         self.local_step = 0  # batch idx within current epoch
         self.current_epoch = 0
@@ -193,8 +166,6 @@ class DiffusionTrainer:
         style = batch["style"].to(self.device)
         part_imgs = batch["parts"].to(self.device) if "parts" in batch else None
         part_mask = batch["part_mask"].to(self.device) if "part_mask" in batch else None
-        part_imgs_b = batch["parts_b"].to(self.device) if "parts_b" in batch else None
-        part_mask_b = batch["part_mask_b"].to(self.device) if "part_mask_b" in batch else None
         B = x0.size(0)
         t = torch.randint(0, self.scheduler.T, (B,), device=self.device)
 
@@ -229,32 +200,23 @@ class DiffusionTrainer:
             loss_mse = F.mse_loss(eps_hat, eps)
             # Keep source behavior scale for offset term.
             loss_off = self._offset_loss() / 2.0
-            sqrt_ab = self.scheduler.sqrt_alpha_bars[t].view(-1, 1, 1, 1).to(self.device)
-            sqrt_1m = self.scheduler.sqrt_one_minus_alpha_bars[t].view(-1, 1, 1, 1).to(self.device)
-            x0_hat = (x_t - sqrt_1m * eps_hat) / torch.clamp(sqrt_ab, min=1e-8)
-            if self.lambda_cp > 0.0:
-                if self.perc_loss_fn is None:
-                    raise ValueError("lambda_cp > 0 requires perceptual loss network.")
-                loss_cp = self.perc_loss_fn(x0_hat, x0)
-            else:
-                loss_cp = torch.tensor(0.0, device=self.device, dtype=loss_mse.dtype)
-            loss_cons = torch.tensor(0.0, device=self.device, dtype=loss_mse.dtype)
-            if self.lambda_cons > 0.0:
-                if part_imgs is None or part_imgs_b is None:
-                    raise ValueError("lambda_cons > 0 requires parts and parts_b in each batch.")
-                if not hasattr(self.model, "encode_part_vector"):
-                    raise ValueError("lambda_cons > 0 requires model.encode_part_vector().")
-                if not bool(getattr(self.model, "enable_parts_vector_condition", False)):
-                    raise ValueError("lambda_cons > 0 requires part-vector conditioning enabled.")
-                tok_a = self.model.encode_part_vector(part_imgs, part_mask)  # type: ignore[attr-defined]
-                tok_b = self.model.encode_part_vector(part_imgs_b, part_mask_b)  # type: ignore[attr-defined]
-                loss_cons = F.mse_loss(tok_a, tok_b)
+            loss_style = torch.tensor(0.0, device=self.device, dtype=loss_mse.dtype)
+            if self.lambda_style > 0.0:
+                if not hasattr(self.model, "encode_style_feature"):
+                    raise ValueError("lambda_style > 0 requires model.encode_style_feature().")
+                alpha_bar = self.scheduler.alpha_bars[t].view(-1, 1, 1, 1).to(device=self.device, dtype=x_t.dtype)
+                sqrt_ab = torch.sqrt(torch.clamp(alpha_bar, min=1e-12))
+                sqrt_1m = torch.sqrt(torch.clamp(1.0 - alpha_bar, min=1e-12))
+                x0_hat = (x_t - sqrt_1m * eps_hat) / torch.clamp(sqrt_ab, min=1e-8)
+                s_gen = self.model.encode_style_feature(x0_hat)  # type: ignore[attr-defined]
+                with torch.no_grad():
+                    s_gt = self.model.encode_style_feature(x0)  # type: ignore[attr-defined]
+                loss_style = F.mse_loss(s_gen, s_gt)
 
             loss = (
                 self.lambda_mse * loss_mse
                 + self.lambda_off * loss_off
-                + self.lambda_cp * loss_cp
-                + self.lambda_cons * loss_cons
+                + self.lambda_style * loss_style
             )
 
         # backward
@@ -309,8 +271,7 @@ class DiffusionTrainer:
                 "loss": float(loss.item()),
                 "loss_mse": float(loss_mse.item()),
                 "loss_off": float(loss_off.item()),
-                "loss_cp": float(loss_cp.item()),
-                "loss_cons": float(loss_cons.item()),
+                "loss_style": float(loss_style.item()),
                 "cfg_dropped": int(cfg_mask.sum().item()),
                 "lr": float(self.lr_schedule.get_last_lr()[0]),
                 "data_time": float(self._step_data_time),
@@ -325,7 +286,7 @@ class DiffusionTrainer:
             msg = (
                 f"[debug-step] gstep={self.global_step} epoch={self.current_epoch} estep={self.local_step} "
                 f"loss={loss.item():.4f} mse={loss_mse.item():.4f} off={loss_off.item():.4f} "
-                f"cp={loss_cp.item():.4f} cons={loss_cons.item():.4f} "
+                f"style={loss_style.item():.4f} "
                 f"cfg_drop={int(cfg_mask.sum().item())}/{int(B)} lr={self.lr_schedule.get_last_lr()[0]:.6e} "
                 f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s "
                 f"data_t_ema={self._step_data_time_ema:.3f}s train_t_ema={self._step_train_time_ema:.3f}s"
@@ -336,13 +297,10 @@ class DiffusionTrainer:
             if self.detailed_log:
                 x0_det = x0.detach()
                 xt_det = x_t.detach()
-                xh_det = x0_hat.detach()
                 print(
                     "[debug-stats] "
                     f"x_t(mean={xt_det.mean().item():.4f},std={xt_det.std().item():.4f},"
                     f"min={xt_det.min().item():.4f},max={xt_det.max().item():.4f}) "
-                    f"x0_hat(mean={xh_det.mean().item():.4f},std={xh_det.std().item():.4f},"
-                    f"min={xh_det.min().item():.4f},max={xh_det.max().item():.4f}) "
                     f"target(mean={x0_det.mean().item():.4f},std={x0_det.std().item():.4f},"
                     f"min={x0_det.min().item():.4f},max={x0_det.max().item():.4f})",
                     flush=True,
@@ -352,8 +310,7 @@ class DiffusionTrainer:
             "loss": loss.item(),
             "loss_mse": loss_mse.item(),
             "loss_off": loss_off.item(),
-            "loss_cp": loss_cp.item(),
-            "loss_cons": loss_cons.item(),
+            "loss_style": loss_style.item(),
             "cfg_dropped": int(cfg_mask.sum().item()),
             "lr": self.lr_schedule.get_last_lr()[0],
             "data_time": float(self._step_data_time),
@@ -678,8 +635,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
         lr: float = 2e-4,
         lambda_fm: float = 1.0,
         lambda_off: float = 0.5,
-        lambda_cp: float = 0.01,
-        lambda_cons: float = 0.0,
+        lambda_style: float = 0.0,
         cfg_drop_prob: float = 0.1,
         T: int = 1000,
         lr_tmax: int | None = None,
@@ -695,8 +651,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
             lr=lr,
             lambda_mse=1.0,
             lambda_off=lambda_off,
-            lambda_cp=lambda_cp,
-            lambda_cons=lambda_cons,
+            lambda_style=lambda_style,
             cfg_drop_prob=cfg_drop_prob,
             T=T,
             lr_tmax=lr_tmax,
@@ -717,8 +672,6 @@ class FlowMatchingTrainer(DiffusionTrainer):
         style = batch["style"].to(self.device)
         part_imgs = batch["parts"].to(self.device) if "parts" in batch else None
         part_mask = batch["part_mask"].to(self.device) if "part_mask" in batch else None
-        part_imgs_b = batch["parts_b"].to(self.device) if "parts_b" in batch else None
-        part_mask_b = batch["part_mask_b"].to(self.device) if "part_mask_b" in batch else None
         b = x0.size(0)
 
         # Linear probability path: x_t = (1-t) * x0 + t * x1, x1 ~ N(0, I), v* = x1 - x0.
@@ -752,31 +705,20 @@ class FlowMatchingTrainer(DiffusionTrainer):
             loss_fm = F.mse_loss(v_hat, v_target)
             # Keep source behavior scale for offset term.
             loss_off = self._offset_loss() / 2.0
-            # Reconstruct x0 estimate from velocity for optional perceptual regularization.
-            x0_hat = x_t - t.view(-1, 1, 1, 1) * v_hat
-            if self.lambda_cp > 0.0:
-                if self.perc_loss_fn is None:
-                    raise ValueError("lambda_cp > 0 requires perceptual loss network.")
-                loss_cp = self.perc_loss_fn(x0_hat, x0)
-            else:
-                loss_cp = torch.tensor(0.0, device=self.device, dtype=loss_fm.dtype)
-            loss_cons = torch.tensor(0.0, device=self.device, dtype=loss_fm.dtype)
-            if self.lambda_cons > 0.0:
-                if part_imgs is None or part_imgs_b is None:
-                    raise ValueError("lambda_cons > 0 requires parts and parts_b in each batch.")
-                if not hasattr(self.model, "encode_part_vector"):
-                    raise ValueError("lambda_cons > 0 requires model.encode_part_vector().")
-                if not bool(getattr(self.model, "enable_parts_vector_condition", False)):
-                    raise ValueError("lambda_cons > 0 requires part-vector conditioning enabled.")
-                tok_a = self.model.encode_part_vector(part_imgs, part_mask)  # type: ignore[attr-defined]
-                tok_b = self.model.encode_part_vector(part_imgs_b, part_mask_b)  # type: ignore[attr-defined]
-                loss_cons = F.mse_loss(tok_a, tok_b)
+            loss_style = torch.tensor(0.0, device=self.device, dtype=loss_fm.dtype)
+            if self.lambda_style > 0.0:
+                if not hasattr(self.model, "encode_style_feature"):
+                    raise ValueError("lambda_style > 0 requires model.encode_style_feature().")
+                x0_hat = x_t - t.view(-1, 1, 1, 1) * v_hat
+                s_gen = self.model.encode_style_feature(x0_hat)  # type: ignore[attr-defined]
+                with torch.no_grad():
+                    s_gt = self.model.encode_style_feature(x0)  # type: ignore[attr-defined]
+                loss_style = F.mse_loss(s_gen, s_gt)
 
             loss = (
                 self.lambda_fm * loss_fm
                 + self.lambda_off * loss_off
-                + self.lambda_cp * loss_cp
-                + self.lambda_cons * loss_cons
+                + self.lambda_style * loss_style
             )
 
         self.opt.zero_grad(set_to_none=True)
@@ -829,8 +771,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 "loss": float(loss.item()),
                 "loss_fm": float(loss_fm.item()),
                 "loss_off": float(loss_off.item()),
-                "loss_cp": float(loss_cp.item()),
-                "loss_cons": float(loss_cons.item()),
+                "loss_style": float(loss_style.item()),
                 "cfg_dropped": int(cfg_mask.sum().item()),
                 "lr": float(self.lr_schedule.get_last_lr()[0]),
                 "data_time": float(self._step_data_time),
@@ -845,7 +786,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
             msg = (
                 f"[fm-step] gstep={self.global_step} epoch={self.current_epoch} estep={self.local_step} "
                 f"loss={loss.item():.4f} fm={loss_fm.item():.4f} off={loss_off.item():.4f} "
-                f"cp={loss_cp.item():.4f} cons={loss_cons.item():.4f} "
+                f"style={loss_style.item():.4f} "
                 f"cfg_drop={int(cfg_mask.sum().item())}/{int(b)} lr={self.lr_schedule.get_last_lr()[0]:.6e} "
                 f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s "
                 f"data_t_ema={self._step_data_time_ema:.3f}s train_t_ema={self._step_train_time_ema:.3f}s"
@@ -858,8 +799,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
             "loss": loss.item(),
             "loss_fm": loss_fm.item(),
             "loss_off": loss_off.item(),
-            "loss_cp": loss_cp.item(),
-            "loss_cons": loss_cons.item(),
+            "loss_style": loss_style.item(),
             "cfg_dropped": int(cfg_mask.sum().item()),
             "lr": self.lr_schedule.get_last_lr()[0],
             "data_time": float(self._step_data_time),

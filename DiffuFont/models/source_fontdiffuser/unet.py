@@ -52,24 +52,15 @@ class UNet(ModelMixin, ConfigMixin):
         content_encoder_downsample_size: int = 4,
         content_start_channel: int = 16,
         reduction: int = 32,
-        disable_self_attn: bool = False,
         attn_scales: Optional[Tuple[int, ...]] = None,
-        lite_daca_enabled: bool = False,
-        lite_daca_scales: Optional[Tuple[int, ...]] = None,
-        lite_daca_heads: int = 2,
-        lite_daca_points: int = 4,
+        mid_enable_content_attn: bool = True,
     ):
         super().__init__()
 
         self.content_encoder_downsample_size = content_encoder_downsample_size
 
         self.sample_size = sample_size
-        self.disable_self_attn = bool(disable_self_attn)
-        self.lite_daca_enabled = bool(lite_daca_enabled)
-        self.lite_daca_heads = int(lite_daca_heads)
-        self.lite_daca_points = int(lite_daca_points)
         self._attn_scales = set(int(x) for x in attn_scales) if attn_scales else None
-        self._lite_daca_scales = set(int(x) for x in lite_daca_scales) if lite_daca_scales else None
         time_embed_dim = block_out_channels[0] * 4
 
         # input
@@ -90,13 +81,6 @@ class UNet(ModelMixin, ConfigMixin):
                 return True
             return int(resolution) in self._attn_scales
 
-        def _lite_daca_for_scale(resolution: Optional[int]) -> bool:
-            if not self.lite_daca_enabled:
-                return False
-            if resolution is None or self._lite_daca_scales is None:
-                return True
-            return int(resolution) in self._lite_daca_scales
-
         # down
         output_channel = block_out_channels[0]
         current_resolution = int(self.sample_size) if isinstance(self.sample_size, int) else None
@@ -105,10 +89,7 @@ class UNet(ModelMixin, ConfigMixin):
             output_channel = block_out_channels[i]
             is_final_block = i == len(block_out_channels) - 1
 
-            if i != 0: 
-                content_channel = content_start_channel * (2 ** (i-1))
-            else:
-                content_channel = 0
+            content_channel = content_start_channel * (2 ** i)
 
             print("Load the down block ", down_block_type)
             down_block = get_down_block(
@@ -128,7 +109,6 @@ class UNet(ModelMixin, ConfigMixin):
                 reduction=reduction,
                 channel_attn=channel_attn,
                 enable_style_attn=_style_attn_enabled(current_resolution),
-                disable_self_attn=self.disable_self_attn,
             )
             self.down_blocks.append(down_block)
             if current_resolution is not None and not is_final_block:
@@ -150,7 +130,7 @@ class UNet(ModelMixin, ConfigMixin):
             content_channel=content_start_channel*(2**(content_encoder_downsample_size - 1)),
             reduction=reduction,
             enable_style_attn=_style_attn_enabled(mid_resolution),
-            disable_self_attn=self.disable_self_attn,
+            enable_content_attn=bool(mid_enable_content_attn),
         )
 
         # count how many layers upsample the images
@@ -190,12 +170,8 @@ class UNet(ModelMixin, ConfigMixin):
                 resnet_groups=norm_num_groups,
                 cross_attention_dim=cross_attention_dim,
                 attn_num_head_channels=attention_head_dim,
-                upblock_index=i,
+                upblock_index=i + 1,
                 enable_style_attn=_style_attn_enabled(up_resolution),
-                disable_self_attn=self.disable_self_attn,
-                use_lite_daca=_lite_daca_for_scale(up_resolution),
-                lite_daca_heads=self.lite_daca_heads,
-                lite_daca_points=self.lite_daca_points,
             )
             self.up_blocks.append(up_block)
             prev_output_channel = output_channel
@@ -220,13 +196,26 @@ class UNet(ModelMixin, ConfigMixin):
             )
 
         for block in self.down_blocks:
-            if hasattr(block, "attentions") and block.attentions is not None:
+            if (
+                hasattr(block, "set_attention_slice")
+                and hasattr(block, "self_attentions")
+                and hasattr(block, "style_cross_attentions")
+                and block.self_attentions is not None
+                and block.style_cross_attentions is not None
+            ):
                 block.set_attention_slice(slice_size)
 
-        self.mid_block.set_attention_slice(slice_size)
+        if hasattr(self.mid_block, "set_attention_slice"):
+            self.mid_block.set_attention_slice(slice_size)
 
         for block in self.up_blocks:
-            if hasattr(block, "attentions") and block.attentions is not None:
+            if (
+                hasattr(block, "set_attention_slice")
+                and hasattr(block, "self_attentions")
+                and hasattr(block, "style_cross_attentions")
+                and block.self_attentions is not None
+                and block.style_cross_attentions is not None
+            ):
                 block.set_attention_slice(slice_size)
 
     def _set_gradient_checkpointing(self, module, value=False):
@@ -314,13 +303,17 @@ class UNet(ModelMixin, ConfigMixin):
             if not is_final_block and forward_upsample_size:
                 upsample_size = down_block_res_samples[-1].shape[2:]
 
-            if (hasattr(upsample_block, "attentions") and upsample_block.attentions is not None) or hasattr(upsample_block, "content_attentions"):
+            if (
+                hasattr(upsample_block, "style_cross_attentions")
+                and upsample_block.style_cross_attentions is not None
+            ):
                 sample, offset_out = upsample_block(
                     hidden_states=sample,
                     temb=emb,
                     res_hidden_states_tuple=res_samples,
                     style_structure_features=encoder_hidden_states[3],
                     encoder_hidden_states=encoder_hidden_states[2],
+                    upsample_size=upsample_size,
                 )
                 offset_out_sum += offset_out
             else:

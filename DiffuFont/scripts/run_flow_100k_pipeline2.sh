@@ -110,12 +110,12 @@ TARGET_STEPS=100000
 EPOCHS=39
 echo "[pipeline] target_steps=${TARGET_STEPS} epochs=${EPOCHS} (fixed default schedule)"
 
-# Start main flow-matching training with batch fallback.
+# Start main diffusion training with batch fallback.
 for BATCH_SIZE in 8; do
   echo "[pipeline] try batch=${BATCH_SIZE}"
   set +e
   python train.py \
-    --trainer flow_matching \
+    --trainer diffusion \
     --device cuda:0 \
     --precision bf16 \
     --batch "${BATCH_SIZE}" \
@@ -126,15 +126,8 @@ for BATCH_SIZE in 8; do
     --lmdb-decode-cache-size 50000 \
     --use-style-plan-cache \
     --style-prefetch-limit 20000 \
-    --save-dir checkpoints/baselineflow_default_100k \
-    --disable-self-attn \
-    --attn-scales 32,64 \
-    --lite-daca \
-    --lite-daca-scales 32,64 \
-    --lite-daca-heads 2 \
-    --lite-daca-points 4 \
-    --lambda-cp 0.003 \
-    --lambda-cons 0 \
+    --save-dir checkpoints/baselinediffusion_default_100k \
+    --attn-scales 16,32 \
     --log-every-steps 10 \
     --conditioning-profile baseline
   RC=$?

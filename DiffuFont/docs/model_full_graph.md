@@ -1,50 +1,47 @@
 # Full Model Graph (Current Implementation)
 
-This document describes the current runtime model graph in `conditioning_profile=full` mode.
+This document describes runtime graph in `conditioning_profile=full`.
 
 ## 1. End-to-End Graph
 
 ```mermaid
 flowchart TD
-    A0[x_t: noisy target image\nB x 3 x H x W] --> A1[Resize to 96x96]
-    C0[content_img\nB x 3 x H x W] --> C1[Resize to 96x96]
-    P0[part_imgs\nB x P x 3 x h x w] --> P1[Resize each patch to 96x96]
-    PM[part_mask\nB x P] --> PVEC
+    X0[x_t noisy target\nB x 3 x 256 x 256] --> STEM[Input stem\nstride-2 conv\n256 -> 128]
+    C0[content_img\nB x 3 x 256 x 256] --> CE[ContentEncoder]
+    CE --> CF[content features\nc128/c64/c32/c16]
 
-    C1 --> CE[ContentEncoder Ec]
-    CE --> CF0[content_residual_features\nmulti-scale list]
+    S0[style_img\nB x 3 x 256 x 256] --> SE[ContentEncoder for RSI]
+    SE --> SF[style structure features]
 
-    P1 --> PVEC[Part Vector Encoder\nConv->Conv->Conv->GAP->Linear->LN\nDeepSets sum + L2 norm]
-    PM --> PVEC
-    PVEC --> G[g: style vector\nB x D]
-    G --> GSEQ[g_seq for cross-attn\nB x 1 x D]
+    P0[part_imgs\nB x P x 3 x h x w] --> PE[Part patch CNN]
+    PM[part_mask\nB x P] --> AGG
+    PE --> Z[per-part z_i\nB x P x 256]
+    Z --> AGG[DeepSets masked mean + LN]
+    AGG --> G[g\nB x 256]
+    G --> TOK[MLP -> style tokens\nB x 8 x 256]
 
-    C1 --> PE[ContentEncoder Ec on style_img\n(for RSI structure features)]
-    PE --> SF[style_content_res_features\nmulti-scale list]
-
-    A1 --> U0[Source UNet]
-    CF0 --> U0
-    GSEQ --> U0
-    SF --> U0
-    U0 --> O0[out at 96x96]
-    O0 --> O1[Resize back to HxW]
-    O1 --> OUT[x0_hat]
+    STEM --> U[UNet main path\n128->64->32->16->32->64->128]
+    CF --> U
+    TOK --> U
+    SF --> U
+    U --> HEAD[Output head\nupsample + conv\n128 -> 256]
+    HEAD --> OUT[x0_hat\nB x 3 x 256 x 256]
 ```
 
-## 2. UNet Stage Graph (Where Parts_Vector Is Injected)
+## 2. UNet Stage Graph
 
 ```mermaid
 flowchart LR
-    IN[conv_in]
-    D0[DownBlock2D\nout:64\nno parts_vector injection]
-    D1[MCADownBlock2D\nout:128\nParts_Vector Cross-Attn ON]
-    D2[MCADownBlock2D\nout:256\nParts_Vector Cross-Attn ON]
-    D3[DownBlock2D\nout:512\nno parts_vector injection]
-    MID[UNetMidMCABlock2D\nParts_Vector Cross-Attn ON]
-    U0[UpBlock2D\nout:512\nno parts_vector injection]
-    U1[StyleRSIUpBlock2D\nout:256\nParts_Vector Cross-Attn ON + RSI offset/deform ON]
-    U2[StyleRSIUpBlock2D\nout:128\nParts_Vector Cross-Attn ON + RSI offset/deform ON]
-    U3[UpBlock2D\nout:64\nno parts_vector injection]
+    IN[conv_in @128]
+    D0[MCADownBlock2D @128\ncontent ON\nstyle attn OFF]
+    D1[MCADownBlock2D @64\ncontent ON\nstyle attn OFF]
+    D2[MCADownBlock2D @32\ncontent ON\nstyle attn ON]
+    D3[MCADownBlock2D @16\ncontent ON\nstyle attn ON]
+    MID[UNetMidMCABlock2D @16\ncontent OFF\nstyle attn ON]
+    U0[StyleRSIUpBlock2D @16\nstyle attn ON\nRSI ON]
+    U1[StyleRSIUpBlock2D @32\nstyle attn ON\nRSI ON]
+    U2[UpBlock2D @64\nstyle attn OFF]
+    U3[UpBlock2D @128\nstyle attn OFF]
     OUT[conv_norm_out -> conv_act -> conv_out]
 
     IN --> D0 --> D1 --> D2 --> D3 --> MID --> U0 --> U1 --> U2 --> U3 --> OUT
@@ -52,42 +49,37 @@ flowchart LR
 
 ## 3. Layer-by-Layer Injection Table
 
-| Stage | Block Type | Main Channel | Parts_Vector Injection | RSI Injection |
-|---|---|---:|---|---|
-| Input | `conv_in` | 64 | No | No |
-| Down-0 | `DownBlock2D` | 64 | No | No |
-| Down-1 | `MCADownBlock2D` | 128 | Yes (style cross-attn context=`T`) | No |
-| Down-2 | `MCADownBlock2D` | 256 | Yes (style cross-attn context=`T`) | No |
-| Down-3 | `DownBlock2D` | 512 | No | No |
-| Mid | `UNetMidMCABlock2D` | 512 | Yes (style cross-attn context=`T`) | No |
-| Up-0 | `UpBlock2D` | 512 | No | No |
-| Up-1 | `StyleRSIUpBlock2D` | 256 | Yes (style cross-attn context=`T`) | Yes (offset/deform from style structure features) |
-| Up-2 | `StyleRSIUpBlock2D` | 128 | Yes (style cross-attn context=`T`) | Yes (offset/deform from style structure features) |
-| Up-3 | `UpBlock2D` | 64 | No | No |
-| Output | `conv_out` | 3 | No | No |
+| Stage | Resolution | Block Type | Content Injection | Style Injection | RSI Injection |
+|---|---:|---|---|---|---|
+| Stem in | 256->128 | `input_stem` | No | No | No |
+| Down-1 | 128 | `MCADownBlock2D` | Yes (`c128`) | No (default scales) | No |
+| Down-2 | 64 | `MCADownBlock2D` | Yes (`c64`) | No (default scales) | No |
+| Down-3 | 32 | `MCADownBlock2D` | Yes (`c32`) | Yes (`S`) | No |
+| Down-4 | 16 | `MCADownBlock2D` | Yes (`c16`) | Yes (`S`) | No |
+| Mid | 16 | `UNetMidMCABlock2D` | **No** | Yes (`S`) | No |
+| Up-1 | 16 | `StyleRSIUpBlock2D` | No | Yes (`S`) | Yes |
+| Up-2 | 32 | `StyleRSIUpBlock2D` | No | Yes (`S`) | Yes |
+| Up-3 | 64 | `UpBlock2D` | No | No | No |
+| Up-4 | 128 | `UpBlock2D` | No | No | No |
+| Head out | 128->256 | `output_head` | No | No | No |
 
-This corresponds to the five parts_vector-injection positions:
+Default style-attn scales are set by `--attn-scales 16,32`.
 
-1. Down-1  
-2. Down-2  
-3. Mid  
-4. Up-1  
-5. Up-2
+## 4. Conditioning Profile Behavior
 
-## 4. Conditioning Profile Switch Behavior
-
-| Profile | Parts_Vector Path | RSI Path |
+| Profile | Parts Tokens | RSI |
 |---|---|---|
 | `baseline` | Off | Off |
 | `parts_vector_only` | On | Off |
 | `rsi_only` | Off | On |
 | `full` | On | On |
 
-When parts_vector path is off, all style cross-attn calls are skipped.
-When RSI path is off, up-block offset/deform branch is skipped.
+When parts path is off, all style cross-attention calls are skipped.
+When RSI is off, up-block offset/deform branch is skipped.
 
 ## 5. Source Locations
 
-- Wrapper and parts_vector encoder: `models/source_part_ref_unet.py`
-- UNet topology: `models/source_fontdiffuser/unet.py`
+- Wrapper / stem-head / parts tokens: `models/source_part_ref_unet.py`
+- UNet topology / scale gating: `models/source_fontdiffuser/unet.py`
 - MCA + RSI blocks: `models/source_fontdiffuser/unet_blocks.py`
+- Online retrieval + parts sampling: `dataset.py`

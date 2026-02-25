@@ -68,8 +68,8 @@ class FontImageDataset(Dataset):
         part_bank_lmdb: Optional[Union[str, Path]] = None,
         part_retrieval_ep_ckpt: Optional[Union[str, Path]] = None,
         part_retrieval_device: Optional[str] = None,
-        part_set_size: int = 9,
-        part_set_min_size: int = 1,
+        part_set_size: int = 32,
+        part_set_min_size: int = 32,
         part_set_sampling: str = "random",
         part_target_char_priority: bool = False,
         part_image_size: int = 64,
@@ -538,7 +538,7 @@ class FontImageDataset(Dataset):
     def _sample_from_font_rows(self, rows: List[Dict[str, Any]], target_char: str, size: int) -> List[Dict[str, Any]]:
         if not rows or size <= 0:
             return []
-        size = min(int(size), len(rows)) if self.part_set_sampling == "deterministic" else int(size)
+        size = min(int(size), len(rows))
         size = max(0, size)
         size_hi = min(self.part_set_size, len(rows))
         if size_hi <= 0:
@@ -560,8 +560,6 @@ class FontImageDataset(Dataset):
                     picked.extend(self.rng.sample(remain, need))
                 else:
                     picked.extend(remain)
-                    while len(picked) < size:
-                        picked.append(self.rng.choice(rows))
             return picked[:size]
 
         # deterministic
@@ -578,12 +576,7 @@ class FontImageDataset(Dataset):
         retrieved_fonts: Optional[List[str]] = None,
         retrieved_weights: Optional[List[float]] = None,
     ) -> List[Dict[str, Any]]:
-        size_hi_global = self.part_set_size
-        size_lo_global = min(self.part_set_min_size, size_hi_global)
-        if self.part_set_sampling == "random":
-            size = self.rng.randint(size_lo_global, size_hi_global)
-        else:
-            size = size_hi_global
+        size = int(self.part_set_size)
 
         if not retrieved_fonts:
             retrieved_fonts = [font_name]
@@ -613,15 +606,19 @@ class FontImageDataset(Dataset):
                 continue
             out.extend(self._sample_from_font_rows(self.part_bank_by_font[f], target_char, n))
 
-        if len(out) < size:
-            base_font = valid_fonts[0]
-            rows = self.part_bank_by_font[base_font]
-            need = size - len(out)
-            out.extend(self._sample_from_font_rows(rows, target_char, need))
+        # Keep variable-length output when candidate fonts do not have enough unique parts.
+        deduped: List[Dict[str, Any]] = []
+        seen_keys = set()
+        for row in out:
+            k = str(row.get("lmdb_key", ""))
+            if not k or k in seen_keys:
+                continue
+            seen_keys.add(k)
+            deduped.append(row)
 
         if self.part_set_sampling == "random":
-            self.rng.shuffle(out)
-        return out[:size]
+            self.rng.shuffle(deduped)
+        return deduped[:size]
 
     def _build_multi_font_entries(self, requested_font: str, c_txn, t_txn, lmdb_fonts: List[str]):
         entries: List[Tuple[str, List[str], List[int]]] = []

@@ -137,11 +137,10 @@ def main() -> None:
 
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--trainer", type=str, default="diffusion", choices=["diffusion", "flow_matching"])
-    parser.add_argument("--lambda-cons", type=float, default=0.05)
     parser.add_argument("--lambda-fm", type=float, default=1.0)
     parser.add_argument("--lambda-diff", type=float, default=1.0)
     parser.add_argument("--lambda-off", type=float, default=0.5)
-    parser.add_argument("--lambda-cp", type=float, default=0.01)
+    parser.add_argument("--lambda-style", type=float, default=0.0)
     parser.add_argument("--cfg-drop-prob", type=float, default=0.1)
     parser.add_argument("--diffusion-steps", type=int, default=1000)
     parser.add_argument(
@@ -161,44 +160,24 @@ def main() -> None:
     parser.add_argument(
         "--conditioning-profile",
         type=str,
-        default="full",
+        default="parts_vector_only",
         choices=["baseline", "parts_vector_only", "rsi_only", "full"],
         help="baseline=no parts_vector/no RSI; parts_vector_only=parts_vector on RSI off; rsi_only=RSI on parts_vector off; full=both on.",
     )
     parser.add_argument(
-        "--disable-self-attn",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Disable self-attention inside SpatialTransformer blocks and keep cross-attention only.",
-    )
-    parser.add_argument(
         "--attn-scales",
         type=str,
-        default="",
+        default="16,32",
         help="Comma-separated resolutions where style attention is enabled, e.g. '32,64'. Empty means all scales.",
     )
-    parser.add_argument(
-        "--lite-daca",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Enable lightweight DACA branch in RSI up blocks.",
-    )
-    parser.add_argument(
-        "--lite-daca-scales",
-        type=str,
-        default="",
-        help="Comma-separated resolutions where LiteDACA is enabled, e.g. '32,64'. Empty means all RSI scales.",
-    )
-    parser.add_argument("--lite-daca-heads", type=int, default=2)
-    parser.add_argument("--lite-daca-points", type=int, default=4)
 
     parser.add_argument("--part-bank-manifest", type=str, default="DataPreparation/PartBank/manifest.json")
     parser.add_argument("--part-bank-lmdb", type=str, default="DataPreparation/LMDB/PartBank.lmdb")
     parser.add_argument("--part-retrieval-ep-ckpt", type=str, default=None)
     parser.add_argument("--part-retrieval-device", type=str, default="",
                         help="Device for online part-retrieval CNN inference. Empty means follow --device.")
-    parser.add_argument("--part-set-size", type=int, default=9)
-    parser.add_argument("--part-set-min-size", type=int, default=1)
+    parser.add_argument("--part-set-size", type=int, default=32)
+    parser.add_argument("--part-set-min-size", type=int, default=32)
     parser.add_argument("--part-set-sampling", type=str, default="random", choices=["deterministic", "random"])
     parser.add_argument("--part-target-char-priority", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--part-image-size", type=int, default=64)
@@ -220,6 +199,8 @@ def main() -> None:
     parser.add_argument("--split-save-components", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-frozen-retrieval-copy", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--part-vector-pretrain-ckpt", type=str, default=None)
+    parser.add_argument("--style-token-count", type=int, default=8)
+    parser.add_argument("--style-token-dim", type=int, default=256)
     parser.add_argument("--resume", type=str, default=None)
     args = parser.parse_args()
 
@@ -231,8 +212,6 @@ def main() -> None:
     enable_parts_vector = profile in {"parts_vector_only", "full"}
     enable_rsi = profile in {"rsi_only", "full"}
     use_part_bank = bool(enable_parts_vector)
-    if not enable_parts_vector and args.lambda_cons > 0.0:
-        raise ValueError("lambda_cons > 0 requires part-vector conditioning (parts_vector_only/full).")
     if not enable_parts_vector and args.part_vector_pretrain_ckpt:
         raise ValueError("part_vector_pretrain_ckpt is only valid when part-vector conditioning is enabled.")
     if args.sample_solver == "ddim" and args.sample_use_cfg:
@@ -243,7 +222,6 @@ def main() -> None:
     resolved_ep_ckpt: Path | None = None
     resolved_part_vector_ckpt: Path | None = None
     attn_scales = _parse_int_csv(args.attn_scales)
-    lite_daca_scales = _parse_int_csv(args.lite_daca_scales)
     if use_part_bank:
         if not args.part_retrieval_ep_ckpt:
             raise ValueError("--part-retrieval-ep-ckpt is required when parts_vector conditioning is enabled.")
@@ -327,9 +305,7 @@ def main() -> None:
     print(
         "[train] "
         f"conditioning_profile={args.conditioning_profile} "
-        f"disable_self_attn={bool(args.disable_self_attn)} "
         f"attn_scales={attn_scales} "
-        f"lite_daca={bool(args.lite_daca)} lite_daca_scales={lite_daca_scales} "
         "part_retrieval_policy=top1_gate_top3_fixed "
         f"steps_per_epoch={steps_per_epoch} total_steps={total_train_steps} lr_tmax_steps={lr_tmax_steps}"
     )
@@ -340,15 +316,12 @@ def main() -> None:
         content_start_channel=64,
         style_start_channel=64,
         unet_channels=(64, 128, 256, 512),
-        content_encoder_downsample_size=3,
+        content_encoder_downsample_size=4,
         channel_attn=True,
         conditioning_profile=args.conditioning_profile,
-        disable_self_attn=bool(args.disable_self_attn),
         attn_scales=attn_scales,
-        lite_daca_enabled=bool(args.lite_daca),
-        lite_daca_scales=lite_daca_scales,
-        lite_daca_heads=int(args.lite_daca_heads),
-        lite_daca_points=int(args.lite_daca_points),
+        style_token_count=int(args.style_token_count),
+        style_token_dim=int(args.style_token_dim),
     )
     if resolved_part_vector_ckpt is not None:
         model.load_part_vector_pretrained(str(resolved_part_vector_ckpt))
@@ -358,8 +331,7 @@ def main() -> None:
     trainer_kwargs: Dict[str, Any] = {
         "lr": args.lr,
         "lambda_off": args.lambda_off,
-        "lambda_cp": args.lambda_cp,
-        "lambda_cons": args.lambda_cons,
+        "lambda_style": args.lambda_style,
         "cfg_drop_prob": args.cfg_drop_prob,
         "T": args.diffusion_steps,
         "lr_tmax": lr_tmax_steps,
