@@ -3,7 +3,6 @@
 # Full data pipeline: render grayscale → LMDB → PartBank → PartBank LMDB → pretrain
 ROOT="DiffuFont/"
 
-cd "${ROOT}"
 export PYTHONUNBUFFERED=1
 
 echo "=========================================="
