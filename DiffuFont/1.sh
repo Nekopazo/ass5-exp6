@@ -54,7 +54,7 @@ python DiffuFont/scripts/build_part_bank_component_aware_from_images.py \
     --glyph-root DataPreparation/Generated/TrainFonts \
     --output-dir DataPreparation/PartBank \
     --parts-per-font 32 \
-    --workers 48
+    --workers 4
 
 echo "=========================================="
 echo "[pipeline] Step 6: Build PartBank LMDB"
