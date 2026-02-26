@@ -38,7 +38,7 @@ python DiffuFont/DataPreparation/images_to_lmdb.py \
 echo "=========================================="
 echo "[pipeline] Step 4: Build TrainFont LMDB"
 echo "=========================================="
-python DataPreparation/images_to_lmdb.py \
+python DiffuFont/DataPreparation/images_to_lmdb.py \
     --project-root "${ROOT}" \
     --img-roots DataPreparation/Generated/TrainFonts \
     --lmdb-path DataPreparation/LMDB/TrainFont.lmdb \
@@ -47,7 +47,7 @@ python DataPreparation/images_to_lmdb.py \
 echo "=========================================="
 echo "[pipeline] Step 5: Build PartBank (component-aware, grayscale)"
 echo "=========================================="
-python scripts/build_part_bank_component_aware_from_images.py \
+python DiffuFont/scripts/build_part_bank_component_aware_from_images.py \
     --project-root "${ROOT}" \
     --glyph-root DataPreparation/Generated/TrainFonts \
     --output-dir DataPreparation/PartBank \
@@ -57,7 +57,7 @@ python scripts/build_part_bank_component_aware_from_images.py \
 echo "=========================================="
 echo "[pipeline] Step 6: Build PartBank LMDB"
 echo "=========================================="
-python scripts/build_part_bank_lmdb.py \
+python DiffuFont/scripts/build_part_bank_lmdb.py \
     --project-root "${ROOT}" \
     --manifest DataPreparation/PartBank/manifest.json \
     --out-lmdb DataPreparation/LMDB/PartBank.lmdb
