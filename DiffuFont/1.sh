@@ -3,8 +3,6 @@
 # Full data pipeline: render grayscale → LMDB → PartBank → PartBank LMDB → pretrain
 ROOT="DiffuFont/"
 
-export PYTHONUNBUFFERED=1
-
 echo "=========================================="
 echo "[pipeline] Step 1: Render ContentFont (grayscale)"
 echo "=========================================="
