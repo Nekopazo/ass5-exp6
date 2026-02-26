@@ -54,7 +54,7 @@ python DiffuFont/scripts/build_part_bank_component_aware_from_images.py \
     --glyph-root DataPreparation/Generated/TrainFonts \
     --output-dir DataPreparation/PartBank \
     --parts-per-font 32 \
-    --reference-char-json Character/ReferenceCharList_200_balanced_v3.json\
+    --reference-char-json CharacterData/ReferenceCharList_200_balanced_v3.json \
     --workers 4
 
 echo "=========================================="
