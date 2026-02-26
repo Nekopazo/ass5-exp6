@@ -7,34 +7,6 @@
 *.o
 *.obj
 
-# Common image files
-*.png
-*.jpg
-*.jpeg
-*.gif
-*.bmp
-*.tiff
-*.ico
-*.svg
-
-# Common archive files
-*.zip
-*.tar
-*.gz
-*.bz2
-*.7z
-*.rar
-*.xz
-
-# Common document files
-*.pdf
-*.doc
-*.docx
-*.ppt
-*.pptx
-*.xls
-*.xlsx
-*.csv
 
 # Common training weights and models
 *.h5
