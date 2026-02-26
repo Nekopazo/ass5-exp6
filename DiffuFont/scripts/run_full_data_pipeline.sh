@@ -2,10 +2,7 @@
 set -euo pipefail
 
 # Full data pipeline: render grayscale → LMDB → PartBank → PartBank LMDB → pretrain
-ROOT="/scratch/yangximing/code/ass5-exp6/DiffuFont"
-CONDA_SH="/scratch/yangximing/miniconda3/etc/profile.d/conda.sh"
-source "${CONDA_SH}"
-conda activate sg3
+ROOT="DiffuFont/"
 
 cd "${ROOT}"
 export PYTHONUNBUFFERED=1
@@ -13,58 +10,58 @@ export PYTHONUNBUFFERED=1
 echo "=========================================="
 echo "[pipeline] Step 1: Render ContentFont (grayscale)"
 echo "=========================================="
-python DataPreparation/generate_font_images.py \
+python DiffuFont/DataPreparation/generate_font_images.py \
     --project-root "${ROOT}" \
-    --char-list-json CharacterData/CharList.json \
-    --font-list-json DataPreparation/ContentFontList.json \
-    --font-dir DataPreparation/Font \
-    --out-dir DataPreparation/Generated/ContentFont
+    --char-list-json DiffuFont/CharacterData/CharList.json \
+    --font-list-json DiffuFont/DataPreparation/ContentFontList.json \
+    --font-dir DiffuFont/DataPreparation/Font \
+    --out-dir DiffuFont/DataPreparation/Generated/ContentFont
 
 echo "=========================================="
 echo "[pipeline] Step 2: Render TrainFonts (grayscale)"
 echo "=========================================="
-python DataPreparation/generate_font_images.py \
+python DiffuFont/DataPreparation/generate_font_images.py \
     --project-root "${ROOT}" \
-    --char-list-json CharacterData/CharList.json \
-    --font-list-json DataPreparation/FontList.json \
-    --font-dir DataPreparation/Font \
-    --out-dir DataPreparation/Generated/TrainFonts
+    --char-list-json DiffuFont/CharacterData/CharList.json \
+    --font-list-json DiffuFont/DataPreparation/FontList.json \
+    --font-dir DiffuFont/DataPreparation/Font \
+    --out-dir DiffuFont/DataPreparation/Generated/TrainFonts
 
 echo "=========================================="
 echo "[pipeline] Step 3: Build ContentFont LMDB"
 echo "=========================================="
-python DataPreparation/images_to_lmdb.py \
+python DiffuFont/DataPreparation/images_to_lmdb.py \
     --project-root "${ROOT}" \
-    --img-roots DataPreparation/Generated/ContentFont \
-    --lmdb-path DataPreparation/LMDB/ContentFont.lmdb \
+    --img-roots DiffuFont/DataPreparation/Generated/ContentFont \
+    --lmdb-path DiffuFont/DataPreparation/LMDB/ContentFont.lmdb \
     --overwrite
 
 echo "=========================================="
 echo "[pipeline] Step 4: Build TrainFont LMDB"
 echo "=========================================="
-python DataPreparation/images_to_lmdb.py \
+python DiffuFont/DataPreparation/images_to_lmdb.py \
     --project-root "${ROOT}" \
-    --img-roots DataPreparation/Generated/TrainFonts \
-    --lmdb-path DataPreparation/LMDB/TrainFont.lmdb \
+    --img-roots DiffuFont/DataPreparation/Generated/TrainFonts \
+    --lmdb-path DiffuFont/DataPreparation/LMDB/TrainFont.lmdb \
     --overwrite
 
 echo "=========================================="
 echo "[pipeline] Step 5: Build PartBank (component-aware, grayscale)"
 echo "=========================================="
-python scripts/build_part_bank_component_aware_from_images.py \
+python DiffuFont/scripts/build_part_bank_component_aware_from_images.py \
     --project-root "${ROOT}" \
-    --glyph-root DataPreparation/Generated/TrainFonts \
-    --output-dir DataPreparation/PartBank \
+    --glyph-root DiffuFont/DataPreparation/Generated/TrainFonts \
+    --output-dir DiffuFont/DataPreparation/PartBank \
     --parts-per-font 32 \
-    --workers 48
+    --workers 24
 
 echo "=========================================="
 echo "[pipeline] Step 6: Build PartBank LMDB"
 echo "=========================================="
-python scripts/build_part_bank_lmdb.py \
+python DiffuFont/scripts/build_part_bank_lmdb.py \
     --project-root "${ROOT}" \
-    --manifest DataPreparation/PartBank/manifest.json \
-    --out-lmdb DataPreparation/LMDB/PartBank.lmdb
+    --manifest DiffuFont/DataPreparation/PartBank/manifest.json \
+    --out-lmdb DiffuFont/DataPreparation/LMDB/PartBank.lmdb
 
 echo "=========================================="
 echo "[pipeline] Step 7: Pretrain part style encoder (contrastive)"
