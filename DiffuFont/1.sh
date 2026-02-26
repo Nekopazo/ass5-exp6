@@ -4,7 +4,9 @@
 ROOT="DiffuFont/"
 
 export PYTHONUNBUFFERED=1
-
+nproc
+lscpu
+grep -c ^processor /proc/cpuinfo
 pip install lmdb pillow opencv-python fonttools
 echo "=========================================="
 echo "[pipeline] Step 1: Render ContentFont (grayscale)"
@@ -52,7 +54,7 @@ python DiffuFont/scripts/build_part_bank_component_aware_from_images.py \
     --glyph-root DataPreparation/Generated/TrainFonts \
     --output-dir DataPreparation/PartBank \
     --parts-per-font 32 \
-    --workers 24
+    --workers 48
 
 echo "=========================================="
 echo "[pipeline] Step 6: Build PartBank LMDB"
