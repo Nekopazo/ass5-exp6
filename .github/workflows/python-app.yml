@@ -1,0 +1,20 @@
+name: Run Python Manually
+
+on:
+  workflow_dispatch:   # 手动触发
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 拉代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: 执行 Python
+        run: python main.py
