@@ -7,6 +7,8 @@
 *.o
 *.obj
 
+*.png
+*.jpg
 # Common training weights and models
 *.h5
 *.ckpt
