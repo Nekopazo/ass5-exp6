@@ -1,0 +1,845 @@
+﻿Few-Part-Shot Font Generation
+
+Masaki Akiba1, Shumpei Takezaki1, Daichi Haraguchi2, and Seiichi Uchida1
+
+1 Kyushu University, Fukuoka, Japan
+{masaki.akiba, shumpei.takezaki}@human.ait.kyushu-u.ac.jp
+
+uchida@ait.kyushu-u.ac.jp
+2 CyberAgent, Tokyo, Japan
+
+haraguchi_daichi_xa@cyberagent.co.jp
+
+Abstract. This paper proposes a novel model of few-part-shot font gen-
+eration, which designs an entire font based on a set of partial design
+elements, i.e., partial shapes. Unlike conventional few-shot font gener-
+ation, which requires entire character shapes for a couple of character
+classes, our approach only needs partial shapes as input. The proposed
+model not only improves the efficiency of font creation but also provides
+insights into how partial design details influence the entire structure of
+the individual characters.
+
+Keywords: Part-based image generation · Font style · Few-shot font
+generation.
+
+1 Introduction
+New fonts are created and published almost daily through the considerable efforts
+of typeface designers. Even for the basic uppercase letters (“A” to “Z”), they must
+define 26 distinct character shapes. Furthermore, each shape must be carefully
+refined to ensure the font’s style remains unique and consistent across all letters.
+
+Various software tools have been developed to assist in font design. For ex-
+ample, FontLab3 and Glyphs4 are widely used font editors, enabling designers to
+create typefaces from scratch or select a reference font and gradually refine it to
+achieve their desired style. These tools now offer advanced features for creating
+so-called variable fonts, in which attributes such as slant and stroke width can
+be controlled by parameters. While these tools reduce manual effort, designers
+must still make numerous fine adjustments to keep the font style unique and
+consistent across the entire set of characters.
+
+Recently, generative models — such as Generative Adversarial Networks
+(GANs)[4] and diffusion models[6] — have been applied to font design, giving
+rise to a semi-automatic framework called few-shot font generation. It generates
+all characters in the alphabet using only one or a few fully designed reference
+characters5. For instance, as illustrated in Fig. 1(a), by providing the charac-
+ter images of “A” and “B” in a certain style, the remaining letters “C” through
+3 https://www.fontlab.com
+4 https://glyphsapp.com
+5 If a framework assumes one reference character, it is called one-shot font generation.
+
+arXiv:2509.10006v1  [cs.CV]  12 Sep 2025
+
+
+
+2 M. Akiba et al.
+
+Several letters Generator Remaining letters Parts Generator All letters
+local elements
+
+(a) Few-shot (b) Few-part-shot (our challenge)
+
+Fig. 1. (a) Conventional few-shot font generation. (b) Our challenge of few-part-shot
+font generation. We aim to clarify the capabilities and limitations of (b) by benchmark-
+ing it against (a).
+
+(a) (b)
+
+Fig. 2. (a) PANOSE Font Classification Chart (in part) (source:
+https://archive.org/details/Panose-chart). (b) A snapshot of the part-driven font
+design function in Glyphs (source: https://glyphsapp.com/learn/reusing-shapes-
+corner-components).
+
+“Z” can be generated in that same style. Naturally, this framework holds great
+potential to reduce the effort required in font design.
+
+This paper challenges a new framework called few-part-shot font generation,
+which designs an entire font from a small set of user-specified parts. Parts are
+defined as representative local shapes capturing stroke thickness, terminations,
+corners, curves, intersections, and decorative elements. Parts play important
+roles in specifying font styles. The PANOSE chart 6 in Fig. 2(a) is a well-known
+font style classification scheme and uses part shapes. The above font-designing
+software tools (FontLab and Glyphs) already offer functionalities of part-oriented
+design, as shown in Fig. 2(b).
+
+Fig. 1(b) illustrates the idea of few-part-shot font generation. This idea stems
+from the observation that the same or similar parts appear in multiple charac-
+ters. For instance, defining a vertical stroke end as a part facilitates the design of
+characters such as “I,” “K,” or “P,” all of which share a similar vertical stroke pat-
+tern. Consequently, even a small set of well-chosen parts can effectively represent
+the majority of local shapes in the alphabet.
+
+Despite the anticipated difficulties, the challenge of this new few-part-shot
+font generation offers three novel insights. First, from a practical perspective,
+it offers a new degree of flexibility in font creation. As illustrated in Fig. 1(a),
+the existing framework requires at least one fully designed reference character
+image; however, in an extreme example where the single reference character is
+6 https://archive.org/details/Panose-chart
+
+⋮
+
+⋮
+
+
+
+Few-Part-Shot Font Generation 3
+
+Part set
+{                } Aggregation
+
+Noise Denoising
+process
+
+Class condition
+“A”
+
+Fig. 3. Overview of the proposed model. The part set is aggregated into a single style
+feature vector. The diffusion model then generates the target font image conditioned
+on this vector and the character class.
+
+“O,” no information about straight lines would be provided, potentially hindering
+the generation of other characters. By contrast, our new framework imposes no
+requirement to complete the design of an entire character image; users can simply
+supply arbitrary parts, particularly those shapes deemed critical for the desired
+font style.
+
+Second, there is a scientific motivation in that this framework can reveal
+the extent to which a limited set of parts correlates with an entire alphabet.
+If a small collection of parts can reproduce most character shapes, those parts
+effectively function as a compressed representation of the overall shapes in the
+alphabet.7 To our knowledge, no studies have addressed the question of how
+parts can faithfully reconstruct entire characters, suggesting that our attempt
+could be a new starting point for font research.
+
+Third and finally, it is also crucial to clarify the limitations of this frame-
+work. Few-part-shot generation cannot, in principle, perfectly reconstruct certain
+global characteristics from only local parts. A simple illustration is a rectangle:
+from the four 90-degree corners of a rectangle, we cannot reconstruct the original
+rectangle because the corners do not fix its aspect ratio. Applying this to fonts,
+even if all parts come from a “condensed” font (i.e., a narrow font), there is no
+guarantee that the original condensed appearance can be recovered precisely.
+Likewise, overall features such as oblique angles may lie outside the represen-
+tational reach of a small set of parts. Despite these potential shortcomings,
+our experiments will demonstrate that few-part-shot generation often produces
+surprisingly reasonable results in practice. Moreover, future work can focus on
+a complementary combination of the conventional entire-shape-based and our
+part-based generation frameworks.
+
+In our practical implementation of few-part-shot font generation, we employ
+a diffusion model that is conditioned on a set of parts. This setup ensures that
+the generated character images reflect the stylistic cues embedded in those parts.
+Fig. 3 presents a simplified overview of the proposed model. To handle a variable
+number of user-defined parts, we use DeepSets [23], which transforms each part
+7 it is well-known that parts capture character “classes,” through various part-based
+
+classification techniques such as bag-of-visual-words[21, 17]. In contrast, our focus
+here is on how well parts capture complete character “shapes.”
+
+
+
+4 M. Akiba et al.
+
+into a feature vector and then aggregates all such vectors into a single, unified
+representation. This design allows our model to integrate any number of parts
+without modifying the network architecture, thereby keeping the style feature
+vector consistent regardless of the set’s size.
+
+2 Related Work
+
+2.1 Few-shot font generation
+A common approach to example-based font generation is few-shot font genera-
+tion, which aims to generate complete fonts by extracting style features from a
+small number of example characters. In the early stages of the research, EMD [24]
+and AIGS-Net [3] extracted both content and style features directly from whole
+character images to synthesize the target font.
+
+In recent years, many studies have shifted their focus to the generation of
+fonts for complex writing systems such as Chinese and Hangul, which contain
+component (radical) structures [9, 13, 14]. To address this complexity, methods
+that leverage component-based content and style feature extraction have been
+proposed. In the GAN-based approaches, LF-Font [13] and DM-Font [1] uses
+component labels for style extraction, and CG-GAN [9] utilizes weak component
+labels in the discriminator for one-shot font generation. FS-Font [16] captures
+fine-grained local styles from the whole image via cross-attention. Furthermore,
+Diff-Font [5], a diffusion-based approach, incorporates stroke-level information
+to enhance font generation quality. These component-based approaches have
+achieved high accuracy by decomposing complex characters, such as Chinese
+characters, into their components, such as radicals.
+
+Thanks to the development of the diffusion model, several methods that do
+not rely on component information have achieved state-of-the-art performance.
+For example, MSD-Font [2] employs a three-stage reverse diffusion process. Font-
+Diffuser [22], on the other hand, achieves one-shot font generation by utilizing
+multi-scale feature maps while ensuring font style consistency through its Style
+Contrastive Refinement module, which aligns the font style features from gener-
+ated font and reference font image.
+
+This paper focuses on Latin alphabets, which do not have component struc-
+tures and proposes a novel approach that extracts font style features from parts
+(i.e., local shapes) of characters to generate complete font images. This perspec-
+tive can be seen as further refining the granularity of feature extraction compared
+to conventional component-based methods.
+
+2.2 Part-based analysis of fonts
+The analysis of fonts based on individual parts is not a common topic in com-
+puter science but was first introduced by Ueda et al. [18]. Their study focused
+on not analyzing the global shape of a font but examining individual parts,
+aiming to identify which parts contribute to specific impressions, such as “legi-
+ble,” “elegant,” or “comic-like.” As an extension of the first study, they further
+
+
+
+Few-Part-Shot Font Generation 5
+
+investigated the association between specific parts and impressions [19]. They
+hypothesized that the combinations of parts, rather than individual parts alone,
+play an important role in shaping font impressions. To examine this hypothesis,
+they employed a self-attention mechanism[20] to capture dependencies between
+parts and analyzed their joint influence on impressions. Consequently, those tri-
+als emphasize how local parts of font are important.
+
+3 Few-Part-Shot Font Generation
+
+Our proposed few-part-shot font generation method has a relatively simple archi-
+tecture. Specifically, it consists of two main stages: (1) font style feature extrac-
+tion from the given set of parts and (2) font image generation using a diffusion
+model. As will be shown in the experiments, even this rather simple architecture
+still successfully generates font images from the limited information contained in
+the parts. This finding not only validates the sufficiency of our proposed method
+but also highlights that the overall design of a character strongly depends on
+its local shapes — in other words, knowing the local shapes provides a clear
+pathway to reconstructing the entire character.
+
+3.1 Font style extraction from parts
+
+We now describe how to pre-train the model to extract a consistent font style
+representation from an arbitrary number of parts. To learn the mapping from a
+given set of parts to a style feature vector, we employ DeepSets [23]. Furthermore,
+we use contrastive learning to ensure that the style feature vector can capture
+subtle variations in font style while remaining invariant to character classes (e.g.,
+“A” and “B” of the same font should share the same style feature).
+
+Aggregating a set of parts using DeepSets DeepSets is a type of neural
+network model designed to handle sets with an arbitrary number of elements.
+As depicted in Fig. 4(a), DeepSets consists of two components: (i) a network
+that transforms each element of the set into a vector, and (ii) an operator that
+aggregates the resulting vectors. In our case, each part is given as a small image
+(i.e., a patch), so we use a CNN for the transformation. The aggregation is
+simply a standard vector addition. After the addition, the resultant vector is
+normalized to have a unit norm, yielding the aggregated style feature vector.
+This normalization is intended to reduce the dependence of the feature vector
+on the number of parts in the set.
+
+Contrastive learning The style feature vector obtained in DeepSets is refined
+via contrastive learning[12], as illustrated in Fig. 4(b). Contrastive learning en-
+courages feature vectors with the same label to be pulled closer together, while
+pushing those with different labels apart. We apply this mechanism to sets of
+parts originating from the same font, forcing their style vectors to be similar.
+
+
+
+6 M. Akiba et al.
+
+Font #1
+DeepSets
+
+CNN Loss
+Parts ⋮
+
+CNN
+∑
+
+Feat.
+⋮ vec.
+
+CNN ⋮
+⋮
+
+Font #𝑁 Contrastive
+Part set Aggregation Aggregation learning
+
+(a) Feature extraction from a part set (b) Training step for feature extraction
+
+Fig. 4. Style feature extraction from a set of parts using DeepSets and contrastive
+learning. (a) Each part in the part set is encoded into a feature vector using a CNN.
+The resulting vectors are summed and then normalized to produce a single aggregated
+style vector. (b) The feature extractor is pretrained using contrastive learning, which
+pulls together part sets from the same font and pushes apart those from different fonts.
+
+We also apply it to sets from different fonts, driving their style vectors apart and
+enabling the model to learn a stable representation of the font style. Through
+this procedure, the internal CNN of DeepSets is trained to produce style vectors
+that depend as little as possible on the specific parts chosen. Furthermore, by
+training with part sets of varying sizes, we ensure that the resulting style feature
+vector remains robust regardless of the size of the set.
+
+3.2 Font generation with the style feature from a part set
+
+As shown in Fig. 3, we employ a standard conditional diffusion model to gener-
+ate complete font images from the style feature vectors produced by DeepSets.
+Concretely, we train a U-Net that progressively transforms random noise into
+an entire character image (rather than just a partial one), conditioning on three
+key inputs: (1) the character class label (e.g., “A”—“Z”), (2) the style feature
+vector extracted from the parts, and (3) the diffusion process timestep, which is
+omitted in Fig. 3 for simplicity.
+
+During training, we integrate both the character label (converted into an
+embedding) and the style feature vector (obtained from a user-provided set of
+parts via DeepSets) into the U-Net through cross-attention layers. This design
+allows the network to adapt its denoising process to the target character and the
+specified font style. In addition, we randomly vary the number of parts in each
+set, enabling the model to handle different amounts of local shape information.
+As a result, at inference time, the U-Net can generate high-quality font images
+for any character using only the chosen style parts.
+
+Normalize
+
+⋮
+
+
+
+Few-Part-Shot Font Generation 7
+
+4 Experimental Setup
+
+4.1 Dataset
+In this study, we used 26 uppercase letters (“A”–“Z”) from the Google Fonts8
+dataset for model training and evaluation. The collected dataset consists of a
+total of 1,804 font families and 6,796 fonts. We divided them into three mutually
+exclusive font-family subsets to minimize the similarity between training and
+testing fonts. Specifically, 5,326 fonts from 1,443 font families were used for
+training. 746 fonts from 181 font families were used as the validation set for
+hyperparameter tuning and early stopping. The remaining 724 fonts from 180
+font families are used for quantitative and qualitative evaluations. Each character
+in the font sets is rendered to be a 128× 128-pixel bitmap image.
+
+4.2 Preparation of part set
+To train a neural network for few-part-shot font generation, we need a dataset
+containing only the essential parts of each font. It would be ideal if we have a
+public dataset of parts prepared by professional designers. However, no such pub-
+lic dataset exists at present. While it is possible to extract parts randomly from
+font images, this naive approach lacks objectivity and reproducibility, making it
+unsuitable for constructing a reliable dataset.
+
+To address this issue, we propose an objective method that automatically
+extracts K > 0 representative parts from each font using the Scale-Invariant
+Feature Transform (SIFT) [11] and K-medoids clustering. This method enables
+consistent selection of characteristic parts within a font.
+
+Extracting only the “meaningful” parts of a font is inherently challenging,
+since the importance of each part can vary depending on the designer’s intention
+and the perception of font users. Nevertheless, we assume three key properties
+of font design: (1) local shapes such as serifs, stroke terminals, intersections,
+and corners are widely regarded as representative stylistic elements, as shown in
+Fig. 2; (2) designers typically do not reuse exactly identical parts multiple times;
+and (3) purely blank regions (i.e., background-only patches) are not considered
+as valid design components.
+
+Based on these assumptions, we simulate the selection of meaningful parts
+by using SIFT to detect key points along the font strokes and generate corre-
+sponding feature descriptors, which are then clustered via K-medoids. We finally
+extract K parts (i.e., image patches) corresponding to the medoid key points.
+The part size is a hyper-parameter to be fixed before training; we use 32 × 32
+or 64 × 64 for 128 × 128 font images This procedure offers an objective and
+reproducible way to extract representative parts from any given font. In our ex-
+periments, we set K at 26, resulting in 26 representative parts per font, although
+it does NOT aim to extract a single part from each of the 26 alphabets.
+
+Fig. 5 shows results of automatically extracting 26 representative parts from
+each font. Their size is 32 × 32 pixels. Despite the variations in overall font
+8 https://fonts.google.com
+
+
+
+8 M. Akiba et al.
+
+Fonts Parts (K=26)
+
+Fig. 5. Examples of three different fonts (left) and their corresponding set of K = 26
+parts (right) as 32× 32-pixel images. The extracted parts include corners, strokes, and
+terminations that characterize the font style.
+
+design (e.g., stroke thickness, curvature, or decorative elements), the method
+successfully identifies salient local shapes that capture key stylistic features of
+the font. This demonstrates how the proposed pipeline is able to distill a font’s
+characteristic elements into a manageable collection of parts.
+
+4.3 Implementation details
+
+Font Style Extractor A convolutional neural network (CNN) is employed
+as a feature extractor for individual parts (i.e., tiny image patches) in the set,
+producing a 256-dimensional output vector. During training the CNN in the
+DeepSets architecture of Fig. 4(a), the number of parts used is randomly varied
+between 1 and 8. The mini-batch size is set to 64. For contrastive learning,
+the number of negative samples is set to 63, and the temperature parameter is
+fixed at 1. The model is optimized using the Adam optimizer with a learning
+rate of 10−4. Additionally, early stopping is applied, terminating training if the
+validation loss does not improve for 500 epochs.
+
+Diffusion Model We employ a U-Net[7] for noise estimation in the diffu-
+sion process. The diffusion model operates with 1,000 timesteps. The character
+classes used in training consist of 26 uppercase letters ‘A’–‘Z,’ and each charac-
+ter class condition (represented as a 26-dimensional one-hot vector) is embedded
+into a 256-dimensional vector. While training the denoising model, the CNN in
+DeepSets is also updated. Again, the number of parts during training is ran-
+domly varied between 1 and 8. The mini-batch size is set to 64. The model is
+optimized using the Adam optimizer with a learning rate of 10−4. Training is
+conducted for approximately 200k iterations. During evaluation, the generated
+results are obtained after 200 sampling steps.
+
+
+
+Few-Part-Shot Font Generation 9
+
+Fig. 6. Results of one-part-shot font generation. Two different part sizes (32× 32 and
+64× 64) were used.
+
+5 Experimental Analysis of Few-Part-Shot Font
+Generation
+
+5.1 Qualitative analysis
+
+One-part-shot generation for observing the basic performance As the
+simplest demonstration of our method’s behavior, Fig. 6 shows the results of
+one-part-shot font generation with K = 1. The part used in the upper example
+is manually selected from near the horizontal stroke endpoint of the letter “A”
+in the target font, and the lower example uses a part from near another stroke
+endpoint of the same letter “A.” Even though each part is just a small fragment,
+it carries information about stroke thickness and curvature (or straightness).
+The generated alphabets reflect these features, indicating that a single part is
+surprisingly rich in style-related information. Although the results do not exactly
+match the target fonts, one can see how effectively the local shape properties are
+generalized into the entire alphabet.
+
+Effect of part size Fig. 6 also shows the difference when using two part sizes
+(32 × 32 and 64 × 64) for the same region in each font. Naturally, a larger
+part provides more global cues. In the upper row, the 32×32 part captures
+most features of the target font, yet some letters (like “D” or “R”) appear in
+an italicized style that was not intended. Because italicization is a more global
+property, relying solely on a smaller local part can lead to ambiguity. In contrast,
+using a 64×64 part stabilizes the style, suggesting that even moderately enlarged
+parts can help preserve the intended global design.
+
+In the lower row of the figure, most generated letters already include serif
+details even at a 32×32 part size. This implies that local decorations, such as
+serifs, can be captured accurately from relatively small parts. However, in cases
+where the target font is italic, certain letters still fail to reflect italicization at the
+smaller part size. When the part size is increased to 64×64, more letters correctly
+exhibit the italic style. Nevertheless, achieving perfect global consistency remains
+challenging with local parts alone, highlighting a fundamental limitation of few-
+part-shot font generation.
+
+
+
+10 M. Akiba et al.
+
+Fig. 7. Results of our few-part-shot font generation method under different part sets
+and the number of parts. The parts (32× 32) used for generating the displayed result
+are highlighted with a red frame. For K = 26, all of the 26 parts shown at the top were
+used.
+
+Effect of number of parts and their variation Fig. 7 shows the results
+of our few-part-shot font generation when varying both the individual parts
+and the number of parts. For each of the two font examples shown, we extract
+26 distinct parts from the target font. Note that the lower example in Fig. 7
+features a “condensed” font with a notably narrow width, providing an interesting
+challenge for our method. By comparing the two examples, we can examine how
+well our approach generalizes to different styles with varying constraints.
+
+One-part-shot generation (K = 1) often produces images that exhibit insta-
+bility or inconsistency across ‘A’ to ‘Z,’ depending on which single part is chosen.
+Nonetheless, as demonstrated in Fig. 6, selecting a particularly informative part
+(such as the third one-part-shot in the upper example) can yield generated re-
+
+
+
+Few-Part-Shot Font Generation 11
+
+sults remarkably close to the target style. This suggests that even a single part
+can carry substantial style information if chosen wisely.
+
+Increasing the number of parts K raises the likelihood of a stable, coherent
+output. At K = 13, the generated characters become more consistent across all
+letters, as illustrated by the fully serifed style in the upper example and the
+consistent sans-serif style in the lower example. In the upper example, certain
+letters (e.g., ‘D’ and ‘P’) appear nearly indistinguishable from their counterparts
+in the target font. A crucial observation here is that the results become more
+robust to the specific choice of parts: different subsets of 13 parts often yield
+very similar character images. This phenomenon points to a strong correlation
+between local shapes and overall font structure. When K = 26, the generated
+outputs closely resemble those obtained at K = 13, indicating that even a larger
+set of parts may not entirely capture all aspects of the global style. We will
+revisit this point in a later quantitative evaluation.
+
+In Section 1, we discussed the fundamental limitation of relying on parts to
+describe an entire shape — the rectangle example shows that merely knowing
+the four 90-degree corners does not guarantee recovery of its aspect ratio. This
+highlights the inherent ambiguity when reconstructing a global shape from local
+elements. In the lower example of Fig. 7, the generated letters fail to maintain the
+narrow proportions of the condensed style, suggesting that the parts alone cannot
+fully capture certain global traits. Nonetheless, it is notable that much of the
+local styling (such as serif or sans-serif features) is still successfully reproduced.
+
+Despite this fundamental limitation, many of the generated fonts in Fig. 7
+exhibit a high degree of similarity to their respective targets, underscoring the
+promise of few-part-shot font generation. In practical settings, a designer could
+augment these part-based inputs with a small number of full-character references
+or additional global constraints, thereby refining the overall aesthetic. Such a hy-
+brid approach would not only help overcome the current limitations of part-only
+generation but could also improve the fidelity of existing full-character methods
+by incorporating more precise local structures. This combination of global and
+local shape information suggests a valuable direction for future research on font
+generation.
+
+5.2 Quantitative analysis
+
+Evaluation metrics
+We employ three evaluation metrics: L1 distance, SSIM, and local L1 dis-
+
+tance. The L1 distance measures the mean absolute pixel-wise difference, thereby
+capturing the pixel-level error between the target and generated images. SSIM
+evaluates image quality by considering luminance, contrast, and structural in-
+formation, rather than direct pixel-wise differences.
+
+In addition to these two metrics, we propose the local L1 distance, which
+focuses on the local parts of font images. Specifically, we use SIFT to detect
+keypoints on the target images and extract corresponding local parts. We then
+locate the same regions in the generated images and measure the L1 distance
+
+
+
+12 M. Akiba et al.
+
+part size=32 part size=64
+
+0.180 0.240 0.57
+
+0.175 0.235
+0.56
+
+0.230
+0.170
+
+0.55
+0.225
+
+0.165
+0.220 0.54
+
+0.160
+0.215 0.53
+
+0.155
+0.210
+
+1 13 26 1 13 26 1 13 26
+Number of parts Number of parts Number of parts
+
+Fig. 8. Quantitative performance of few-part-shot font generation as a function of part
+size (32 vs. 64) and number of parts (K = 1, 13, 26). The three panels respectively
+show L1 distance (left), local L1 distance (middle), and SSIM (right).
+
+between the target and generated patches. This approach allows us to assess how
+accurately local font structures are reproduced.
+
+Quantitative evaluation by part size and number of parts Fig. 8 presents
+the quantitative results of few-part-shot font generation when varying both the
+part size and the number of parts. Focusing first on part size, we observe that
+larger parts yield better performance in all three metrics. This result suggests
+that increasing the part size enriches the style information contained within a
+single part, thereby improving generation quality.
+
+Regarding the number of parts, increasing K from 1 to 13 significantly im-
+proves all three metrics. However, the gain from 13 to 26 is relatively modest,
+indicating a form of diminishing marginal returns that often arises in set-based
+optimization problems. While adding more parts can capture additional local de-
+tails, it does not necessarily guarantee a dramatic increase in global fidelity. This
+phenomenon also highlights a limitation: there appears to be an upper bound
+to how much additional style information can be conveyed by simply supplying
+more parts.9 (From a positive viewpoint, human designers do not need to give
+more and more parts to improve the quality of the generated font images.)
+
+Interestingly, when the part size is 64, using 26 parts of size 32 still cannot
+surpass the accuracy of a single 64×64 part in terms of L1 distance and SSIM.
+This finding reaffirms the importance of part size for capturing critical style cues.
+On the other hand, if we focus on local L1 distance, using 26 parts at a size of 32
+yields performance nearly comparable to that of a single 64×64 part. Hence, a
+sufficient number of smaller parts can effectively represent local structures, even
+if they do not convey as much global information as a larger part might.
+9 This phenomenon, where additional inputs yield progressively smaller benefits, is
+
+commonly referred to as diminishing marginal returns. It is observed in various
+fields such as economics and resource allocation.
+
+L1
+
+Local L1
+
+SSIM
+
+
+
+Few-Part-Shot Font Generation 13
+
+5.3 Comparative experiments
+
+Evaluation metrics In addition to the evaluation metrics described in Sec-
+tion 5.2, we use MSSIM, StyleFID, and ContentFID [10]. MSSIM is similar
+to SSIM and evaluates image quality by considering luminance, contrast, and
+structural information rather than direct pixel-wise differences. FID assesses the
+difference between the feature distributions of the generated and real images
+using the Fréchet distance. StyleFID is computed using feature vectors from a
+CNN-based font style classifier, while ContentFID is derived from a CNN-based
+character class classifier.
+
+Comparative methods One major difficulty in evaluating our approach is the
+lack of suitable baselines. To the best of our knowledge, this is the first attempt
+to generate fonts directly from a set of parts, so no existing models allow for
+a direct comparison. Moreover, many recent few-shot font generation methods
+focus on Chinese characters, leveraging radical (sub-character) structures [9,
+13, 14]. Since our current work targets the more decorative Latin alphabet, we
+cannot fairly compare with such radical-based approaches.
+
+To address this challenge, we adopt a one-shot font generation setting for
+fair comparison and prepare three comparative methods:
+
+– First, we use FontDiffuser [22] – a state-of-the-art model for one-shot font
+generation without assuming radical structures – to generate the Latin al-
+phabet. FontDiffuser achieves high performance in one-shot font generation
+through a carefully designed training scheme, including two-stage learning
+and style refinement.
+
+– Second, we also create another baseline model that employs the same diffu-
+sion backbone as ours but replaces our style feature extraction module with
+the encoder from FANnet [15]. This baseline is necessary because FontD-
+iffuser and our proposed method differ in their underlying diffusion archi-
+tectures, complicating a direct comparison. Kondo et al. [8] similarly used
+FANnet to extract font style features, combining it with a diffusion model for
+font generation. We thus regard it as a reasonable one-shot baseline, which
+we call FANnet + DM. Like FontDiffuser, this baseline processes a single
+full-character image rather than a small part.
+
+– Third, we modify the proposed method to be evaluated in the same one-shot
+framework (K = 1) by setting the part size at 128× 128, i.e., the size of the
+original character images. We denote this version as “Ours as 1-shot” in the
+later result.
+
+We compare these methods with our few-part-shot method with the part size
+of 32 × 32 and K = 13 parts. This setup (32 × 32 × 13 total pixels) roughly
+equals one 128× 128 image in terms of pixel count, allowing for an approximate
+comparison of information capacity.
+
+
+
+14 M. Akiba et al.
+
+Table 1. Quantitative comparison with the existing methods for one-shot font gener-
+ation. “Ours as 1-shot” is a one-shot version of the proposed method using the whole
+image of a single character (i.e., part size was 128× 128 and K = 1). For the proposed
+method (Ours), the part size was 32×32 and K = 13. The column “part” shows whether
+one-part-shot or not. The column “#shot” shows the number of shots for generation.
+
+part #s L1↓ Local L1↓ SSIM↑ MSSIM↑ StyleFID↓ ContentFID↓
+FontDiffuser 1 0.128 0.172 0.602 0.560 53.785 4.026
+FANnet+DM 1 0.164 0.227 0.565 0.445 51.139 133.107
+Ours as 1-shot 1 0.135 0.185 0.604 0.513 15.918 18.276
+Ours (K = 13) ✓ 13 0.171 0.228 0.540 0.426 15.296 9.060
+
+Results Table 1 presents the quantitative comparison of our method (the bot-
+tom row) against other one-shot font generation approaches (FontDiffuser, FAN-
+net + DM, and Ours as 1-shot). Our method significantly outperforms FAN-
+net+DM in ContentFID and StyleFID, despite relying on far less information in
+the one-part scenario. This finding suggests that font generation can be achieved
+with minimal input and still achieve performance on par with simpler one-shot
+methods. In contrast, FontDiffuser exhibits higher performance than our model
+on all metrics, likely due to its carefully designed two-step training strategy that
+provides superior global coverage of font styles.
+
+Nevertheless, our approach produces results comparable to or better than
+FontDiffuser in certain cases, which we examine in detail in the next section.
+More importantly, by allowing designers to supply only local shapes as opposed
+to a fully designed character, our few-part-shot framework offers significant flex-
+ibility in practical font creation. Although it currently cannot surpass state-
+of-the-art methods that use entire characters, the fact that it can come close
+underscores its potential. With the option to incorporate a few complete char-
+acter references or additional global constraints, our method could be extended
+further, closing the gap with FontDiffuser while maintaining the benefits of local
+part-based design. Such a hybrid strategy opens up new avenues for efficient and
+creative font generation workflows.
+
+Class-wise comparison with FontDiffuser Fig. 9 shows a box-plot of L1
+distances of FontDiffuser and ours for each character class, revealing variability
+in generation performance depending on the specific letter. The results for ‘I’ and
+‘J’ (highlighted with a red box) show that our method performs comparably to
+FontDiffuser on these two characters. Qualitative analysis indicates a recurring
+trend, as illustrated in the top-right inset of the figure. FontDiffuser often intro-
+duces serifs when generating ‘I’ and produces a thicker shape for ‘J,’ especially
+in fonts where ‘I’ and ‘J’ are much narrower than other letters. In contrast, our
+method generates ‘I’ and ‘J’ with widths closer to those in the target fonts. Since
+our method leverages only local parts, it avoids certain global tendencies that
+might distort thin characters into a more uniform style. Moreover, ‘I’ and ‘J’ are
+
+
+
+Few-Part-Shot Font Generation 15
+
+Fig. 9. Class-wise evaluation of generated images with L1 distance. For the proposed
+method, the part size is set at 32× 32 and K = 13.
+
+very simple characters, composed of a single, mostly straight stroke; thus, their
+shapes can be reliably inferred from a small set of local design cues.
+
+6 Conclusion, Limitation, and Future Work
+In this paper, we challenged few-part-shot font generation, a new extension of
+few-shot font generation that relies solely on localized parts rather than fully
+designed character images. By providing only small patches that capture stroke
+endings, corners, or decorative elements, our approach can generate fonts that
+largely reflect the intended style. Through a series of qualitative and quantitative
+experiments, we confirmed several capabilities and limitations:
+– Even a single, carefully selected part can convey enough local style cues to
+
+produce recognizable variations of an entire alphabet.
+– Increasing either the part size or the number of parts further stabilizes and
+
+improves the quality of the generated fonts, though the benefits diminish
+beyond a certain point (i.e., diminishing marginal returns).
+
+– A fundamental limitation arises in reproducing certain global characteristics
+(e.g., oblique angles or condensed shapes). Local parts alone cannot guaran-
+tee global consistency because they lack holistic information about overall
+proportions.
+
+Despite the limitation, our few-part-shot approach offers a more flexible and
+efficient way to prototype fonts without requiring a fully finished reference char-
+acter. Looking ahead, we plan to investigate hybrid methods that combine part-
+based inputs with a small number of complete-character references, hoping to
+capture both local and global structure more effectively. We also envision ap-
+plying this method to more complex scripts (e.g., non-Latin alphabets) and
+exploring richer editing capabilities such as style interpolation or partial shape
+manipulation. By unifying local and global design cues in one framework, we
+aim to further bridge the gap between the creativity of human font designers
+and the power of modern generative models.
+
+
+
+16 M. Akiba et al.
+
+Acknowledgments. This work was supported by JSPS KAKENHI-JP25H01149 and
+JST CRONOS-JPMJCS24K4.
+
+References
+
+1. Cha, J., Chun, S., Lee, G., Lee, B., Kim, S., Lee, H.: Few-shot compositional
+font generation with dual memory. In: European Conference on Computer Vision
+(ECCV) (2020)
+
+2. Fu, B., Yu, F., Liu, A., Wang, Z., Wen, J., He, J., Qiao, Y.: Generate Like Experts:
+Multi-Stage Font Generation by Incorporating Font Transfer Process into Diffusion
+Models. In: Computer Vision and Pattern Recognition. pp. 6892–6901 (2024)
+
+3. Gao, Y., Guo, Y., Lian, Z., Tang, Y., Xiao, J.: Artistic Glyph Image Synthesis via
+One-Stage Few-Shot Learning. ACM Transactions on Graphics 38, 1–12 (2019)
+
+4. Goodfellow, I., Pouget-Abadie, J., Mirza, M., Xu, B., Warde-Farley, D., Ozair, S.,
+Courville, A., Bengio, Y.: Generative Adversarial Nets. In: Advances in Neural
+Information Processing Systems. pp. 2672–2680 (2014)
+
+5. He, H., Chen, X., Wang, C., Liu, J., Du, B., Tao, D., Yu, Q.: Diff-font: Diffusion
+Model for Robust One-shot font Generation. International Journal of Computer
+Vision 132, 5372–5386 (2024)
+
+6. Ho, J., Jain, A., Abbeel, P.: Denoising Diffusion Probabilistic Models. In: Advances
+in Neural Information Processing Systems. pp. 6840–6851 (2020)
+
+7. Kang, L., Yang, F., Wang, K., Souibgui, M.A., Gomez, L., Fornés, A., Valveny,
+E., Karatzas, D.: GRIF-DM: Generation of Rich Impression Fonts using Diffusion
+Models. In: European Conference on Artificial Intelligence. pp. 226–233 (2024)
+
+8. Kondo, T., Takezaki, S., Haraguchi, D., Uchida, S.: Font Style Interpolation with
+Diffusion Models. In: International Conference on Document Analysis and Recog-
+nition. pp. 86–103 (2024)
+
+9. Kong, Y., Luo, C., Ma, W., Zhu, Q., Zhu, S., Yuan, N., Jin, L.: Look Closer To
+Supervise Better: One-Shot Font Generation via Component-Based Discriminator.
+In: Conference on Computer Vision and Pattern Recognition. pp. 13482–13491
+(2022)
+
+10. Li, C., Taniguchi, Y., Lu, M., Konomi, S.: Few-Shot Font Style Transfer Between
+Different Languages. In: Winter Conference on Applications of Computer Vision.
+pp. 433–442 (2021)
+
+11. Lowe, D.G.: Distinctive Image Features from Scale-Invariant Keypoint. Interna-
+tional Journal of Computer Vision 60, 91–110 (2004)
+
+12. Oord, A.v.d., Li, Y., Vinyals, O.: Representation Learning with Contrastive Pre-
+dictive Coding. arXiv preprint arXiv:1807.03748 (2018)
+
+13. Park, S., Chun, S., Cha, J., Lee, B., Shim, H.: Few-shot Font Generation with Lo-
+calized Style Representations and Factorization. In: AAAI Conference on Artificial
+Intelligence. pp. 2393–2402 (2021)
+
+14. Park, S., Chun, S., Cha, J., Lee, B., Shim, H.: Multiple Heads are Better than
+One: Few-shot Font Generation with Multiple Localized Experts. In: International
+Conference on Computer Vision. pp. 13900–13909 (2021)
+
+15. Roy, P., Bhattacharya, S., Ghosh, S., Pal, U.: STEFANN: Scene Text Editor using
+Font Adaptive Neural Network. In: Computer Vision and Pattern Recognition. pp.
+13228–13237 (2020)
+
+
+
+Few-Part-Shot Font Generation 17
+
+16. Tang, L., Cai, Y., Liu, J., Hong, Z., Gong, M., Fan, M., Han, J., Liu, J., Ding, E.,
+Wang, J.: Few-shot font generation by learning fine-grained local styles. In: Pro-
+ceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recogni-
+tion (CVPR). pp. 7895–7904 (June 2022)
+
+17. Uchida, S., Liwicki, M.: Part-Based Recognition of Handwritten Characters. In:
+International Conference on Frontiers in Handwriting Recognition. pp. 545–550
+(2010)
+
+18. Ueda, M., Kimura, A., Uchida, S.: Which Parts Determine the Impression of the
+Font? In: International Conference on Document Analysis and Recognition. pp.
+723–738 (2021)
+
+19. Ueda, M., Kimura, A., Uchida, S.: Font Shape-to-Impression Translation. In: In-
+ternational Workshop on Document Analysis Systems. pp. 3–17 (2022)
+
+20. Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A.N., Kaiser,
+L.u., Polosukhin, I.: Attention is All you Need. In: Advances in Neural Information
+Processing Systems (2017)
+
+21. Wang, S., Uchida, S., Liwicki, M.: Part-Based Recognition of Arbitrary Fonts.
+In: International Conference on Document Analysis and Recognition. pp. 170–174
+(2013)
+
+22. Yang, Z., Peng, D., Kong, Y., Zhang, Y., Yao, C., Jin, L.: FontDiffuser: One-Shot
+Font Generation via Denoising Diffusion with Multi-Scale Content Aggregation
+and Style Contrastive Learning. In: AAAI Conference on Artificial Intelligence.
+pp. 6603–6611 (2024)
+
+23. Zaheer, M., Kottur, S., Ravanbakhsh, S., Poczos, B., Salakhutdinov, R.R., Smola,
+A.J.: Deep Sets. In: Advances in Neural Information Processing Systems (2017)
+
+24. Zhang, Y., Zhang, Y., Cai, W.: Separating Style and Content for Generalized Style
+Transfer. In: Computer Vision and Pattern Recognition. pp. 8447–8455 (2018)

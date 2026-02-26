@@ -1,0 +1,89 @@
+{
+  "generated_at": "2026-02-23T11:45:36",
+  "total": 177,
+  "kept": 168,
+  "failed": 9,
+  "failed_fonts": [
+    {
+      "font": "fonts/方正仿郭简体.TTF",
+      "error_tail": [
+        "generate_images(",
+        "File \"/scratch/yangximing/code/ass5-exp6/DiffuFont/DataPreparation/generate_font_images.py\", line 188, in generate_images",
+        "raise RuntimeError(",
+        "RuntimeError: font '方正仿郭简体' generation failed: 30 unsupported chars in charset. sample='年你那能内呢南拿难您锛哪某男墓木目末乃闹'"
+      ]
+    },
+    {
+      "font": "fonts/方正晶中粗黑.ttf",
+      "error_tail": [
+        "generate_images(",
+        "File \"/scratch/yangximing/code/ass5-exp6/DiffuFont/DataPreparation/generate_font_images.py\", line 188, in generate_images",
+        "raise RuntimeError(",
+        "RuntimeError: font '方正晶中粗黑' generation failed: 304 unsupported chars in charset. sample='为这你说对还她时过给见让两们长门问话则较'"
+      ]
+    },
+    {
+      "font": "fonts/方正晶中黑.ttf",
+      "error_tail": [
+        "generate_images(",
+        "File \"/scratch/yangximing/code/ass5-exp6/DiffuFont/DataPreparation/generate_font_images.py\", line 188, in generate_images",
+        "raise RuntimeError(",
+        "RuntimeError: font '方正晶中黑' generation failed: 304 unsupported chars in charset. sample='为这你说对还她时过给见让两们长门问话则较'"
+      ]
+    },
+    {
+      "font": "fonts/方正晶准黑.ttf",
+      "error_tail": [
+        "generate_images(",
+        "File \"/scratch/yangximing/code/ass5-exp6/DiffuFont/DataPreparation/generate_font_images.py\", line 188, in generate_images",
+        "raise RuntimeError(",
+        "RuntimeError: font '方正晶准黑' generation failed: 304 unsupported chars in charset. sample='为这你说对还她时过给见让两们长门问话则较'"
+      ]
+    },
+    {
+      "font": "fonts/方正晶大黑.ttf",
+      "error_tail": [
+        "generate_images(",
+        "File \"/scratch/yangximing/code/ass5-exp6/DiffuFont/DataPreparation/generate_font_images.py\", line 188, in generate_images",
+        "raise RuntimeError(",
+        "RuntimeError: font '方正晶大黑' generation failed: 304 unsupported chars in charset. sample='为这你说对还她时过给见让两们长门问话则较'"
+      ]
+    },
+    {
+      "font": "fonts/方正晶特黑.ttf",
+      "error_tail": [
+        "generate_images(",
+        "File \"/scratch/yangximing/code/ass5-exp6/DiffuFont/DataPreparation/generate_font_images.py\", line 188, in generate_images",
+        "raise RuntimeError(",
+        "RuntimeError: font '方正晶特黑' generation failed: 304 unsupported chars in charset. sample='为这你说对还她时过给见让两们长门问话则较'"
+      ]
+    },
+    {
+      "font": "fonts/方正晶粗黑.ttf",
+      "error_tail": [
+        "generate_images(",
+        "File \"/scratch/yangximing/code/ass5-exp6/DiffuFont/DataPreparation/generate_font_images.py\", line 188, in generate_images",
+        "raise RuntimeError(",
+        "RuntimeError: font '方正晶粗黑' generation failed: 304 unsupported chars in charset. sample='为这你说对还她时过给见让两们长门问话则较'"
+      ]
+    },
+    {
+      "font": "fonts/方正晶黑.ttf",
+      "error_tail": [
+        "generate_images(",
+        "File \"/scratch/yangximing/code/ass5-exp6/DiffuFont/DataPreparation/generate_font_images.py\", line 188, in generate_images",
+        "raise RuntimeError(",
+        "RuntimeError: font '方正晶黑' generation failed: 304 unsupported chars in charset. sample='为这你说对还她时过给见让两们长门问话则较'"
+      ]
+    },
+    {
+      "font": "fonts/方正细黑一简体.ttf",
+      "error_tail": [
+        "generate_images(",
+        "File \"/scratch/yangximing/code/ass5-exp6/DiffuFont/DataPreparation/generate_font_images.py\", line 179, in generate_images",
+        "raise RuntimeError(",
+        "RuntimeError: failed to render char '忌' for font '方正细黑一简体' (/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正细黑一简体.ttf)"
+      ]
+    }
+  ]
+}

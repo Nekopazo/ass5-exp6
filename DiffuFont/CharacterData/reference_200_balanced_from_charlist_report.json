@@ -1,0 +1,40 @@
+{
+  "input_reference": "/scratch/yangximing/code/ass5-exp6/DiffuFont/CharacterData/CharList.json",
+  "output_reference": "/scratch/yangximing/code/ass5-exp6/DiffuFont/CharacterData/ReferenceCharList_200_balanced_from_charlist.json",
+  "target_count": 200,
+  "selected_count": 200,
+  "missing_content_glyph_count": 0,
+  "ratios_target": {
+    "left_right": 0.34,
+    "up_down": 0.26,
+    "enclosing": 0.14,
+    "single": 0.16,
+    "other": 0.1
+  },
+  "groups_available": {
+    "left_right": 350,
+    "up_down": 344,
+    "enclosing": 270,
+    "single": 4,
+    "other": 32
+  },
+  "groups_selected": {
+    "left_right": 68,
+    "up_down": 52,
+    "enclosing": 56,
+    "single": 4,
+    "other": 20
+  },
+  "counts_target_by_ratio": {
+    "left_right": 68,
+    "up_down": 52,
+    "enclosing": 56,
+    "single": 4,
+    "other": 20
+  },
+  "params": {
+    "binary_threshold": 245,
+    "hole_threshold": 0.06,
+    "valley_rel_threshold": 0.78
+  }
+}
