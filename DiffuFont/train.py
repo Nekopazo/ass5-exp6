@@ -20,6 +20,17 @@ from models.model import DiffusionTrainer, FlowMatchingTrainer
 from models.source_part_ref_unet import SourcePartRefUNet
 
 
+def _try_enable_xformers(model: SourcePartRefUNet) -> bool:
+    """Try to enable xformers memory-efficient attention on the UNet."""
+    try:
+        model.unet.enable_xformers_memory_efficient_attention()
+        print("[train] xformers memory-efficient attention enabled")
+        return True
+    except Exception as e:
+        print(f"[train] xformers not available, using default attention: {e}")
+        return False
+
+
 def collate_fn(samples) -> Dict[str, torch.Tensor]:
     contents, targets = [], []
     parts_list, part_masks = [], []
@@ -127,7 +138,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-root", type=Path, default=Path("."))
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch", type=int, default=64)
+    parser.add_argument("--batch", type=int, default=32)
     parser.add_argument("--image-size", type=int, default=256)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--prefetch-factor", type=int, default=0)
@@ -255,7 +266,7 @@ def main() -> None:
     )
 
     model = SourcePartRefUNet(
-        in_channels=3,
+        in_channels=1,
         image_size=args.image_size,
         content_start_channel=64,
         style_start_channel=64,
@@ -267,6 +278,8 @@ def main() -> None:
         style_token_count=int(args.style_token_count),
         style_token_dim=int(args.style_token_dim),
     )
+
+    _try_enable_xformers(model)
 
     if args.pretrained_part_encoder:
         ckpt = torch.load(args.pretrained_part_encoder, map_location="cpu", weights_only=True)

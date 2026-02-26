@@ -107,7 +107,7 @@ def draw_char(
     y_offset: int,
 ) -> Image.Image:
     font = ImageFont.truetype(str(font_path), size=char_size)
-    img = Image.new("RGB", (canvas_size, canvas_size), (255, 255, 255))
+    img = Image.new("L", (canvas_size, canvas_size), 255)
     draw = ImageDraw.Draw(img)
 
     # Center text by bbox and apply custom offsets.
@@ -116,7 +116,7 @@ def draw_char(
     text_h = bbox[3] - bbox[1]
     x = (canvas_size - text_w) // 2 - bbox[0] + x_offset
     y = (canvas_size - text_h) // 2 - bbox[1] + y_offset
-    draw.text((x, y), ch, fill=(0, 0, 0), font=font)
+    draw.text((x, y), ch, fill=0, font=font)
 
     return img
 

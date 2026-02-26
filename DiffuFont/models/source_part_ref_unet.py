@@ -18,7 +18,7 @@ from .source_fontdiffuser import ContentEncoder, UNet
 class SourcePartRefUNet(nn.Module):
     def __init__(
         self,
-        in_channels: int = 3,
+        in_channels: int = 1,
         image_size: int = 256,
         content_start_channel: int = 64,
         style_start_channel: int = 64,  # kept for backward arg compatibility
@@ -52,14 +52,13 @@ class SourcePartRefUNet(nn.Module):
         self.enable_parts_vector_condition = profile == "parts_vector_only"
 
         # Content encoder runs on 256 and we explicitly pick c128/c64/c32/c16 for UNet down blocks.
-        self.content_encoder = ContentEncoder(G_ch=content_start_channel, resolution=self.image_size)
-
-        # 256 -> 128 stem and 128 -> 256 head.
-        self.input_stem = nn.Conv2d(self.in_channels, self.in_channels, kernel_size=3, stride=2, padding=1)
-        self.output_head = nn.Sequential(
-            nn.Upsample(scale_factor=2.0, mode="nearest"),
-            nn.Conv2d(self.in_channels, self.in_channels, kernel_size=3, stride=1, padding=1),
+        self.content_encoder = ContentEncoder(
+            G_ch=content_start_channel, resolution=self.image_size, input_nc=self.in_channels,
         )
+
+        # 256 → 128 / 128 → 256 via bilinear interpolation.
+        # UNet operates directly on 1-channel 128×128 images (grayscale).
+        self.unet_in_channels = self.in_channels  # 1
 
         # Part set encoder + DeepSets(mean+LN) -> fixed M style tokens.
         self.part_patch_encoder = nn.Sequential(
@@ -92,8 +91,8 @@ class SourcePartRefUNet(nn.Module):
 
         self.unet = UNet(
             sample_size=self.unet_input_size,
-            in_channels=self.in_channels,
-            out_channels=self.in_channels,
+            in_channels=self.unet_in_channels,
+            out_channels=self.unet_in_channels,
             flip_sin_to_cos=True,
             freq_shift=0,
             down_block_types=("MCADownBlock2D", "MCADownBlock2D", "MCADownBlock2D", "MCADownBlock2D"),
@@ -214,19 +213,43 @@ class SourcePartRefUNet(nn.Module):
             content_residual_features[4],
         ]
 
+    # ------------------------------------------------------------------ #
+    #  Pixel ↔ Latent helpers (used by Trainer, NOT inside forward)
+    # ------------------------------------------------------------------ #
+    def encode_to_latent(self, x_pixel: torch.Tensor) -> torch.Tensor:
+        """Pixel (B,1,256,256) → latent (B,1,128,128) via bilinear resize."""
+        return torch.nn.functional.interpolate(
+            x_pixel, size=self.unet_input_size, mode="bilinear", align_corners=False,
+        )
+
+    def decode_from_latent(self, z_latent: torch.Tensor) -> torch.Tensor:
+        """Latent (B,1,128,128) → pixel (B,1,256,256) via bilinear resize."""
+        return torch.nn.functional.interpolate(
+            z_latent, size=self.image_size, mode="bilinear", align_corners=False,
+        )
+
     def forward(
         self,
-        x_t: torch.Tensor,
+        x_t_latent: torch.Tensor,
         t: torch.Tensor,
         content_img: torch.Tensor,
         part_imgs: Optional[torch.Tensor] = None,
         part_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        out_h, out_w = int(x_t.shape[-2]), int(x_t.shape[-1])
-        self._check_hw(x_t, "x_t")
+        """Predict noise (or velocity) at 128×128.
+
+        Args:
+            x_t_latent: noisy image (B, 1, 128, 128) — resized from 256.
+            t:          timestep indices (B,).
+            content_img: pixel-space content glyph (B, 1, 256, 256).
+            part_imgs:  part images (B, P, 1, 64, 64) or None.
+            part_mask:  (B, P) or None.
+
+        Returns:
+            eps_hat / v_hat (B, 1, 128, 128).
+        """
         self._check_hw(content_img, "content_img")
 
-        x_t_stem = self.input_stem(x_t)
         content_residual_features = self._content_features_for_unet(content_img)
 
         style_hidden_states = None
@@ -234,14 +257,12 @@ class SourcePartRefUNet(nn.Module):
             if part_imgs is not None:
                 style_hidden_states = self._parts_vector_hidden_states(part_imgs, part_mask)
             else:
-                # part_imgs=None means unconditional: feed zeros through the same CNN path
-                # so null representation matches training-time CFG dropout behaviour.
-                b = int(x_t.shape[0])
+                b = int(x_t_latent.shape[0])
                 dummy_parts = torch.zeros(
                     b, 1, self.in_channels, 64, 64,
-                    device=x_t.device, dtype=x_t.dtype,
+                    device=x_t_latent.device, dtype=x_t_latent.dtype,
                 )
-                dummy_mask = torch.zeros(b, 1, device=x_t.device, dtype=x_t.dtype)
+                dummy_mask = torch.zeros(b, 1, device=x_t_latent.device, dtype=x_t_latent.dtype)
                 style_hidden_states = self._parts_vector_hidden_states(dummy_parts, dummy_mask)
 
         encoder_hidden_states = [
@@ -250,16 +271,10 @@ class SourcePartRefUNet(nn.Module):
             style_hidden_states,
         ]
 
-        (out_stem,) = self.unet(
-            x_t_stem,
+        (out_latent,) = self.unet(
+            x_t_latent,
             t,
             encoder_hidden_states=encoder_hidden_states,
             content_encoder_downsample_size=self.content_encoder_downsample_size,
         )
-        out = self.output_head(out_stem)
-
-        if out.shape[-2] != out_h or out.shape[-1] != out_w:
-            raise RuntimeError(
-                f"UNet output size mismatch: got {tuple(out.shape[-2:])}, expected {(out_h, out_w)}"
-            )
-        return out
+        return out_latent

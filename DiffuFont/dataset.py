@@ -74,6 +74,21 @@ class FontImageDataset(Dataset):
         self._part_tensor_cache: "OrderedDict[str, Any]" = OrderedDict()
         self._glyph_decode_cache: "OrderedDict[str, Any]" = OrderedDict()
 
+        # ---- Memory footprint warning ----
+        _glyph_bytes_each = 3 * 256 * 256 * 4  # float32 tensor per cached glyph
+        _part_bytes_each = 3 * part_image_size * part_image_size * 4
+        _est_gb = (
+            self.lmdb_decode_cache_size * _glyph_bytes_each
+            + self.part_image_cache_size * _part_bytes_each
+        ) / (1024 ** 3)
+        if _est_gb > 4.0:
+            print(
+                f"[FontImageDataset] WARNING: in-memory cache may use ~{_est_gb:.1f} GB "
+                f"(glyph_cache={self.lmdb_decode_cache_size} x {_glyph_bytes_each//1024}KB, "
+                f"part_cache={self.part_image_cache_size} x {_part_bytes_each//1024}KB). "
+                f"Reduce --lmdb-decode-cache-size / --part-image-cache-size to save RAM."
+            )
+
         # ---- JSON paths ----
         char_list_path = self.root / "CharacterData" / "CharList.json"
         font_list_path = self.root / "DataPreparation" / "FontList.json"
@@ -254,12 +269,12 @@ class FontImageDataset(Dataset):
         return self.rng.sample(rows, k) if len(rows) >= k else rows[:]
 
     def _part_array_from_bytes(self, b: bytes) -> np.ndarray:
-        img = Image.open(io.BytesIO(b)).convert("RGB")
+        img = Image.open(io.BytesIO(b)).convert("L")
         if self.part_image_size > 0:
             img = img.resize((self.part_image_size, self.part_image_size), Image.BILINEAR)
         arr = np.asarray(img, dtype=np.float32) / 255.0
         arr = arr * 2.0 - 1.0
-        return np.transpose(arr, (2, 0, 1)).astype(np.float32, copy=False)
+        return arr[None, :, :].astype(np.float32, copy=False)  # (1, H, W)
 
     def _load_part_tensor_uncached(self, part_txn, lmdb_key: str):
         b = part_txn.get(lmdb_key.encode("utf-8"))
@@ -287,7 +302,7 @@ class FontImageDataset(Dataset):
     #  Image decode helpers
     # ------------------------------------------------------------------ #
     def _decode_img(self, b: bytes):
-        img = Image.open(io.BytesIO(b)).convert("RGB")
+        img = Image.open(io.BytesIO(b)).convert("L")
         return self.transform(img) if self.transform else img
 
     def _cache_get(self, key: str):

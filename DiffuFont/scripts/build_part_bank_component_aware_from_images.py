@@ -956,10 +956,9 @@ def main() -> None:
         font_out.mkdir(parents=True, exist_ok=True)
         rows: List[Dict] = []
         for i, c in enumerate(picked):
-            rgb = np.repeat(c.patch[..., None], 3, axis=2)
             rel_name = f"part_{i:03d}_U{ord(c.char):04X}.png"
             out_path = font_out / rel_name
-            Image.fromarray(rgb).save(out_path)
+            Image.fromarray(c.patch, mode="L").save(out_path)
             rows.append(
                 {
                     "path": rel_or_abs(out_path, root),

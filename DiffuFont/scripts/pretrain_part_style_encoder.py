@@ -39,7 +39,7 @@ class PartEncoderModule(nn.Module):
 
     def __init__(
         self,
-        in_channels: int = 3,
+        in_channels: int = 1,
         style_token_dim: int = 256,
         style_token_count: int = 8,
     ):
@@ -129,10 +129,10 @@ def load_part_bank(manifest_path: Path, root: Path) -> Dict[str, List[Path]]:
 
 
 def load_part_image(path: Path, patch_size: int) -> torch.Tensor:
-    img = Image.open(path).convert("RGB").resize((patch_size, patch_size), Image.BILINEAR)
+    img = Image.open(path).convert("L").resize((patch_size, patch_size), Image.BILINEAR)
     arr = np.asarray(img, dtype=np.float32) / 255.0
     arr = arr * 2.0 - 1.0  # match main training normalization range [-1, 1]
-    return torch.from_numpy(arr).permute(2, 0, 1).contiguous()
+    return torch.from_numpy(arr)[None, :, :].contiguous()  # (1, H, W)
 
 
 def sample_paths(paths: List[Path], n: int, rng: random.Random) -> Tuple[List[Path], List[float]]:
@@ -291,12 +291,12 @@ def main() -> None:
     parser.add_argument("--log-file", type=Path, default=Path("checkpoints/part_style_encoder_pretrain.log"))
     parser.add_argument("--metrics-jsonl", type=Path, default=Path("checkpoints/part_style_encoder_pretrain.metrics.jsonl"))
 
-    parser.add_argument("--steps", type=int, default=10000)
+    parser.add_argument("--steps", type=int, default=5000)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--min-set-size", type=int, default=1)
     parser.add_argument("--max-set-size", type=int, default=8)
     parser.add_argument("--warmup-max-set-size", type=int, default=4)
-    parser.add_argument("--warmup-steps", type=int, default=4000)
+    parser.add_argument("--warmup-steps", type=int, default=2000)
     parser.add_argument("--val-ratio", type=float, default=0.1)
     parser.add_argument("--val-batches", type=int, default=8)
     parser.add_argument(
@@ -305,7 +305,7 @@ def main() -> None:
         default="val_loss",
         choices=["val_loss", "val_acc", "train_loss", "train_acc"],
     )
-    parser.add_argument("--early-stop-patience", type=int, default=20, help="In units of log events. 0 disables early stop.")
+    parser.add_argument("--early-stop-patience", type=int, default=0, help="In units of log events. 0 disables early stop.")
     parser.add_argument("--early-stop-min-delta", type=float, default=1e-4)
 
     parser.add_argument("--patch-size", type=int, default=64)
@@ -381,7 +381,7 @@ def main() -> None:
     )
 
     encoder = PartEncoderModule(
-        in_channels=3,
+        in_channels=1,
         style_token_dim=args.style_token_dim,
         style_token_count=args.style_token_count,
     ).to(device)

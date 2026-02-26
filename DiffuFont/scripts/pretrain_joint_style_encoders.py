@@ -121,7 +121,7 @@ def load_glyph_image(env: lmdb.Environment, font_name: str, ch: str, transform) 
         b = txn.get(key)
     if b is None:
         raise KeyError(f"Missing glyph in lmdb: {font_name}@{ch}")
-    img = Image.open(io.BytesIO(b)).convert("RGB")
+    img = Image.open(io.BytesIO(b)).convert("L")
     return transform(img)
 
 
@@ -264,7 +264,7 @@ def main() -> None:
     ])
 
     e_p = FontClassifier(
-        in_channels=3,
+        in_channels=1,
         num_fonts=len(usable_fonts),
         backbone=args.backbone,
     ).to(device)

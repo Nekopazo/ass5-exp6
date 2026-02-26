@@ -278,18 +278,22 @@ class DiffusionTrainer:
                     part_mask = part_mask.clone()
                     part_mask[cfg_mask] = 0.0
 
+        # Convert pixel → latent BEFORE adding noise (no grad needed for PixelUnshuffle).
+        with torch.no_grad():
+            x0_latent = self.model.encode_to_latent(x0)     # (B,3,256,256) → (B,12,128,128)
+
         with torch.autocast(
             device_type=self.device.type,
             dtype=self.amp_dtype,
             enabled=self.use_amp,
         ):
-            x_t, eps = self.scheduler.add_noise(x0, t)
-            eps_hat = self.model(
-                x_t, t, content,
+            x_t_latent, eps_latent = self.scheduler.add_noise(x0_latent, t)
+            eps_hat_latent = self.model(
+                x_t_latent, t, content,
                 part_imgs=part_imgs,
                 part_mask=part_mask,
             )
-            loss_mse = F.mse_loss(eps_hat, eps)
+            loss_mse = F.mse_loss(eps_hat_latent, eps_latent)
             loss_nce = self._compute_nce(batch)
 
             loss = (
@@ -398,8 +402,9 @@ class DiffusionTrainer:
         part_imgs: torch.Tensor | None = None,
         part_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Sample in **latent** space, return **pixel**-space result."""
         self.model.eval()
-        bsz, ch, h, w = content_img.shape
+        bsz = content_img.shape[0]
         device = self.device
 
         content_img = content_img.to(device)
@@ -407,6 +412,11 @@ class DiffusionTrainer:
             part_imgs = part_imgs.to(device)
         if part_mask is not None:
             part_mask = part_mask.to(device)
+
+        # Latent dimensions
+        latent_ch = self.model.unet_in_channels   # 12
+        latent_h = self.model.unet_input_size      # 128
+        latent_w = self.model.unet_input_size      # 128
 
         dpm = DPMSolverMultistepScheduler(
             num_train_timesteps=int(self.diffusion_steps),
@@ -417,7 +427,8 @@ class DiffusionTrainer:
         )
         dpm.set_timesteps(int(num_inference_steps), device=device)
 
-        x_t = torch.randn((bsz, ch, h, w), device=device, dtype=content_img.dtype)
+        # Start from pure noise in latent space
+        x_t = torch.randn((bsz, latent_ch, latent_h, latent_w), device=device, dtype=content_img.dtype)
 
         if use_cfg:
             uncond_content = torch.ones_like(content_img)
@@ -440,7 +451,8 @@ class DiffusionTrainer:
                 eps_hat = eps_cond
             x_t = dpm.step(eps_hat, t, x_t).prev_sample
 
-        return x_t.clamp(-1, 1)
+        # Decode latent → pixel
+        return self.model.decode_from_latent(x_t).clamp(-1, 1)
 
     # ------------------------------------------------------------------ #
     #  Checkpoint
@@ -581,6 +593,9 @@ class DiffusionTrainer:
         vis = torch.cat([(content + 1) / 2, (target + 1) / 2, (sample + 1) / 2], dim=0)
         filename = f"sample_ep{self.current_epoch}_gstep{self.global_step}_estep{self.local_step}.png"
         save_image(vis, out_dir / filename, nrow=content.size(0))
+        # Free CUDA cache fragmented by the inference-mode scheduler
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
 
 
 # ====================================================================== # #
@@ -640,11 +655,15 @@ class FlowMatchingTrainer(DiffusionTrainer):
         part_mask = batch["part_mask"].to(self.device) if "part_mask" in batch else None
         b = x0.size(0)
 
-        # Linear path: x_t = (1-t) x0 + t x1,  v* = x1 - x0.
-        t = torch.rand((b,), device=self.device, dtype=x0.dtype)
-        x1 = torch.randn_like(x0)
-        x_t = (1.0 - t.view(-1, 1, 1, 1)) * x0 + t.view(-1, 1, 1, 1) * x1
-        v_target = x1 - x0
+        # Convert pixel → latent
+        with torch.no_grad():
+            x0_latent = self.model.encode_to_latent(x0)  # (B,3,256,256) → (B,12,128,128)
+
+        # Linear path in latent space: x_t = (1-t) x0_l + t x1_l,  v* = x1_l - x0_l.
+        t = torch.rand((b,), device=self.device, dtype=x0_latent.dtype)
+        x1_latent = torch.randn_like(x0_latent)
+        x_t_latent = (1.0 - t.view(-1, 1, 1, 1)) * x0_latent + t.view(-1, 1, 1, 1) * x1_latent
+        v_target = x1_latent - x0_latent
         t_idx = (t * float(self.diffusion_steps - 1)).round().long()
 
         # CFG dropout — null ALL conditions.
@@ -665,7 +684,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
             enabled=self.use_amp,
         ):
             v_hat = self.model(
-                x_t, t_idx, content,
+                x_t_latent, t_idx, content,
                 part_imgs=part_imgs, part_mask=part_mask,
             )
             loss_fm = F.mse_loss(v_hat, v_target)
@@ -785,7 +804,12 @@ class FlowMatchingTrainer(DiffusionTrainer):
         else:
             uncond_content = None
 
-        x_t = torch.randn(b, ch, h, w, device=device)
+        # Latent dimensions
+        latent_ch = self.model.unet_in_channels
+        latent_h = self.model.unet_input_size
+        latent_w = self.model.unet_input_size
+
+        x_t = torch.randn(b, latent_ch, latent_h, latent_w, device=device)
         n_steps = max(2, int(c))
         dt = 1.0 / float(n_steps - 1)
 
@@ -806,7 +830,8 @@ class FlowMatchingTrainer(DiffusionTrainer):
             else:
                 v_hat = v_cond
             x_t = x_t - dt * v_hat
-        return x_t.clamp(-1, 1)
+        # Decode latent → pixel
+        return self.model.decode_from_latent(x_t).clamp(-1, 1)
 
     @torch.no_grad()
     def sample_and_save(self, batch: Dict[str, torch.Tensor], out_dir: Path, steps: int = 50):
@@ -836,3 +861,6 @@ class FlowMatchingTrainer(DiffusionTrainer):
         vis = torch.cat([(content + 1) / 2, (target + 1) / 2, (sample + 1) / 2], dim=0)
         filename = f"sample_ep{self.current_epoch}_gstep{self.global_step}_estep{self.local_step}.png"
         save_image(vis, out_dir / filename, nrow=content.size(0))
+        # Free CUDA cache fragmented by the inference-mode scheduler
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()

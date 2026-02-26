@@ -71,8 +71,8 @@ while true; do
     --cfg-drop-prob 0.1 \
     --pretrained-part-encoder checkpoints/part_style_encoder_pretrain_best.pt \
     --num-workers 0 \
-    --part-image-cache-size 20000 \
-    --lmdb-decode-cache-size 50000 \
+    --part-image-cache-size 2000 \
+    --lmdb-decode-cache-size 0 \
     --sample-every-steps 300 \
     --sample-inference-steps 20 \
     --log-every-steps 100 \
