@@ -5,6 +5,7 @@ ROOT="DiffuFont/"
 
 export PYTHONUNBUFFERED=1
 
+pip install lmdb
 echo "=========================================="
 echo "[pipeline] Step 1: Render ContentFont (grayscale)"
 echo "=========================================="
