@@ -1,13 +1,10 @@
-name: Run Python and Commit Output
+name: Run Python and Upload LMDB Artifacts
 
 on:
   workflow_dispatch:
 
-permissions:
-  contents: write   # 允许 GITHUB_TOKEN push
-
 jobs:
-  run-and-commit:
+  run-and-upload:
     runs-on: ubuntu-latest
 
     steps:
@@ -19,23 +16,35 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Run script (generate artifacts)
+      - name: Install deps
+        run: |
+          pip install lmdb pillow opencv-python fonttools
+
+      - name: Run pipeline
         run: |
           bash DiffuFont/1.sh
-          ls -la
+          ls -la DiffuFont/DataPreparation/LMDB || true
 
-      - name: Commit & push changes
+      # 1) 打包 LMDB（注意：LMDB 往往是目录）
+      - name: Pack LMDB outputs
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          sudo apt-get update
+          sudo apt-get install -y zstd
 
-          git add -A
+          mkdir -p artifacts
+          tar -C DiffuFont -cf - DataPreparation/LMDB | zstd -T0 -19 -o artifacts/LMDB.tar.zst
 
-          # 如果没有改动就直接退出，避免失败
-          if git diff --cached --quiet; then
-            echo "No changes to commit."
-            exit 0
+          # 可选：也单独打包 PartBank 之类
+          if [ -d "DiffuFont/DataPreparation/PartBank" ]; then
+            tar -C DiffuFont -cf - DataPreparation/PartBank | zstd -T0 -19 -o artifacts/PartBank.tar.zst
           fi
 
-          git commit -m "Update artifacts (manual run)"
-          git push
+          ls -lh artifacts
+
+      # 2) 上传到 Actions Artifacts（不会进 git）
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: diffufont-lmdb
+          path: artifacts/*
+          retention-days: 7
