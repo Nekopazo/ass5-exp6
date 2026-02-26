@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-set -euo pipefail
 
 # Full data pipeline: render grayscale → LMDB → PartBank → PartBank LMDB → pretrain
 ROOT="DiffuFont/"
