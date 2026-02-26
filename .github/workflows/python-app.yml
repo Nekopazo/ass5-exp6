@@ -1,20 +1,41 @@
-name: Run Python Manually
+name: Run Python and Commit Output
 
 on:
-  workflow_dispatch:   # 手动触发
+  workflow_dispatch:
+
+permissions:
+  contents: write   # 允许 GITHUB_TOKEN push
 
 jobs:
-  run:
+  run-and-commit:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 拉代码
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 安装 Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-      - name: 执行 Python
-        run: python main.py
+      - name: Run script (generate artifacts)
+        run: |
+          python DiffuFont/1.py
+          ls -la
+
+      - name: Commit & push changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+
+          # 如果没有改动就直接退出，避免失败
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Update artifacts (manual run)"
+          git push
