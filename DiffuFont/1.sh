@@ -5,7 +5,7 @@ ROOT="DiffuFont/"
 
 export PYTHONUNBUFFERED=1
 
-pip install lmdb pillow opencv-python
+pip install lmdb pillow opencv-python fonttools
 echo "=========================================="
 echo "[pipeline] Step 1: Render ContentFont (grayscale)"
 echo "=========================================="
