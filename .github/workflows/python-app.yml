@@ -1,10 +1,13 @@
-name: Run Python and Upload LMDB Artifacts
+name: Run pipeline and Upload LMDB (raw tar)
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  run-and-upload:
+  run-and-release:
     runs-on: ubuntu-latest
 
     steps:
@@ -20,31 +23,42 @@ jobs:
         run: |
           pip install lmdb pillow opencv-python fonttools
 
+      # ✅ 跑你的脚本
       - name: Run pipeline
         run: |
           bash DiffuFont/1.sh
-          ls -la DiffuFont/DataPreparation/LMDB || true
 
-      # 1) 打包 LMDB（注意：LMDB 往往是目录）
-      - name: Pack LMDB outputs
+      - name: Show outputs
         run: |
-          sudo apt-get update
-          sudo apt-get install -y zstd
+          find DiffuFont/DataPreparation -maxdepth 3 -type d -print || true
 
-          mkdir -p artifacts
-          tar -C DiffuFont -cf - DataPreparation/LMDB | zstd -T0 -19 -o artifacts/LMDB.tar.zst
+      # ✅ 打包 LMDB（不压缩）
+      - name: Pack LMDB (raw tar)
+        run: |
+          mkdir -p release_files
 
-          # 可选：也单独打包 PartBank 之类
+          tar -cvf release_files/LMDB.tar DiffuFont/DataPreparation/LMDB
+
           if [ -d "DiffuFont/DataPreparation/PartBank" ]; then
-            tar -C DiffuFont -cf - DataPreparation/PartBank | zstd -T0 -19 -o artifacts/PartBank.tar.zst
+            tar -cvf release_files/PartBank.tar DiffuFont/DataPreparation/PartBank
           fi
 
-          ls -lh artifacts
+          ls -lh release_files
 
-      # 2) 上传到 Actions Artifacts（不会进 git）
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      # ✅ 生成 tag
+      - name: Prepare tag
+        id: tag
+        run: |
+          TAG="lmdb-$(date -u +'%Y%m%d-%H%M%S')"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      # ✅ 上传到 Release
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: diffufont-lmdb
-          path: artifacts/*
-          retention-days: 7
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          files: |
+            release_files/*.tar
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
