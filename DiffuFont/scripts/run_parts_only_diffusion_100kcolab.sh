@@ -66,6 +66,7 @@ while true; do
     --part-set-max 8 \
     --part-set-min 1 \
     --lambda-nce 0.05 \
+    --nce-warmup-steps 5000 \
     --cfg-drop-prob 0.1 \
     --pretrained-part-encoder checkpoints/part_style_encoder_pretrain_best.pt \
     --num-workers 0 \

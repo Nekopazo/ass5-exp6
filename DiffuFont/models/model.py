@@ -124,6 +124,7 @@ class DiffusionTrainer:
         lr: float = 2e-4,
         lambda_mse: float = 1.0,
         lambda_nce: float = 0.05,
+        nce_warmup_steps: int = 0,
         cfg_drop_prob: float = 0.1,
         T: int = 1000,
         total_steps: int = 100_000,
@@ -160,6 +161,7 @@ class DiffusionTrainer:
         self.scheduler = NoiseScheduler(self.diffusion_steps).to(device)
         self.lambda_mse = float(lambda_mse)
         self.lambda_nce = float(lambda_nce)
+        self.nce_warmup_steps = max(0, int(nce_warmup_steps))
         self.cfg_drop_prob = float(cfg_drop_prob)
         self.global_step = 0
         self.local_step = 0
@@ -303,6 +305,13 @@ class DiffusionTrainer:
         with self.step_log_file.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
+    @property
+    def effective_lambda_nce(self) -> float:
+        """Lambda_nce with linear warmup: 0 → lambda_nce over nce_warmup_steps steps."""
+        if self.nce_warmup_steps <= 0 or self.lambda_nce <= 0.0:
+            return self.lambda_nce
+        return self.lambda_nce * min(1.0, self.global_step / self.nce_warmup_steps)
+
     # ------------------------------------------------------------------ #
     #  InfoNCE on dual part-set views
     # ------------------------------------------------------------------ #
@@ -370,10 +379,11 @@ class DiffusionTrainer:
             )
             loss_mse = F.mse_loss(eps_hat_latent, eps_latent)
             loss_nce = self._compute_nce(batch)
+            eff_lnce = self.effective_lambda_nce
 
             loss = (
                 self.lambda_mse * loss_mse
-                + self.lambda_nce * loss_nce
+                + eff_lnce * loss_nce
             )
 
         did_update, grad_norm = self._do_optimizer_update(loss, grad_clip)
@@ -445,7 +455,7 @@ class DiffusionTrainer:
             msg = (
                 f"[step] gstep={self.global_step} ep={self.current_epoch} estep={self.local_step} "
                 f"loss={loss.item():.4f} mse={loss_mse.item():.4f} "
-                f"nce={loss_nce.item():.4f} "
+                f"nce={loss_nce.item():.4f} λnce={eff_lnce:.4f} "
                 f"cfg_drop={int(cfg_mask.sum().item())}/{int(B)} lr={self.lr_schedule.get_last_lr()[0]:.6e} "
                 f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s"
             )
@@ -689,6 +699,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
         lr: float = 2e-4,
         lambda_fm: float = 1.0,
         lambda_nce: float = 0.05,
+        nce_warmup_steps: int = 0,
         cfg_drop_prob: float = 0.1,
         T: int = 1000,
         total_steps: int = 100_000,
@@ -701,7 +712,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
     ):
         super().__init__(
             model=model, device=device, lr=lr,
-            lambda_mse=1.0, lambda_nce=lambda_nce,
+            lambda_mse=1.0, lambda_nce=lambda_nce, nce_warmup_steps=nce_warmup_steps,
             cfg_drop_prob=cfg_drop_prob, T=T, total_steps=total_steps,
             sample_every_steps=sample_every_steps, precision=precision,
             save_every_steps=save_every_steps, log_every_steps=log_every_steps,
@@ -767,10 +778,11 @@ class FlowMatchingTrainer(DiffusionTrainer):
             )
             loss_fm = F.mse_loss(v_hat, v_target)
             loss_nce = self._compute_nce(batch)
+            eff_lnce = self.effective_lambda_nce
 
             loss = (
                 self.lambda_fm * loss_fm
-                + self.lambda_nce * loss_nce
+                + eff_lnce * loss_nce
             )
 
         did_update, grad_norm = self._do_optimizer_update(loss, grad_clip)
@@ -836,7 +848,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
             msg = (
                 f"[fm-step] gstep={self.global_step} ep={self.current_epoch} estep={self.local_step} "
                 f"loss={loss.item():.4f} fm={loss_fm.item():.4f} "
-                f"nce={loss_nce.item():.4f} "
+                f"nce={loss_nce.item():.4f} λnce={eff_lnce:.4f} "
                 f"cfg_drop={int(cfg_mask.sum().item())}/{int(b)} lr={self.lr_schedule.get_last_lr()[0]:.6e} "
                 f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s"
             )

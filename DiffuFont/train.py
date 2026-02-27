@@ -161,6 +161,10 @@ def main() -> None:
     parser.add_argument("--lambda-fm", type=float, default=1.0)
     parser.add_argument("--lambda-diff", type=float, default=1.0)
     parser.add_argument("--lambda-nce", type=float, default=0.05)
+    parser.add_argument(
+        "--nce-warmup-steps", type=int, default=5000,
+        help="Linearly ramp lambda_nce from 0 to its target over this many steps (0 = no warmup).",
+    )
     parser.add_argument("--cfg-drop-prob", type=float, default=0.1)
     parser.add_argument("--diffusion-steps", type=int, default=1000)
     parser.add_argument(
@@ -309,6 +313,7 @@ def main() -> None:
     trainer_kwargs: Dict[str, Any] = {
         "lr": args.lr,
         "lambda_nce": args.lambda_nce,
+        "nce_warmup_steps": args.nce_warmup_steps,
         "cfg_drop_prob": args.cfg_drop_prob,
         "T": args.diffusion_steps,
         "total_steps": total_steps,

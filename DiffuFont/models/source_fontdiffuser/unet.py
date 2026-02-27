@@ -219,9 +219,10 @@ class UNet(ModelMixin, ConfigMixin):
             ):
                 block.set_attention_slice(slice_size)
 
-    def _set_gradient_checkpointing(self, module, value=False):
-        if isinstance(module, (DownBlock2D, UpBlock2D)):
-            module.gradient_checkpointing = value
+    def _set_gradient_checkpointing(self, enable: bool = True, gradient_checkpointing_func=None):
+        for module in self.modules():
+            if isinstance(module, (DownBlock2D, UpBlock2D)):
+                module.gradient_checkpointing = enable
 
     def forward(
         self,
