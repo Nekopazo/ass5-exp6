@@ -16,6 +16,11 @@ from .source_fontdiffuser import ContentEncoder, UNet
 
 
 class SourcePartRefUNet(nn.Module):
+    _MODE_ALIASES = {
+        "parts_vector_only": "part_only",
+    }
+    _VALID_MODES = {"baseline", "part_only", "style_only", "part_style"}
+
     def __init__(
         self,
         in_channels: int = 1,
@@ -43,13 +48,7 @@ class SourcePartRefUNet(nn.Module):
         if self.style_token_count <= 0 or self.style_token_dim <= 0:
             raise ValueError("style_token_count and style_token_dim must be > 0")
 
-        profile = str(conditioning_profile).strip().lower()
-        if profile not in {"baseline", "parts_vector_only"}:
-            raise ValueError(
-                "conditioning_profile must be one of: baseline, parts_vector_only"
-            )
-        self.conditioning_profile = profile
-        self.enable_parts_vector_condition = profile == "parts_vector_only"
+        self.conditioning_profile = self._normalize_conditioning_mode(conditioning_profile)
 
         # Content encoder runs on 256 and we explicitly pick c128/c64/c32/c16 for UNet down blocks.
         self.content_encoder = ContentEncoder(
@@ -81,6 +80,34 @@ class SourcePartRefUNet(nn.Module):
             nn.SiLU(inplace=True),
             nn.Linear(self.style_token_dim * 4, self.style_token_count * self.style_token_dim),
         )
+        # Style image encoder -> tokens (same token geometry as part tokens).
+        self.style_img_encoder = nn.Sequential(
+            nn.Conv2d(self.in_channels, 64, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.SiLU(inplace=True),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(256, self.style_token_dim),
+        )
+        self.style_img_norm = nn.LayerNorm(self.style_token_dim)
+        self.style_img_token_mlp = nn.Sequential(
+            nn.Linear(self.style_token_dim, self.style_token_dim * 4),
+            nn.SiLU(inplace=True),
+            nn.Linear(self.style_token_dim * 4, self.style_token_count * self.style_token_dim),
+        )
+        # Gate controls how much part tokens are injected into style tokens.
+        self.style_part_gate = nn.Sequential(
+            nn.Linear(self.style_token_dim * 2 + 1, self.style_token_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(self.style_token_dim, 1),
+        )
+        self.style_part_fuse_norm = nn.LayerNorm(self.style_token_dim)
         # Contrastive projection head: tokens -> mean -> LN -> MLP -> L2 norm
         self.contrastive_head = nn.Sequential(
             nn.LayerNorm(self.style_token_dim),
@@ -113,6 +140,17 @@ class SourcePartRefUNet(nn.Module):
             attn_scales=attn_scales,
             mid_enable_content_attn=False,
         )
+
+    @classmethod
+    def _normalize_conditioning_mode(cls, mode: str) -> str:
+        m = str(mode).strip().lower()
+        m = cls._MODE_ALIASES.get(m, m)
+        if m not in cls._VALID_MODES:
+            raise ValueError(
+                f"conditioning mode must be one of: {sorted(cls._VALID_MODES)} "
+                f"(aliases: {sorted(cls._MODE_ALIASES.keys())}), got '{mode}'"
+            )
+        return m
 
     def load_part_vector_pretrained(self, ckpt_path: str) -> None:
         """Optional warm-start for the part encoder/token MLP branch."""
@@ -170,9 +208,42 @@ class SourcePartRefUNet(nn.Module):
         part_imgs: torch.Tensor,
         part_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        if not self.enable_parts_vector_condition:
-            raise RuntimeError("encode_part_vector is unavailable when parts_vector conditioning is disabled.")
         return self._part_vector(part_imgs, part_mask)
+
+    def encode_part_tokens(
+        self,
+        part_imgs: torch.Tensor,
+        part_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        return self._parts_vector_hidden_states(part_imgs, part_mask)
+
+    def encode_style_tokens(self, style_img: torch.Tensor) -> torch.Tensor:
+        self._check_hw(style_img, "style_img")
+        b, c, _, _ = style_img.shape
+        if c != self.in_channels:
+            raise ValueError(f"style_img channels mismatch: got {c}, expected {self.in_channels}")
+        style_vec = self.style_img_encoder(style_img).view(b, self.style_token_dim)
+        style_vec = self.style_img_norm(style_vec)
+        tokens = self.style_img_token_mlp(style_vec)
+        return tokens.view(b, self.style_token_count, self.style_token_dim)
+
+    def _fuse_style_part_tokens(
+        self,
+        style_tokens: torch.Tensor,
+        part_tokens: torch.Tensor,
+        has_parts: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        b = int(style_tokens.shape[0])
+        style_pool = style_tokens.mean(dim=1)
+        part_pool = part_tokens.mean(dim=1)
+        if has_parts is None:
+            has = torch.ones((b, 1), dtype=style_tokens.dtype, device=style_tokens.device)
+        else:
+            has = has_parts.to(device=style_tokens.device, dtype=style_tokens.dtype).view(b, 1)
+        gate_in = torch.cat([style_pool, part_pool, has], dim=1)
+        gate = torch.sigmoid(self.style_part_gate(gate_in)).view(b, 1, 1) * has.view(b, 1, 1)
+        fused = style_tokens + gate * part_tokens
+        return self.style_part_fuse_norm(fused)
 
     def encode_contrastive_z(
         self,
@@ -213,6 +284,43 @@ class SourcePartRefUNet(nn.Module):
             content_residual_features[4],
         ]
 
+    def _resolve_style_hidden_states(
+        self,
+        mode: str,
+        style_img: Optional[torch.Tensor],
+        part_imgs: Optional[torch.Tensor],
+        part_mask: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
+        mode_norm = self._normalize_conditioning_mode(mode)
+
+        style_tokens: Optional[torch.Tensor] = None
+        part_tokens: Optional[torch.Tensor] = None
+        has_parts: Optional[torch.Tensor] = None
+
+        if style_img is not None:
+            style_tokens = self.encode_style_tokens(style_img)
+        if part_imgs is not None:
+            part_tokens = self._parts_vector_hidden_states(part_imgs, part_mask)
+            if part_mask is None:
+                b = int(part_imgs.shape[0])
+                has_parts = torch.ones((b,), device=part_imgs.device, dtype=part_imgs.dtype)
+            else:
+                has_parts = (part_mask.to(device=part_imgs.device) > 0).any(dim=1).to(dtype=part_imgs.dtype)
+
+        if mode_norm == "baseline":
+            return None
+        if mode_norm == "part_only":
+            return part_tokens
+        if mode_norm == "style_only":
+            return style_tokens
+        if mode_norm == "part_style":
+            if style_tokens is None:
+                return part_tokens
+            if part_tokens is None:
+                return style_tokens
+            return self._fuse_style_part_tokens(style_tokens, part_tokens, has_parts=has_parts)
+        return None
+
     # ------------------------------------------------------------------ #
     #  Pixel ↔ Latent helpers (used by Trainer, NOT inside forward)
     # ------------------------------------------------------------------ #
@@ -233,8 +341,10 @@ class SourcePartRefUNet(nn.Module):
         x_t_latent: torch.Tensor,
         t: torch.Tensor,
         content_img: torch.Tensor,
+        style_img: Optional[torch.Tensor] = None,
         part_imgs: Optional[torch.Tensor] = None,
         part_mask: Optional[torch.Tensor] = None,
+        condition_mode: Optional[str] = None,
     ) -> torch.Tensor:
         """Predict noise (or velocity) at 128×128.
 
@@ -242,28 +352,21 @@ class SourcePartRefUNet(nn.Module):
             x_t_latent: noisy image (B, 1, 128, 128) — resized from 256.
             t:          timestep indices (B,).
             content_img: pixel-space content glyph (B, 1, 256, 256).
+            style_img:  style reference image (B, 1, 256, 256) or None.
             part_imgs:  part images (B, P, 1, 64, 64) or None.
             part_mask:  (B, P) or None.
+            condition_mode: one of baseline/part_only/style_only/part_style.
 
         Returns:
             eps_hat / v_hat (B, 1, 128, 128).
         """
         self._check_hw(content_img, "content_img")
+        if style_img is not None:
+            self._check_hw(style_img, "style_img")
 
         content_residual_features = self._content_features_for_unet(content_img)
-
-        style_hidden_states = None
-        if self.enable_parts_vector_condition:
-            if part_imgs is not None:
-                style_hidden_states = self._parts_vector_hidden_states(part_imgs, part_mask)
-            else:
-                b = int(x_t_latent.shape[0])
-                dummy_parts = torch.zeros(
-                    b, 1, self.in_channels, 64, 64,
-                    device=x_t_latent.device, dtype=x_t_latent.dtype,
-                )
-                dummy_mask = torch.zeros(b, 1, device=x_t_latent.device, dtype=x_t_latent.dtype)
-                style_hidden_states = self._parts_vector_hidden_states(dummy_parts, dummy_mask)
+        mode = self.conditioning_profile if condition_mode is None else self._normalize_conditioning_mode(condition_mode)
+        style_hidden_states = self._resolve_style_hidden_states(mode, style_img, part_imgs, part_mask)
 
         encoder_hidden_states = [
             None,

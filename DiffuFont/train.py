@@ -6,11 +6,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 from pathlib import Path
 from typing import Any, Dict
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from torchvision import transforms as T
@@ -44,19 +46,34 @@ def _try_enable_gradient_checkpointing(model: SourcePartRefUNet) -> bool:
 
 def collate_fn(samples) -> Dict[str, torch.Tensor]:
     contents, targets = [], []
+    style_imgs = []
+    has_style = False
     parts_list, part_masks = [], []
     parts_list_b, part_masks_b = [], []
+    has_parts_flags = []
 
-    for s in samples:
+    # Track which sample indices have parts so we can align with full batch.
+    parts_indices = []
+    parts_b_indices = []
+
+    for si, s in enumerate(samples):
         contents.append(s["content"])
         targets.append(s["input"])
+        has_parts_flags.append(float(s.get("has_parts", 1.0 if "parts" in s else 0.0)))
+        if "style_img" in s:
+            has_style = True
+            style_imgs.append(s["style_img"])
 
         if "parts" in s:
             parts_list.append(s["parts"])
             part_masks.append(s.get("part_mask", torch.ones((s["parts"].size(0),), dtype=torch.float32)))
+            parts_indices.append(si)
         if "parts_b" in s:
             parts_list_b.append(s["parts_b"])
             part_masks_b.append(s.get("part_mask_b", torch.ones((s["parts_b"].size(0),), dtype=torch.float32)))
+            parts_b_indices.append(si)
+
+    n_samples = len(samples)
 
     # Build per-batch integer font IDs for InfoNCE.
     font_names = [s["font"] for s in samples]
@@ -68,35 +85,68 @@ def collate_fn(samples) -> Dict[str, torch.Tensor]:
         "content": torch.stack(contents),
         "target": torch.stack(targets),
         "font_ids": font_ids,
+        "has_parts": torch.tensor(has_parts_flags, dtype=torch.float32),
     }
+    if has_style and len(style_imgs) != len(samples):
+        raise ValueError(
+            f"Inconsistent style_img presence in batch: got {len(style_imgs)}/{len(samples)} samples."
+        )
+    if has_style and len(style_imgs) == len(samples):
+        batch["style_img"] = torch.stack(style_imgs)
 
-    def _pad_parts(plist, mlist):
+    def _pad_parts(plist, mlist, indices):
+        """Pad part tensors to a uniform batch, filling missing samples with zeros.
+
+        plist/mlist may be shorter than batch size when only some samples have
+        parts. `indices` maps each element back to its position in the batch.
+        """
         max_parts = max(int(x.size(0)) for x in plist)
         c = int(plist[0].size(1))
         h = int(plist[0].size(2))
         w = int(plist[0].size(3))
-        parts = torch.zeros((len(plist), max_parts, c, h, w), dtype=plist[0].dtype)
-        mask = torch.zeros((len(plist), max_parts), dtype=torch.float32)
+        parts = torch.zeros((n_samples, max_parts, c, h, w), dtype=plist[0].dtype)
+        mask = torch.zeros((n_samples, max_parts), dtype=torch.float32)
 
-        for i, p in enumerate(plist):
+        for j, p in enumerate(plist):
+            bi = indices[j]  # actual batch index
             n = int(p.size(0))
-            parts[i, :n] = p
-            m = mlist[i]
+            parts[bi, :n] = p
+            m = mlist[j]
             if m.dim() == 1 and m.size(0) == n:
-                mask[i, :n] = m.float()
+                mask[bi, :n] = m.float()
             else:
-                mask[i, :n] = 1.0
+                mask[bi, :n] = 1.0
         return parts, mask
 
     if parts_list:
-        parts, mask = _pad_parts(parts_list, part_masks)
+        parts, mask = _pad_parts(parts_list, part_masks, parts_indices)
         batch["parts"] = parts
         batch["part_mask"] = mask
     if parts_list_b:
-        parts_b, mask_b = _pad_parts(parts_list_b, part_masks_b)
+        parts_b, mask_b = _pad_parts(parts_list_b, part_masks_b, parts_b_indices)
         batch["parts_b"] = parts_b
         batch["part_mask_b"] = mask_b
     return batch
+
+
+def normalize_conditioning_mode(raw_mode: str) -> str:
+    mode = str(raw_mode).strip().lower()
+    alias = {
+        "parts_vector_only": "part_only",
+    }
+    mode = alias.get(mode, mode)
+    valid = {"baseline", "part_only", "style_only", "part_style"}
+    if mode not in valid:
+        raise ValueError(f"conditioning mode must be one of {sorted(valid)}, got '{raw_mode}'")
+    return mode
+
+
+def mode_uses_parts(mode: str) -> bool:
+    return normalize_conditioning_mode(mode) in {"part_only", "part_style"}
+
+
+def mode_uses_style(mode: str) -> bool:
+    return normalize_conditioning_mode(mode) in {"style_only", "part_style"}
 
 
 def resolve_device(device_arg: str) -> torch.device:
@@ -145,6 +195,22 @@ def _parse_int_csv(raw: str | None) -> tuple[int, ...] | None:
     return tuple(vals)
 
 
+def set_global_seed(seed: int) -> None:
+    s = int(seed)
+    random.seed(s)
+    np.random.seed(s)
+    torch.manual_seed(s)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(s)
+
+
+def _seed_worker(worker_id: int) -> None:
+    # Derive per-worker seed from torch initial seed for reproducibility.
+    ws = torch.initial_seed() % 2**32
+    random.seed(ws)
+    np.random.seed(ws)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-root", type=Path, default=Path("."))
@@ -175,13 +241,22 @@ def main() -> None:
     )
 
     parser.add_argument("--max-fonts", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--stage", type=str, default="teacher", choices=["teacher", "student"])
+    parser.add_argument(
+        "--teacher-line",
+        type=str,
+        default="part_style",
+        choices=["baseline", "part_only", "style_only", "part_style"],
+        help="Stage-A line for teacher training.",
+    )
 
     parser.add_argument(
         "--conditioning-profile",
         type=str,
-        default="parts_vector_only",
-        choices=["baseline", "parts_vector_only"],
-        help="baseline=no parts_vector; parts_vector_only=parts_vector conditioning on.",
+        default=None,
+        choices=["baseline", "parts_vector_only", "part_only", "style_only", "part_style"],
+        help="Legacy alias; if set it overrides --teacher-line in teacher stage.",
     )
     parser.add_argument(
         "--attn-scales",
@@ -220,25 +295,60 @@ def main() -> None:
         "--pretrained-part-encoder", type=str, default=None,
         help="Path to pretrained part encoder checkpoint from pretrain_part_style_encoder.py.",
     )
+    parser.add_argument("--part-drop-prob", type=float, default=0.0)
+    parser.add_argument("--lambda-cons", type=float, default=0.0)
+    parser.add_argument("--lambda-kd", type=float, default=0.0)
+    parser.add_argument("--teacher-ckpt", type=str, default=None)
+    parser.add_argument(
+        "--teacher-distill-mode",
+        type=str,
+        default="part_style",
+        choices=["baseline", "part_only", "style_only", "part_style"],
+        help="Teacher conditioning mode used to generate KD targets in student stage.",
+    )
     args = parser.parse_args()
 
     if args.part_set_min > args.part_set_max:
         raise ValueError(
             f"--part-set-min ({args.part_set_min}) must be <= --part-set-max ({args.part_set_max})"
         )
-    profile = str(args.conditioning_profile).strip().lower()
-    enable_parts_vector = profile == "parts_vector_only"
-    use_part_bank = bool(enable_parts_vector)
+    stage = str(args.stage).strip().lower()
+    if stage not in {"teacher", "student"}:
+        raise ValueError(f"Unsupported --stage: {stage}")
+
+    teacher_mode = normalize_conditioning_mode(
+        args.conditioning_profile if args.conditioning_profile is not None else args.teacher_line
+    )
+    student_mode = "style_only"
+    teacher_distill_mode = normalize_conditioning_mode(args.teacher_distill_mode)
+
+    if stage == "teacher":
+        active_mode = teacher_mode
+        use_part_bank = mode_uses_parts(active_mode)
+        use_style_image = mode_uses_style(active_mode)
+    else:
+        active_mode = student_mode
+        use_part_bank = mode_uses_parts(teacher_distill_mode)
+        use_style_image = True
+        if not args.teacher_ckpt:
+            raise ValueError("--teacher-ckpt is required when --stage student")
+
     attn_scales = _parse_int_csv(args.attn_scales)
 
+    set_global_seed(int(args.seed))
     device = resolve_device(args.device)
-    print(f"[train] device={device} precision={args.precision}")
+    print(f"[train] device={device} precision={args.precision} seed={int(args.seed)}")
 
     run_cfg: Dict[str, Any] = {k: _to_jsonable(v) for k, v in vars(args).items()}
     run_cfg.update(
         {
-            "enable_parts_vector_condition": bool(enable_parts_vector),
+            "stage": stage,
+            "active_conditioning_mode": active_mode,
+            "teacher_mode": teacher_mode,
+            "student_mode": student_mode,
+            "teacher_distill_mode": teacher_distill_mode,
             "use_part_bank": bool(use_part_bank),
+            "use_style_image": bool(use_style_image),
         }
     )
     transform = T.Compose([
@@ -249,6 +359,8 @@ def main() -> None:
     dataset = FontImageDataset(
         project_root=args.data_root,
         max_fonts=args.max_fonts,
+        use_style_image=bool(use_style_image),
+        enforce_part_bank_font_match=True,
         use_part_bank=bool(use_part_bank),
         part_bank_manifest=args.part_bank_manifest,
         part_bank_lmdb=args.part_bank_lmdb,
@@ -257,8 +369,12 @@ def main() -> None:
         part_image_size=args.part_image_size,
         part_image_cache_size=args.part_image_cache_size,
         lmdb_decode_cache_size=args.lmdb_decode_cache_size,
+        random_seed=int(args.seed),
         transform=transform,
     )
+
+    loader_gen = torch.Generator()
+    loader_gen.manual_seed(int(args.seed))
 
     loader_kwargs: Dict[str, Any] = {
         "dataset": dataset,
@@ -267,7 +383,10 @@ def main() -> None:
         "num_workers": int(args.num_workers),
         "pin_memory": True,
         "collate_fn": collate_fn,
+        "generator": loader_gen,
     }
+    if int(args.num_workers) > 0:
+        loader_kwargs["worker_init_fn"] = _seed_worker
     if int(args.num_workers) > 0 and int(args.prefetch_factor) > 0:
         loader_kwargs["prefetch_factor"] = int(args.prefetch_factor)
     loader = DataLoader(**loader_kwargs)
@@ -276,12 +395,15 @@ def main() -> None:
     if total_train_steps <= 0:
         raise ValueError(f"Invalid steps: steps_per_epoch={steps_per_epoch}, epochs={args.epochs}")
 
-    total_steps = args.total_steps if args.total_steps > 0 else total_train_steps
+    # OneCycleLR counts optimizer steps, not mini-batch steps.
+    # With gradient accumulation, optimizer steps = batches / grad_accum.
+    effective_train_steps = total_train_steps // max(1, int(args.grad_accum))
+    total_steps = args.total_steps if args.total_steps > 0 else effective_train_steps
     print(
         "[train] "
-        f"conditioning_profile={args.conditioning_profile} "
+        f"stage={stage} mode={active_mode} distill_teacher_mode={teacher_distill_mode} "
         f"attn_scales={attn_scales} "
-        f"steps_per_epoch={steps_per_epoch} total_steps={total_steps}"
+        f"steps_per_epoch={steps_per_epoch} total_steps={total_steps} grad_accum={args.grad_accum}"
     )
 
     model = SourcePartRefUNet(
@@ -292,7 +414,7 @@ def main() -> None:
         unet_channels=(64, 128, 256, 512),
         content_encoder_downsample_size=4,
         channel_attn=True,
-        conditioning_profile=args.conditioning_profile,
+        conditioning_profile=active_mode,
         attn_scales=attn_scales,
         style_token_count=int(args.style_token_count),
         style_token_dim=int(args.style_token_dim),
@@ -310,9 +432,39 @@ def main() -> None:
         print(f"  loaded={len(loaded_keys)} missing={len(missing)} unexpected={len(unexpected)}")
 
     trainer_cls = DiffusionTrainer if args.trainer == "diffusion" else FlowMatchingTrainer
+    teacher_for_distill = None
+    if stage == "student":
+        teacher_model = SourcePartRefUNet(
+            in_channels=1,
+            image_size=args.image_size,
+            content_start_channel=64,
+            style_start_channel=64,
+            unet_channels=(64, 128, 256, 512),
+            content_encoder_downsample_size=4,
+            channel_attn=True,
+            conditioning_profile=teacher_distill_mode,
+            attn_scales=attn_scales,
+            style_token_count=int(args.style_token_count),
+            style_token_dim=int(args.style_token_dim),
+        )
+        ckpt = torch.load(args.teacher_ckpt, map_location="cpu")
+        if isinstance(ckpt, dict):
+            if "model_state" in ckpt:
+                teacher_state = ckpt["model_state"]
+            elif "state_dict" in ckpt:
+                teacher_state = ckpt["state_dict"]
+            else:
+                teacher_state = ckpt
+        else:
+            teacher_state = ckpt
+        teacher_model.load_state_dict(teacher_state, strict=True)
+        print(f"[train] loaded teacher ckpt={args.teacher_ckpt} (strict=True)")
+        teacher_for_distill = teacher_model
+
+    eff_lambda_nce = float(args.lambda_nce if stage == "teacher" else 0.0)
     trainer_kwargs: Dict[str, Any] = {
         "lr": args.lr,
-        "lambda_nce": args.lambda_nce,
+        "lambda_nce": eff_lambda_nce,
         "nce_warmup_steps": args.nce_warmup_steps,
         "cfg_drop_prob": args.cfg_drop_prob,
         "T": args.diffusion_steps,
@@ -322,6 +474,12 @@ def main() -> None:
         "log_every_steps": (args.log_every_steps if args.log_every_steps > 0 else None),
         "detailed_log": args.detailed_log,
         "grad_accum_steps": max(1, int(args.grad_accum)),
+        "conditioning_mode": active_mode,
+        "part_drop_prob": float(args.part_drop_prob),
+        "lambda_cons": float(args.lambda_cons),
+        "lambda_kd": float(args.lambda_kd if stage == "student" else 0.0),
+        "teacher_model": teacher_for_distill,
+        "teacher_conditioning_mode": teacher_distill_mode,
     }
     if args.trainer == "flow_matching":
         trainer_kwargs["lambda_fm"] = args.lambda_fm

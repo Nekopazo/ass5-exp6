@@ -42,7 +42,6 @@ class NoiseScheduler:
         betas = torch.linspace(beta_start, beta_end, self.T)
         alphas = 1.0 - betas
         alpha_bars = torch.cumprod(alphas, dim=0)
-        self._buf = {}
         for name, t in [
             ("betas", betas),
             ("alpha_bars", alpha_bars),
@@ -134,9 +133,25 @@ class DiffusionTrainer:
         log_every_steps: int | None = None,
         detailed_log: bool = True,
         grad_accum_steps: int = 1,
+        conditioning_mode: str = "part_only",
+        part_drop_prob: float = 0.0,
+        lambda_cons: float = 0.0,
+        lambda_kd: float = 0.0,
+        teacher_model: nn.Module | None = None,
+        teacher_conditioning_mode: str = "part_style",
     ):
         self.device = device
         self.model = model.to(device)
+        self.conditioning_mode = str(conditioning_mode).strip().lower()
+        self.part_drop_prob = float(max(0.0, min(1.0, part_drop_prob)))
+        self.lambda_cons = float(max(0.0, lambda_cons))
+        self.lambda_kd = float(max(0.0, lambda_kd))
+        self.teacher_conditioning_mode = str(teacher_conditioning_mode).strip().lower()
+        self.teacher_model = teacher_model.to(device) if teacher_model is not None else None
+        if self.teacher_model is not None:
+            self.teacher_model.eval()
+            for p in self.teacher_model.parameters():
+                p.requires_grad_(False)
 
         self.grad_accum_steps = max(1, int(grad_accum_steps))
         self._accum_step = 0
@@ -276,6 +291,8 @@ class DiffusionTrainer:
 
         Called by train_epoch when the number of batches is not divisible
         by grad_accum_steps, so the last micro-batch group never completed.
+        Only performs the optimizer step — does NOT increment global_step or
+        lr_schedule, because no new training data was consumed.
         """
         if self._accum_step == 0:
             return
@@ -290,10 +307,7 @@ class DiffusionTrainer:
             if grad_clip is not None:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
             self.opt.step()
-        if self.global_step < self.total_steps:
-            self.lr_schedule.step()
-        self.global_step += 1
-        self.local_step += 1
+        self.opt.zero_grad(set_to_none=True)
 
     # ------------------------------------------------------------------ #
     #  Step log
@@ -312,6 +326,27 @@ class DiffusionTrainer:
             return self.lambda_nce
         return self.lambda_nce * min(1.0, self.global_step / self.nce_warmup_steps)
 
+    @staticmethod
+    def _mode_uses_parts(mode: str) -> bool:
+        m = str(mode).strip().lower()
+        return m in {"part_only", "part_style", "parts_vector_only"}
+
+    @staticmethod
+    def _mode_uses_style(mode: str) -> bool:
+        m = str(mode).strip().lower()
+        return m in {"style_only", "part_style"}
+
+    def _ensure_required_conditions(
+        self,
+        mode: str,
+        style_img: torch.Tensor | None,
+        stage: str,
+    ) -> None:
+        if self._mode_uses_style(mode) and style_img is None:
+            raise ValueError(
+                f"{stage}: conditioning_mode='{mode}' requires style_img, but style_img is missing."
+            )
+
     # ------------------------------------------------------------------ #
     #  InfoNCE on dual part-set views
     # ------------------------------------------------------------------ #
@@ -321,6 +356,8 @@ class DiffusionTrainer:
     ) -> torch.Tensor:
         """Compute InfoNCE if parts_b present and model supports contrastive head."""
         if self.lambda_nce <= 0.0:
+            return torch.tensor(0.0, device=self.device)
+        if not self._mode_uses_parts(self.conditioning_mode):
             return torch.tensor(0.0, device=self.device)
         if "parts_b" not in batch or "font_ids" not in batch:
             return torch.tensor(0.0, device=self.device)
@@ -345,26 +382,52 @@ class DiffusionTrainer:
         self.model.train()
         x0 = batch["target"].to(self.device)
         content = batch["content"].to(self.device)
+        style_img = batch["style_img"].to(self.device) if "style_img" in batch else None
         part_imgs = batch["parts"].to(self.device) if "parts" in batch else None
         part_mask = batch["part_mask"].to(self.device) if "part_mask" in batch else None
+        self._ensure_required_conditions(self.conditioning_mode, style_img, stage="train_step")
+        if self.teacher_model is not None:
+            self._ensure_required_conditions(self.teacher_conditioning_mode, style_img, stage="teacher_kd")
         B = x0.size(0)
         t = torch.randint(0, self.scheduler.T, (B,), device=self.device)
 
-        # CFG dropout — null ALL conditions (content, parts).
+        # Save original (clean) conditions for consistency/KD loss before CFG dropout.
+        content_orig = content
+        style_img_orig = style_img
+
+        # CFG dropout — null ALL conditions.
+        # Use 1.0 (white) as the null signal for all image conditions ([-1,1] range).
         cfg_mask = (torch.rand((B,), device=self.device) < self.cfg_drop_prob)
         if bool(cfg_mask.any().item()):
             content = content.clone()
             content[cfg_mask] = 1.0
+            if style_img is not None:
+                style_img = style_img.clone()
+                style_img[cfg_mask] = 1.0
             if part_imgs is not None:
                 part_imgs = part_imgs.clone()
-                part_imgs[cfg_mask] = 0.0
+                part_imgs[cfg_mask] = 1.0
                 if part_mask is not None:
                     part_mask = part_mask.clone()
                     part_mask[cfg_mask] = 0.0
+        # Optional part drop for part_style robustness.
+        part_drop_mask = None
+        if (
+            self.part_drop_prob > 0.0
+            and part_imgs is not None
+            and self._mode_uses_parts(self.conditioning_mode)
+        ):
+            part_drop_mask = (torch.rand((B,), device=self.device) < self.part_drop_prob)
+            if bool(part_drop_mask.any().item()):
+                part_imgs = part_imgs.clone()
+                part_imgs[part_drop_mask] = 1.0
+                if part_mask is not None:
+                    part_mask = part_mask.clone()
+                    part_mask[part_drop_mask] = 0.0
 
-        # Convert pixel → latent BEFORE adding noise (no grad needed for PixelUnshuffle).
+        # Convert pixel → latent BEFORE adding noise (no grad needed for bilinear resize).
         with torch.no_grad():
-            x0_latent = self.model.encode_to_latent(x0)     # (B,3,256,256) → (B,12,128,128)
+            x0_latent = self.model.encode_to_latent(x0)     # (B,1,256,256) → (B,1,128,128)
 
         with torch.autocast(
             device_type=self.device.type,
@@ -374,16 +437,71 @@ class DiffusionTrainer:
             x_t_latent, eps_latent = self.scheduler.add_noise(x0_latent, t)
             eps_hat_latent = self.model(
                 x_t_latent, t, content,
+                style_img=style_img,
                 part_imgs=part_imgs,
                 part_mask=part_mask,
+                condition_mode=self.conditioning_mode,
             )
             loss_mse = F.mse_loss(eps_hat_latent, eps_latent)
             loss_nce = self._compute_nce(batch)
             eff_lnce = self.effective_lambda_nce
+            loss_cons = torch.tensor(0.0, device=self.device)
+            if (
+                self.lambda_cons > 0.0
+                and self.conditioning_mode in {"part_style", "part_only", "parts_vector_only"}
+                and style_img_orig is not None
+                and "parts" in batch
+            ):
+                part_imgs_full = batch["parts"].to(self.device)
+                part_mask_full = batch["part_mask"].to(self.device) if "part_mask" in batch else None
+                eps_with_parts = self.model(
+                    x_t_latent, t, content_orig,
+                    style_img=style_img_orig,
+                    part_imgs=part_imgs_full,
+                    part_mask=part_mask_full,
+                    condition_mode="part_style",
+                )
+                eps_no_parts = self.model(
+                    x_t_latent, t, content_orig,
+                    style_img=style_img_orig,
+                    part_imgs=None,
+                    part_mask=None,
+                    condition_mode="style_only",
+                )
+                # Only compute consistency on samples NOT dropped by CFG
+                # (CFG-null content is meaningless for style consistency).
+                keep = ~cfg_mask
+                if keep.any():
+                    loss_cons = F.mse_loss(
+                        eps_with_parts[keep], eps_no_parts[keep].detach()
+                    )
+                else:
+                    loss_cons = torch.tensor(0.0, device=self.device)
+
+            loss_kd = torch.tensor(0.0, device=self.device)
+            if self.lambda_kd > 0.0 and self.teacher_model is not None:
+                teacher_style = style_img_orig if self._mode_uses_style(self.teacher_conditioning_mode) else None
+                teacher_parts = batch["parts"].to(self.device) if (
+                    self._mode_uses_parts(self.teacher_conditioning_mode) and "parts" in batch
+                ) else None
+                teacher_part_mask = batch["part_mask"].to(self.device) if (
+                    self._mode_uses_parts(self.teacher_conditioning_mode) and "part_mask" in batch
+                ) else None
+                with torch.no_grad():
+                    eps_teacher = self.teacher_model(
+                        x_t_latent, t, content_orig,
+                        style_img=teacher_style,
+                        part_imgs=teacher_parts,
+                        part_mask=teacher_part_mask,
+                        condition_mode=self.teacher_conditioning_mode,
+                    )
+                loss_kd = F.mse_loss(eps_hat_latent, eps_teacher)
 
             loss = (
                 self.lambda_mse * loss_mse
                 + eff_lnce * loss_nce
+                + self.lambda_cons * loss_cons
+                + self.lambda_kd * loss_kd
             )
 
         did_update, grad_norm = self._do_optimizer_update(loss, grad_clip)
@@ -394,15 +512,22 @@ class DiffusionTrainer:
                 "loss": loss.item(),
                 "loss_mse": loss_mse.item(),
                 "loss_nce": loss_nce.item(),
+                "loss_cons": loss_cons.item(),
+                "loss_kd": loss_kd.item(),
                 "cfg_dropped": int(cfg_mask.sum().item()),
+                "part_dropped": int(part_drop_mask.sum().item()) if part_drop_mask is not None else 0,
                 "lr": float(self.lr_schedule.get_last_lr()[0]),
                 "data_time": float(self._step_data_time),
                 "train_time": float(time.perf_counter() - _train_t0),
             }
 
         # OneCycleLR steps per optimizer update.
+        # Guard against overshooting total_steps (e.g. after resume near end of training).
         if self.global_step < self.total_steps:
-            self.lr_schedule.step()
+            try:
+                self.lr_schedule.step()
+            except ValueError:
+                pass  # OneCycleLR exceeded total_steps; keep last LR
 
         self.global_step += 1
         self.local_step += 1
@@ -441,7 +566,10 @@ class DiffusionTrainer:
                 "loss": float(loss.item()),
                 "loss_mse": float(loss_mse.item()),
                 "loss_nce": float(loss_nce.item()),
+                "loss_cons": float(loss_cons.item()),
+                "loss_kd": float(loss_kd.item()),
                 "cfg_dropped": int(cfg_mask.sum().item()),
+                "part_dropped": int(part_drop_mask.sum().item()) if part_drop_mask is not None else 0,
                 "lr": float(self.lr_schedule.get_last_lr()[0]),
                 "data_time": float(self._step_data_time),
                 "train_time": float(self._step_train_time),
@@ -456,9 +584,12 @@ class DiffusionTrainer:
                 f"[step] gstep={self.global_step} ep={self.current_epoch} estep={self.local_step} "
                 f"loss={loss.item():.4f} mse={loss_mse.item():.4f} "
                 f"nce={loss_nce.item():.4f} λnce={eff_lnce:.4f} "
+                f"cons={loss_cons.item():.4f} kd={loss_kd.item():.4f} "
                 f"cfg_drop={int(cfg_mask.sum().item())}/{int(B)} lr={self.lr_schedule.get_last_lr()[0]:.6e} "
                 f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s"
             )
+            if part_drop_mask is not None:
+                msg += f" part_drop={int(part_drop_mask.sum().item())}/{int(B)}"
             if grad_norm is not None:
                 msg += f" gnorm={grad_norm:.4f}"
             print(msg, flush=True)
@@ -467,7 +598,10 @@ class DiffusionTrainer:
             "loss": loss.item(),
             "loss_mse": loss_mse.item(),
             "loss_nce": loss_nce.item(),
+            "loss_cons": loss_cons.item(),
+            "loss_kd": loss_kd.item(),
             "cfg_dropped": int(cfg_mask.sum().item()),
+            "part_dropped": int(part_drop_mask.sum().item()) if part_drop_mask is not None else 0,
             "lr": self.lr_schedule.get_last_lr()[0],
             "data_time": float(self._step_data_time),
             "train_time": float(self._step_train_time),
@@ -480,11 +614,13 @@ class DiffusionTrainer:
     def dpm_solver_sample(
         self,
         content_img: torch.Tensor,
+        style_img: torch.Tensor | None = None,
         num_inference_steps: int = 20,
         guidance_scale: float = 7.5,
         use_cfg: bool = True,
         part_imgs: torch.Tensor | None = None,
         part_mask: torch.Tensor | None = None,
+        condition_mode: str | None = None,
     ) -> torch.Tensor:
         """Sample in **latent** space, return **pixel**-space result."""
         self.model.eval()
@@ -492,13 +628,17 @@ class DiffusionTrainer:
         device = self.device
 
         content_img = content_img.to(device)
+        if style_img is not None:
+            style_img = style_img.to(device)
         if part_imgs is not None:
             part_imgs = part_imgs.to(device)
         if part_mask is not None:
             part_mask = part_mask.to(device)
+        mode = self.conditioning_mode if condition_mode is None else str(condition_mode).strip().lower()
+        self._ensure_required_conditions(mode, style_img, stage="dpm_solver_sample")
 
         # Latent dimensions
-        latent_ch = self.model.unet_in_channels   # 12
+        latent_ch = self.model.unet_in_channels   # 1 (grayscale)
         latent_h = self.model.unet_input_size      # 128
         latent_w = self.model.unet_input_size      # 128
 
@@ -523,12 +663,16 @@ class DiffusionTrainer:
             t_cond = torch.full((bsz,), int(t.item()), device=device, dtype=torch.long)
             eps_cond = self.model(
                 x_t, t_cond, content_img,
+                style_img=style_img,
                 part_imgs=part_imgs, part_mask=part_mask,
+                condition_mode=mode,
             )
             if use_cfg:
                 eps_uncond = self.model(
                     x_t, t_cond, uncond_content,
+                    style_img=None,
                     part_imgs=None, part_mask=None,
+                    condition_mode="baseline",
                 )
                 eps_hat = eps_uncond + float(guidance_scale) * (eps_cond - eps_uncond)
             else:
@@ -562,7 +706,12 @@ class DiffusionTrainer:
 
     def load(self, path: str | Path):
         chkpt = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(chkpt["model_state"])
+        missing, unexpected = self.model.load_state_dict(chkpt["model_state"], strict=False)
+        if missing or unexpected:
+            print(
+                f"[trainer.load] non-strict model load: missing={len(missing)} unexpected={len(unexpected)}",
+                flush=True,
+            )
         self.opt.load_state_dict(chkpt["opt_state"])
         self.global_step = chkpt.get("step", 0)
         self.current_epoch = chkpt.get("epoch", 0)
@@ -579,9 +728,10 @@ class DiffusionTrainer:
         comp_dir.mkdir(parents=True, exist_ok=True)
         stem = path.stem
 
-        vector_prefixes = ("part_patch_encoder.", "part_set_norm.", "style_token_mlp.", "contrastive_head.")
-        main_state = {k: v for k, v in model_state.items() if not k.startswith(vector_prefixes)}
-        vector_state = {k: v for k, v in model_state.items() if k.startswith(vector_prefixes)}
+        # Auto-detect style/part encoder keys: everything that is NOT content_encoder or unet.
+        _main_prefixes = ("content_encoder.", "unet.")
+        main_state = {k: v for k, v in model_state.items() if k.startswith(_main_prefixes)}
+        vector_state = {k: v for k, v in model_state.items() if not k.startswith(_main_prefixes)}
 
         torch.save(
             {"component": "main_model", "step": self.global_step, "epoch": self.current_epoch, "state_dict": main_state},
@@ -603,6 +753,8 @@ class DiffusionTrainer:
         self.local_step = 0
         it = iter(dataloader)
         while True:
+            if self.global_step >= self.total_steps:
+                break
             t_data_start = time.perf_counter()
             try:
                 batch = next(it)
@@ -613,8 +765,11 @@ class DiffusionTrainer:
             for k, v in out.items():
                 sums[k] = sums.get(k, 0.0) + float(v)
             count += 1
+            if self.global_step >= self.total_steps:
+                break
         # Flush any remaining accumulated gradients at epoch end
-        self._flush_accumulated_grads(grad_clip)
+        if self.global_step < self.total_steps:
+            self._flush_accumulated_grads(grad_clip)
         if count == 0:
             return {}
         return {k: v / count for k, v in sums.items()}
@@ -641,11 +796,19 @@ class DiffusionTrainer:
                     "save_every_steps": int(self.save_every_steps or 0),
                     "sample_every_steps": int(self.sample_every_steps or 0),
                 })
-        for epoch in range(1, epochs + 1):
+        # On resume, skip already-completed epochs.
+        start_epoch = max(1, self.current_epoch + 1) if self.global_step > 0 else 1
+        for epoch in range(start_epoch, epochs + 1):
             log = self.train_epoch(dataloader, epoch)
             print(f"\nEpoch {epoch}:", {k: round(v, 4) for k, v in log.items()})
             if save_every and epoch % save_every == 0 and save_dir is not None:
                 self.save(save_dir / f"ckpt_{epoch}.pt")
+            if self.global_step >= self.total_steps:
+                print(
+                    f"[fit] reached total_steps={self.total_steps}; stop training at epoch={epoch}.",
+                    flush=True,
+                )
+                break
 
     # ------------------------------------------------------------------ #
     #  Convenience sample & save
@@ -657,6 +820,7 @@ class DiffusionTrainer:
         max_vis = 8
         content = batch["content"][:max_vis].to(self.device)
         target = batch["target"][:max_vis].to(self.device)
+        style_img = batch["style_img"][:max_vis].to(self.device) if "style_img" in batch else None
         part_imgs = batch["parts"][:max_vis].to(self.device) if "parts" in batch else None
         part_mask = batch["part_mask"][:max_vis].to(self.device) if "part_mask" in batch else None
 
@@ -667,13 +831,9 @@ class DiffusionTrainer:
             gs = 1.0
             use_cfg = False
 
-        sample = self.dpm_solver_sample(
-            content,
-            num_inference_steps=int(self.sample_inference_steps),
-            guidance_scale=gs,
-            use_cfg=use_cfg,
-            part_imgs=part_imgs,
-            part_mask=part_mask,
+        sample = self._generate_vis_samples(
+            content, style_img=style_img, part_imgs=part_imgs,
+            part_mask=part_mask, gs=gs, use_cfg=use_cfg,
         )
         # Save comparison grid: row0=content, row1=GT, row2=generated
         vis = torch.cat([(content + 1) / 2, (target + 1) / 2, (sample + 1) / 2], dim=0)
@@ -682,6 +842,21 @@ class DiffusionTrainer:
         # Free CUDA cache fragmented by the inference-mode scheduler
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
+
+    def _generate_vis_samples(
+        self, content, *, style_img, part_imgs, part_mask, gs, use_cfg,
+    ) -> torch.Tensor:
+        """Generate samples for visualization. Subclasses override this."""
+        return self.dpm_solver_sample(
+            content,
+            style_img=style_img,
+            num_inference_steps=int(self.sample_inference_steps),
+            guidance_scale=gs,
+            use_cfg=use_cfg,
+            part_imgs=part_imgs,
+            part_mask=part_mask,
+            condition_mode=self.conditioning_mode,
+        )
 
 
 # ====================================================================== # #
@@ -709,6 +884,12 @@ class FlowMatchingTrainer(DiffusionTrainer):
         log_every_steps: int | None = None,
         detailed_log: bool = True,
         grad_accum_steps: int = 1,
+        conditioning_mode: str = "part_only",
+        part_drop_prob: float = 0.0,
+        lambda_cons: float = 0.0,
+        lambda_kd: float = 0.0,
+        teacher_model: nn.Module | None = None,
+        teacher_conditioning_mode: str = "part_style",
     ):
         super().__init__(
             model=model, device=device, lr=lr,
@@ -718,6 +899,12 @@ class FlowMatchingTrainer(DiffusionTrainer):
             save_every_steps=save_every_steps, log_every_steps=log_every_steps,
             detailed_log=detailed_log,
             grad_accum_steps=grad_accum_steps,
+            conditioning_mode=conditioning_mode,
+            part_drop_prob=part_drop_prob,
+            lambda_cons=lambda_cons,
+            lambda_kd=lambda_kd,
+            teacher_model=teacher_model,
+            teacher_conditioning_mode=teacher_conditioning_mode,
         )
         self.lambda_fm = float(lambda_fm)
 
@@ -740,13 +927,17 @@ class FlowMatchingTrainer(DiffusionTrainer):
         self.model.train()
         x0 = batch["target"].to(self.device)
         content = batch["content"].to(self.device)
+        style_img = batch["style_img"].to(self.device) if "style_img" in batch else None
         part_imgs = batch["parts"].to(self.device) if "parts" in batch else None
         part_mask = batch["part_mask"].to(self.device) if "part_mask" in batch else None
+        self._ensure_required_conditions(self.conditioning_mode, style_img, stage="flow_train_step")
+        if self.teacher_model is not None:
+            self._ensure_required_conditions(self.teacher_conditioning_mode, style_img, stage="flow_teacher_kd")
         b = x0.size(0)
 
         # Convert pixel → latent
         with torch.no_grad():
-            x0_latent = self.model.encode_to_latent(x0)  # (B,3,256,256) → (B,12,128,128)
+            x0_latent = self.model.encode_to_latent(x0)  # (B,1,256,256) → (B,1,128,128)
 
         # Linear path in latent space: x_t = (1-t) x0_l + t x1_l,  v* = x1_l - x0_l.
         t = torch.rand((b,), device=self.device, dtype=x0_latent.dtype)
@@ -755,17 +946,38 @@ class FlowMatchingTrainer(DiffusionTrainer):
         v_target = x1_latent - x0_latent
         t_idx = (t * float(self.diffusion_steps - 1)).round().long()
 
+        # Save original (clean) conditions for consistency/KD loss before CFG dropout.
+        content_orig = content
+        style_img_orig = style_img
+
         # CFG dropout — null ALL conditions.
+        # Use 1.0 (white) as the null signal for all image conditions ([-1,1] range).
         cfg_mask = (torch.rand((b,), device=self.device) < self.cfg_drop_prob)
         if bool(cfg_mask.any().item()):
             content = content.clone()
             content[cfg_mask] = 1.0
+            if style_img is not None:
+                style_img = style_img.clone()
+                style_img[cfg_mask] = 1.0
             if part_imgs is not None:
                 part_imgs = part_imgs.clone()
-                part_imgs[cfg_mask] = 0.0
+                part_imgs[cfg_mask] = 1.0
                 if part_mask is not None:
                     part_mask = part_mask.clone()
                     part_mask[cfg_mask] = 0.0
+        part_drop_mask = None
+        if (
+            self.part_drop_prob > 0.0
+            and part_imgs is not None
+            and self._mode_uses_parts(self.conditioning_mode)
+        ):
+            part_drop_mask = (torch.rand((b,), device=self.device) < self.part_drop_prob)
+            if bool(part_drop_mask.any().item()):
+                part_imgs = part_imgs.clone()
+                part_imgs[part_drop_mask] = 1.0
+                if part_mask is not None:
+                    part_mask = part_mask.clone()
+                    part_mask[part_drop_mask] = 0.0
 
         with torch.autocast(
             device_type=self.device.type,
@@ -774,15 +986,68 @@ class FlowMatchingTrainer(DiffusionTrainer):
         ):
             v_hat = self.model(
                 x_t_latent, t_idx, content,
+                style_img=style_img,
                 part_imgs=part_imgs, part_mask=part_mask,
+                condition_mode=self.conditioning_mode,
             )
             loss_fm = F.mse_loss(v_hat, v_target)
             loss_nce = self._compute_nce(batch)
             eff_lnce = self.effective_lambda_nce
+            loss_cons = torch.tensor(0.0, device=self.device)
+            if (
+                self.lambda_cons > 0.0
+                and self.conditioning_mode in {"part_style", "part_only", "parts_vector_only"}
+                and style_img_orig is not None
+                and "parts" in batch
+            ):
+                part_imgs_full = batch["parts"].to(self.device)
+                part_mask_full = batch["part_mask"].to(self.device) if "part_mask" in batch else None
+                v_with_parts = self.model(
+                    x_t_latent, t_idx, content_orig,
+                    style_img=style_img_orig,
+                    part_imgs=part_imgs_full,
+                    part_mask=part_mask_full,
+                    condition_mode="part_style",
+                )
+                v_no_parts = self.model(
+                    x_t_latent, t_idx, content_orig,
+                    style_img=style_img_orig,
+                    part_imgs=None,
+                    part_mask=None,
+                    condition_mode="style_only",
+                )
+                # Only compute consistency on samples NOT dropped by CFG.
+                keep = ~cfg_mask
+                if keep.any():
+                    loss_cons = F.mse_loss(
+                        v_with_parts[keep], v_no_parts[keep].detach()
+                    )
+                else:
+                    loss_cons = torch.tensor(0.0, device=self.device)
+            loss_kd = torch.tensor(0.0, device=self.device)
+            if self.lambda_kd > 0.0 and self.teacher_model is not None:
+                teacher_style = style_img_orig if self._mode_uses_style(self.teacher_conditioning_mode) else None
+                teacher_parts = batch["parts"].to(self.device) if (
+                    self._mode_uses_parts(self.teacher_conditioning_mode) and "parts" in batch
+                ) else None
+                teacher_part_mask = batch["part_mask"].to(self.device) if (
+                    self._mode_uses_parts(self.teacher_conditioning_mode) and "part_mask" in batch
+                ) else None
+                with torch.no_grad():
+                    v_teacher = self.teacher_model(
+                        x_t_latent, t_idx, content_orig,
+                        style_img=teacher_style,
+                        part_imgs=teacher_parts,
+                        part_mask=teacher_part_mask,
+                        condition_mode=self.teacher_conditioning_mode,
+                    )
+                loss_kd = F.mse_loss(v_hat, v_teacher)
 
             loss = (
                 self.lambda_fm * loss_fm
                 + eff_lnce * loss_nce
+                + self.lambda_cons * loss_cons
+                + self.lambda_kd * loss_kd
             )
 
         did_update, grad_norm = self._do_optimizer_update(loss, grad_clip)
@@ -792,14 +1057,20 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 "loss": loss.item(),
                 "loss_fm": loss_fm.item(),
                 "loss_nce": loss_nce.item(),
+                "loss_cons": loss_cons.item(),
+                "loss_kd": loss_kd.item(),
                 "cfg_dropped": int(cfg_mask.sum().item()),
+                "part_dropped": int(part_drop_mask.sum().item()) if part_drop_mask is not None else 0,
                 "lr": float(self.lr_schedule.get_last_lr()[0]),
                 "data_time": float(self._step_data_time),
                 "train_time": float(time.perf_counter() - _train_t0),
             }
 
         if self.global_step < self.total_steps:
-            self.lr_schedule.step()
+            try:
+                self.lr_schedule.step()
+            except ValueError:
+                pass  # OneCycleLR exceeded total_steps; keep last LR
 
         self.global_step += 1
         self.local_step += 1
@@ -836,7 +1107,10 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 "loss": float(loss.item()),
                 "loss_fm": float(loss_fm.item()),
                 "loss_nce": float(loss_nce.item()),
+                "loss_cons": float(loss_cons.item()),
+                "loss_kd": float(loss_kd.item()),
                 "cfg_dropped": int(cfg_mask.sum().item()),
+                "part_dropped": int(part_drop_mask.sum().item()) if part_drop_mask is not None else 0,
                 "lr": float(self.lr_schedule.get_last_lr()[0]),
                 "data_time": float(self._step_data_time),
                 "train_time": float(self._step_train_time),
@@ -849,9 +1123,12 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 f"[fm-step] gstep={self.global_step} ep={self.current_epoch} estep={self.local_step} "
                 f"loss={loss.item():.4f} fm={loss_fm.item():.4f} "
                 f"nce={loss_nce.item():.4f} λnce={eff_lnce:.4f} "
+                f"cons={loss_cons.item():.4f} kd={loss_kd.item():.4f} "
                 f"cfg_drop={int(cfg_mask.sum().item())}/{int(b)} lr={self.lr_schedule.get_last_lr()[0]:.6e} "
                 f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s"
             )
+            if part_drop_mask is not None:
+                msg += f" part_drop={int(part_drop_mask.sum().item())}/{int(b)}"
             if grad_norm is not None:
                 msg += f" gnorm={grad_norm:.4f}"
             print(msg, flush=True)
@@ -860,7 +1137,10 @@ class FlowMatchingTrainer(DiffusionTrainer):
             "loss": loss.item(),
             "loss_fm": loss_fm.item(),
             "loss_nce": loss_nce.item(),
+            "loss_cons": loss_cons.item(),
+            "loss_kd": loss_kd.item(),
             "cfg_dropped": int(cfg_mask.sum().item()),
+            "part_dropped": int(part_drop_mask.sum().item()) if part_drop_mask is not None else 0,
             "lr": self.lr_schedule.get_last_lr()[0],
             "data_time": float(self._step_data_time),
             "train_time": float(self._step_train_time),
@@ -872,18 +1152,24 @@ class FlowMatchingTrainer(DiffusionTrainer):
         self,
         content_img: torch.Tensor,
         c: int = 50,
+        style_img: torch.Tensor | None = None,
         part_imgs: torch.Tensor | None = None,
         part_mask: torch.Tensor | None = None,
+        condition_mode: str | None = None,
     ) -> torch.Tensor:
         self.model.eval()
         b, ch, h, w = content_img.shape
         device = self.device
 
         content_img = content_img.to(device)
+        if style_img is not None:
+            style_img = style_img.to(device)
         if part_imgs is not None:
             part_imgs = part_imgs.to(device)
         if part_mask is not None:
             part_mask = part_mask.to(device)
+        mode = self.conditioning_mode if condition_mode is None else str(condition_mode).strip().lower()
+        self._ensure_required_conditions(mode, style_img, stage="flow_sample")
 
         use_cfg = bool(self.sample_use_cfg)
         guidance_scale = float(self.sample_guidance_scale)
@@ -899,20 +1185,26 @@ class FlowMatchingTrainer(DiffusionTrainer):
 
         x_t = torch.randn(b, latent_ch, latent_h, latent_w, device=device)
         n_steps = max(2, int(c))
-        dt = 1.0 / float(n_steps - 1)
+        # Use n_steps intervals so t goes from 1.0 to dt (avoids t=0 which is
+        # outside the training distribution).
+        dt = 1.0 / float(n_steps)
 
-        for i in range(n_steps - 1):
+        for i in range(n_steps):
             t_cur = 1.0 - i * dt
             t_tensor = torch.full((b,), t_cur, device=device, dtype=x_t.dtype)
             t_idx = (t_tensor * float(self.diffusion_steps - 1)).round().long()
             v_cond = self.model(
                 x_t, t_idx, content_img,
+                style_img=style_img,
                 part_imgs=part_imgs, part_mask=part_mask,
+                condition_mode=mode,
             )
             if use_cfg:
                 v_uncond = self.model(
                     x_t, t_idx, uncond_content,
+                    style_img=None,
                     part_imgs=None, part_mask=None,
+                    condition_mode="baseline",
                 )
                 v_hat = v_uncond + guidance_scale * (v_cond - v_uncond)
             else:
@@ -921,15 +1213,11 @@ class FlowMatchingTrainer(DiffusionTrainer):
         # Decode latent → pixel
         return self.model.decode_from_latent(x_t).clamp(-1, 1)
 
-    @torch.no_grad()
-    def sample_and_save(self, batch: Dict[str, torch.Tensor], out_dir: Path, steps: int = 50):
-        out_dir.mkdir(parents=True, exist_ok=True)
-        max_vis = 8
-        content = batch["content"][:max_vis].to(self.device)
-        target = batch["target"][:max_vis].to(self.device)
-        part_imgs = batch["parts"][:max_vis].to(self.device) if "parts" in batch else None
-        part_mask = batch["part_mask"][:max_vis].to(self.device) if "part_mask" in batch else None
-        flow_steps = int(self.sample_inference_steps) if int(self.sample_inference_steps) > 1 else int(steps)
+    def _generate_vis_samples(
+        self, content, *, style_img, part_imgs, part_mask, gs, use_cfg,
+    ) -> torch.Tensor:
+        """Override: use flow_sample instead of dpm_solver_sample."""
+        flow_steps = int(self.sample_inference_steps) if int(self.sample_inference_steps) > 1 else 50
 
         # Early training: disable CFG to avoid noise amplification
         orig_cfg = self.sample_use_cfg
@@ -937,18 +1225,17 @@ class FlowMatchingTrainer(DiffusionTrainer):
         if self.global_step < 5000:
             self.sample_use_cfg = False
             self.sample_guidance_scale = 1.0
+        else:
+            self.sample_use_cfg = use_cfg
+            self.sample_guidance_scale = gs
 
         sample = self.flow_sample(
             content, c=flow_steps,
+            style_img=style_img,
             part_imgs=part_imgs, part_mask=part_mask,
+            condition_mode=self.conditioning_mode,
         )
 
         self.sample_use_cfg = orig_cfg
         self.sample_guidance_scale = orig_gs
-
-        vis = torch.cat([(content + 1) / 2, (target + 1) / 2, (sample + 1) / 2], dim=0)
-        filename = f"sample_ep{self.current_epoch}_gstep{self.global_step}_estep{self.local_step}.png"
-        save_image(vis, out_dir / filename, nrow=content.size(0))
-        # Free CUDA cache fragmented by the inference-mode scheduler
-        if self.device.type == "cuda":
-            torch.cuda.empty_cache()
+        return sample

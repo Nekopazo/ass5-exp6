@@ -16,6 +16,7 @@ Data sources
 from pathlib import Path
 import json
 import io
+import os
 import random
 import re
 from collections import OrderedDict
@@ -41,6 +42,8 @@ class FontImageDataset(Dataset):
         project_root: Union[str, Path] = ".",
         max_fonts: int = 0,
         lmdb_font_scan_limit: int = 100_000,
+        use_style_image: bool = False,
+        enforce_part_bank_font_match: bool = False,
         # ---- PartBank (direct label-based sampling, no retrieval CNN) ----
         use_part_bank: bool = False,
         part_bank_manifest: Optional[Union[str, Path]] = None,
@@ -57,8 +60,11 @@ class FontImageDataset(Dataset):
     ) -> None:
         self.root = Path(project_root).resolve()
         self.max_fonts = max(0, int(max_fonts))
-        self.rng = random.Random(random_seed)
+        self._random_seed = int(random_seed)
+        self.rng = random.Random(self._random_seed)
         self.lmdb_font_scan_limit = int(max(1000, lmdb_font_scan_limit))
+        self.use_style_image = bool(use_style_image)
+        self.enforce_part_bank_font_match = bool(enforce_part_bank_font_match)
         self.use_part_bank = bool(use_part_bank)
         self.part_env: Any = None
         self.part_set_max = max(1, int(part_set_max))
@@ -75,8 +81,8 @@ class FontImageDataset(Dataset):
         self._glyph_decode_cache: "OrderedDict[str, Any]" = OrderedDict()
 
         # ---- Memory footprint warning ----
-        _glyph_bytes_each = 3 * 256 * 256 * 4  # float32 tensor per cached glyph
-        _part_bytes_each = 3 * part_image_size * part_image_size * 4
+        _glyph_bytes_each = 1 * 256 * 256 * 4  # float32 tensor per cached glyph (1-ch grayscale)
+        _part_bytes_each = 1 * part_image_size * part_image_size * 4
         _est_gb = (
             self.lmdb_decode_cache_size * _glyph_bytes_each
             + self.part_image_cache_size * _part_bytes_each
@@ -103,9 +109,13 @@ class FontImageDataset(Dataset):
         if train_lmdb is None:
             train_lmdb = self.root / "DataPreparation" / "LMDB" / "TrainFont.lmdb"
 
-        self.content_env = lmdb.open(str(content_lmdb), readonly=True, lock=False, readahead=False)
-        self.train_env = lmdb.open(str(train_lmdb), readonly=True, lock=False, readahead=False)
+        # Store LMDB paths for lazy re-open in forked worker processes.
+        self._content_lmdb_path = str(content_lmdb)
+        self._train_lmdb_path = str(train_lmdb)
+        self.content_env = lmdb.open(self._content_lmdb_path, readonly=True, lock=False, readahead=False)
+        self.train_env = lmdb.open(self._train_lmdb_path, readonly=True, lock=False, readahead=False)
         self.transform = transform
+        self._worker_pid: Optional[int] = os.getpid()  # tracks which PID owns the current txns
 
         # Keep persistent read-only transactions (avoids per-getitem txn overhead).
         self._c_txn = self.content_env.begin(buffers=True)
@@ -113,7 +123,11 @@ class FontImageDataset(Dataset):
 
         # ---- Build multi-font entries ----
         lmdb_fonts = self._scan_lmdb_font_names(self._t_txn)
-        entries = self._build_multi_font_entries(self._c_txn, self._t_txn, lmdb_fonts)
+        all_entries = self._build_multi_font_entries(self._c_txn, self._t_txn, lmdb_fonts, apply_max_fonts=False)
+        self._validate_part_bank_font_set(all_entries, part_bank_lmdb)
+        entries = list(all_entries)
+        if self.max_fonts > 0 and len(entries) > self.max_fonts:
+            entries = sorted(entries, key=lambda x: len(x[1]), reverse=True)[:self.max_fonts]
 
         self.font_names = [x[0] for x in entries]
         self.valid_indices_by_font = {x[0]: x[1] for x in entries}
@@ -132,7 +146,8 @@ class FontImageDataset(Dataset):
                 part_bank_lmdb_path = (self.root / part_bank_lmdb_path).resolve()
             if not part_bank_lmdb_path.exists():
                 raise FileNotFoundError(f"PartBank LMDB not found: {part_bank_lmdb_path}")
-            self.part_env = lmdb.open(str(part_bank_lmdb_path), readonly=True, lock=False, readahead=False)
+            self._part_bank_lmdb_path = str(part_bank_lmdb_path)
+            self.part_env = lmdb.open(self._part_bank_lmdb_path, readonly=True, lock=False, readahead=False)
             self._p_txn = self.part_env.begin(buffers=True)
             self.part_bank_by_font = self._load_part_bank_from_lmdb(self.part_env)
             self._filter_samples_by_part_bank()
@@ -147,21 +162,18 @@ class FontImageDataset(Dataset):
     #  LMDB scanning
     # ------------------------------------------------------------------ #
     def _scan_lmdb_font_names(self, t_txn) -> List[str]:
+        """Scan all LMDB keys to extract font names (no limit)."""
         names = set()
         cursor = t_txn.cursor()
-        for i, kv in enumerate(cursor):
+        for kv in cursor:
             key = kv[0]
             if b"@" not in key:
-                if i >= self.lmdb_font_scan_limit:
-                    break
                 continue
             prefix = key.split(b"@", 1)[0]
             try:
                 names.add(prefix.decode("utf-8"))
             except UnicodeDecodeError:
                 pass
-            if i >= self.lmdb_font_scan_limit:
-                break
         return sorted(names)
 
     def _build_indices_for_font(self, font_name: str, c_txn, t_txn) -> List[int]:
@@ -176,7 +188,7 @@ class FontImageDataset(Dataset):
             valid_indices.append(idx)
         return valid_indices
 
-    def _build_multi_font_entries(self, c_txn, t_txn, lmdb_fonts: List[str]):
+    def _build_multi_font_entries(self, c_txn, t_txn, lmdb_fonts: List[str], apply_max_fonts: bool = True):
         entries: List[Tuple[str, List[int]]] = []
         seen: set = set()
         for n in self.font_list_stems + lmdb_fonts:
@@ -191,10 +203,67 @@ class FontImageDataset(Dataset):
                 "Could not find any usable font in TrainFont.lmdb. "
                 "Please verify LMDB keys format '<FontName>@<char>'."
             )
-        if self.max_fonts > 0 and len(entries) > self.max_fonts:
+        if apply_max_fonts and self.max_fonts > 0 and len(entries) > self.max_fonts:
             entries = sorted(entries, key=lambda x: len(x[1]), reverse=True)[:self.max_fonts]
         print(f"[FontImageDataset] Multi-font mode with {len(entries)} fonts.")
         return entries
+
+    @staticmethod
+    def _scan_part_bank_font_names(part_bank_lmdb_path: Path) -> set[str]:
+        env = lmdb.open(str(part_bank_lmdb_path), readonly=True, lock=False, readahead=False)
+        names: set[str] = set()
+        try:
+            txn = env.begin()
+            cursor = txn.cursor()
+            for raw_key, _ in cursor:
+                key = raw_key.decode("utf-8") if isinstance(raw_key, (bytes, memoryview)) else raw_key
+                parts = str(key).split("/")
+                if len(parts) >= 3:
+                    names.add(parts[2])
+        finally:
+            env.close()
+        return names
+
+    def _resolve_part_bank_lmdb_path(self, part_bank_lmdb: Optional[Union[str, Path]]) -> Path:
+        if part_bank_lmdb is None:
+            part_bank_lmdb = self.root / "DataPreparation" / "LMDB" / "PartBank.lmdb"
+        p = Path(part_bank_lmdb)
+        if not p.is_absolute():
+            p = (self.root / p).resolve()
+        return p
+
+    def _validate_part_bank_font_set(
+        self,
+        all_entries: List[Tuple[str, List[int]]],
+        part_bank_lmdb: Optional[Union[str, Path]],
+    ) -> None:
+        if not self.enforce_part_bank_font_match:
+            return
+
+        part_bank_lmdb_path = self._resolve_part_bank_lmdb_path(part_bank_lmdb)
+        if not part_bank_lmdb_path.exists():
+            raise FileNotFoundError(
+                "Font-set consistency check failed because PartBank LMDB does not exist: "
+                f"{part_bank_lmdb_path}"
+            )
+
+        train_fonts = set(name for name, _ in all_entries)
+        part_fonts = self._scan_part_bank_font_names(part_bank_lmdb_path)
+
+        if train_fonts == part_fonts:
+            print(f"[FontImageDataset] Font-set consistency check passed: {len(train_fonts)} fonts.")
+            return
+
+        only_train = sorted(train_fonts - part_fonts)
+        only_part = sorted(part_fonts - train_fonts)
+        msg = (
+            "PartBank font set mismatch. Training aborted.\n"
+            f"  train_fonts={len(train_fonts)} part_bank_fonts={len(part_fonts)}\n"
+            f"  only_in_train (first 20): {only_train[:20]}\n"
+            f"  only_in_part_bank (first 20): {only_part[:20]}\n"
+            "Please rebuild/sync datasets so the font sets are exactly identical."
+        )
+        raise RuntimeError(msg)
 
     # ------------------------------------------------------------------ #
     #  PartBank – scan LMDB directly (no manifest.json dependency)
@@ -276,6 +345,8 @@ class FontImageDataset(Dataset):
         img = Image.open(io.BytesIO(b)).convert("L")
         if self.part_image_size > 0:
             img = img.resize((self.part_image_size, self.part_image_size), Image.BILINEAR)
+        # Normalize to [-1, 1]: equivalent to T.ToTensor() + T.Normalize(0.5, 0.5)
+        # ToTensor: /255 -> [0,1]; Normalize(0.5,0.5): (x-0.5)/0.5 = 2x-1 -> [-1,1]
         arr = np.asarray(img, dtype=np.float32) / 255.0
         arr = arr * 2.0 - 1.0
         return arr[None, :, :].astype(np.float32, copy=False)  # (1, H, W)
@@ -337,6 +408,52 @@ class FontImageDataset(Dataset):
             self._cache_put(cache_key, img)
         return img
 
+    def _sample_style_char_index(self, font_name: str, target_index: int) -> int:
+        """Pick a style reference index from the same font (prefer different char)."""
+        candidates = self.valid_indices_by_font.get(font_name, [])
+        if not candidates:
+            return int(target_index)
+        if len(candidates) == 1:
+            return int(candidates[0])
+
+        # Filter out target to guarantee a different char, then choose uniformly.
+        others = [idx for idx in candidates if int(idx) != int(target_index)]
+        if others:
+            return int(self.rng.choice(others))
+        return int(target_index)
+
+    # ------------------------------------------------------------------ #
+    #  Multi-worker LMDB safety
+    # ------------------------------------------------------------------ #
+    def _ensure_txns(self) -> None:
+        """Re-open LMDB envs & txns if we detect we're in a forked worker process.
+
+        After fork(), the parent's mmap-based LMDB handles are unsafe to use.
+        We lazily re-open them on first __getitem__ call in each worker.
+        """
+        pid = os.getpid()
+        if self._worker_pid == pid:
+            return  # already initialised for this process
+        # We're in a new forked worker — re-open everything.
+        # Do NOT close the parent's envs (they belong to the parent process).
+        self.content_env = lmdb.open(self._content_lmdb_path, readonly=True, lock=False, readahead=False)
+        self.train_env = lmdb.open(self._train_lmdb_path, readonly=True, lock=False, readahead=False)
+        self._c_txn = self.content_env.begin(buffers=True)
+        self._t_txn = self.train_env.begin(buffers=True)
+        if self.use_part_bank and hasattr(self, '_part_bank_lmdb_path'):
+            self.part_env = lmdb.open(self._part_bank_lmdb_path, readonly=True, lock=False, readahead=False)
+            self._p_txn = self.part_env.begin(buffers=True)
+        # Clear caches — they reference parent-process memoryviews.
+        self._glyph_decode_cache.clear()
+        self._part_tensor_cache.clear()
+        # Re-seed per-worker RNG for diversity across workers.
+        # Use the stored initial seed (deterministic) instead of internal RNG state.
+        import torch as _torch
+        worker_info = _torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            self.rng = random.Random(self._random_seed + worker_info.id)
+        self._worker_pid = pid
+
     # ------------------------------------------------------------------ #
     #  __len__ / __getitem__
     # ------------------------------------------------------------------ #
@@ -344,6 +461,7 @@ class FontImageDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, index: int):
+        self._ensure_txns()
         font_name, real_idx = self.samples[index]
         ch = self.char_list[real_idx]
 
@@ -364,7 +482,21 @@ class FontImageDataset(Dataset):
             "char": ch,
             "content": content_img,
             "input": input_img,
+            "has_parts": 0.0,
         }
+
+        if self.use_style_image:
+            style_idx = self._sample_style_char_index(font_name, real_idx)
+            style_ch = self.char_list[style_idx]
+            style_key = f"{font_name}@{style_ch}"
+            style_bytes = self._t_txn.get(style_key.encode("utf-8"))
+            # Fallback to target glyph if style glyph is missing unexpectedly.
+            if style_bytes is None:
+                style_ch = ch
+                style_key = input_key
+                style_bytes = input_bytes
+            sample["style_img"] = self._bytes_to_img(bytes(style_bytes), cache_key=f"S@{style_key}")
+            sample["style_char"] = style_ch
 
         if self.use_part_bank:
             if self._p_txn is None:
@@ -379,6 +511,7 @@ class FontImageDataset(Dataset):
             sample["parts_b"] = torch.stack(part_imgs_b, dim=0)
             sample["part_mask"] = torch.ones((len(part_imgs_a),), dtype=torch.float32)
             sample["part_mask_b"] = torch.ones((len(part_imgs_b),), dtype=torch.float32)
+            sample["has_parts"] = 1.0
 
         return sample
 
@@ -396,12 +529,22 @@ class FontImageDataset(Dataset):
                     pass
                 setattr(self, attr, None)
         if hasattr(self, "content_env"):
-            self.content_env.close()
+            try:
+                self.content_env.close()
+            except Exception:
+                pass
         if hasattr(self, "train_env"):
-            self.train_env.close()
+            try:
+                self.train_env.close()
+            except Exception:
+                pass
         if hasattr(self, "part_env") and self.part_env is not None:
-            self.part_env.close()
+            try:
+                self.part_env.close()
+            except Exception:
+                pass
             self.part_env = None
+        self._worker_pid = None
 
     def __del__(self):
         self.close()

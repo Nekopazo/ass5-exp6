@@ -59,7 +59,7 @@ while true; do
     --device auto \
     --precision bf16 \
     --batch 16 \
-    --lr 1e-4 \
+    --lr 2e-4 \
     --epochs "${EPOCHS}" \
     --total-steps "${TARGET_STEPS}" \
     --conditioning-profile parts_vector_only \
@@ -76,9 +76,9 @@ while true; do
     --sample-inference-steps 20 \
     --log-every-steps 100 \
     --detailed-log \
-    --save-every-steps 5000 \
+    --save-every-steps 3000 \
     --save-dir checkpoints/parts_only_diffusion_100k \
-    --attn-scales 16,32
+    --attn-scales 16,32 \
     --grad-accum 2
   RC=$?
   set -e

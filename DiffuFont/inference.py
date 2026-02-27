@@ -25,11 +25,29 @@ from models.model import DiffusionTrainer, FlowMatchingTrainer
 from models.source_part_ref_unet import SourcePartRefUNet
 
 
+def normalize_conditioning_mode(raw_mode: str) -> str:
+    mode = str(raw_mode).strip().lower()
+    if mode == "parts_vector_only":
+        mode = "part_only"
+    valid = {"baseline", "part_only", "style_only", "part_style"}
+    if mode not in valid:
+        raise ValueError(f"conditioning mode must be one of {sorted(valid)}, got '{raw_mode}'")
+    return mode
+
+
+def mode_uses_parts(mode: str) -> bool:
+    return normalize_conditioning_mode(mode) in {"part_only", "part_style"}
+
+
+def mode_uses_style(mode: str) -> bool:
+    return normalize_conditioning_mode(mode) in {"style_only", "part_style"}
+
+
 def load_model_and_trainer(
     ckpt_path: str,
     device: torch.device,
     trainer_type: str = "diffusion",
-    conditioning_profile: str = "parts_vector_only",
+    conditioning_profile: str = "part_style",
     attn_scales: Optional[tuple[int, ...]] = None,
     image_size: int = 256,
     style_token_count: int = 8,
@@ -37,15 +55,16 @@ def load_model_and_trainer(
     diffusion_steps: int = 1000,
 ) -> DiffusionTrainer | FlowMatchingTrainer:
     """Build model and trainer, then load checkpoint weights."""
+    mode = normalize_conditioning_mode(conditioning_profile)
     model = SourcePartRefUNet(
-        in_channels=3,
+        in_channels=1,
         image_size=image_size,
         content_start_channel=64,
         style_start_channel=64,
         unet_channels=(64, 128, 256, 512),
         content_encoder_downsample_size=4,
         channel_attn=True,
-        conditioning_profile=conditioning_profile,
+        conditioning_profile=mode,
         attn_scales=attn_scales,
         style_token_count=style_token_count,
         style_token_dim=style_token_dim,
@@ -55,12 +74,15 @@ def load_model_and_trainer(
         "lr": 1e-4,
         "T": diffusion_steps,
         "total_steps": 1,
+        "conditioning_mode": mode,
     }
     if trainer_type == "flow_matching":
         trainer_kwargs["lambda_fm"] = 1.0
     trainer = trainer_cls(model, device, **trainer_kwargs)
     trainer.load(ckpt_path)
     trainer.model.eval()
+    trainer.sample_use_cfg = True
+    trainer.sample_guidance_scale = 7.5
     print(f"[inference] loaded checkpoint from {ckpt_path} (step={trainer.global_step})")
     return trainer
 
@@ -117,6 +139,7 @@ def run_inference(
             sample = dataset[idx]
             content = sample["content"].unsqueeze(0).to(device)
             gt = sample["input"]
+            style_img = sample["style_img"].unsqueeze(0).to(device) if "style_img" in sample else None
 
             part_imgs = None
             part_mask = None
@@ -125,13 +148,17 @@ def run_inference(
                 part_mask = sample["part_mask"].unsqueeze(0).to(device)
 
             if isinstance(trainer, FlowMatchingTrainer):
+                trainer.sample_use_cfg = use_cfg
+                trainer.sample_guidance_scale = guidance_scale
                 gen = trainer.flow_sample(
                     content, c=num_inference_steps,
+                    style_img=style_img,
                     part_imgs=part_imgs, part_mask=part_mask,
                 )
             else:
                 gen = trainer.dpm_solver_sample(
                     content,
+                    style_img=style_img,
                     num_inference_steps=num_inference_steps,
                     guidance_scale=guidance_scale,
                     use_cfg=use_cfg,
@@ -204,8 +231,8 @@ def main():
     parser.add_argument("--output", type=str, default="inference_comparison.png")
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--trainer", type=str, default="diffusion", choices=["diffusion", "flow_matching"])
-    parser.add_argument("--conditioning-profile", type=str, default="parts_vector_only",
-                        choices=["baseline", "parts_vector_only"])
+    parser.add_argument("--conditioning-profile", type=str, default="part_style",
+                        choices=["baseline", "parts_vector_only", "part_only", "style_only", "part_style"])
     parser.add_argument("--attn-scales", type=str, default="16,32")
     parser.add_argument("--image-size", type=int, default=256)
     parser.add_argument("--diffusion-steps", type=int, default=1000)
@@ -237,13 +264,15 @@ def main():
     device = torch.device(args.device)
     attn_scales = _parse_int_csv(args.attn_scales)
 
-    profile = str(args.conditioning_profile).strip().lower()
-    use_part_bank = profile == "parts_vector_only"
+    profile = normalize_conditioning_mode(args.conditioning_profile)
+    use_part_bank = mode_uses_parts(profile)
+    use_style_image = mode_uses_style(profile)
 
     # Load dataset (for data access)
     transform = T.Compose([T.ToTensor(), T.Normalize(0.5, 0.5)])
     dataset = FontImageDataset(
         project_root=args.data_root,
+        use_style_image=use_style_image,
         use_part_bank=use_part_bank,
         part_bank_manifest=args.part_bank_manifest,
         part_bank_lmdb=args.part_bank_lmdb,
