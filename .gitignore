@@ -42,5 +42,3 @@ __pycache__/
 .DS_Store
 Thumbs.db
 *.mdb
-DiffuFont/logs/
-DiffuFont/checkpoints/

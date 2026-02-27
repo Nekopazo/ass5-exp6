@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/scratch/yangximing/code/ass5-exp6/DiffuFont"
+ROOT="/content/drive/MyDrive/ass5-exp6/DiffuFont"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 RUN_MODE="foreground"
 LOG_FILE=""
@@ -42,7 +42,7 @@ echo "$$" > "${PID_FILE}"
 
 
 echo "[parts_only] start $(date '+%Y-%m-%d %H:%M:%S')"
-echo "[parts_only] root=${ROOT}  pid=$$  device=cuda:1"
+echo "[parts_only] root=${ROOT}  pid=$$  device=auto"
 
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=8
@@ -55,7 +55,7 @@ while true; do
   set +e
   python -u train.py \
     --trainer diffusion \
-    --device cuda \
+    --device auto \
     --precision bf16 \
     --batch 32 \
     --lr 2e-4 \

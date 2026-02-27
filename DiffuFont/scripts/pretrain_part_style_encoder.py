@@ -19,6 +19,9 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+import io
+
+import lmdb
 import numpy as np
 import torch
 import torch.nn as nn
@@ -109,55 +112,61 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def load_part_bank(manifest_path: Path, root: Path) -> Dict[str, List[Path]]:
+def load_part_bank_keys(manifest_path: Path) -> Dict[str, List[str]]:
+    """Read manifest.json and return {font_name: [lmdb_key, ...]}."""
     obj = json.loads(manifest_path.read_text(encoding="utf-8"))
     fonts = obj.get("fonts", {})
-    out: Dict[str, List[Path]] = {}
+    out: Dict[str, List[str]] = {}
     for font_name, info in fonts.items():
         parts = info.get("parts", [])
-        paths: List[Path] = []
+        keys: List[str] = []
         for p in parts:
-            rel = p.get("path")
-            if not rel:
+            # prefer lmdb_key written by build_part_bank_lmdb; fallback to path
+            k = p.get("lmdb_key") or p.get("path")
+            if not k:
                 continue
-            fp = (root / rel).resolve()
-            if fp.exists():
-                paths.append(fp)
-        if paths:
-            out[font_name] = paths
+            keys.append(str(k) if not isinstance(k, str) else k)
+        if keys:
+            out[font_name] = keys
     return out
 
 
-def load_part_image(path: Path, patch_size: int) -> torch.Tensor:
-    img = Image.open(path).convert("L").resize((patch_size, patch_size), Image.BILINEAR)
+def load_part_image_from_lmdb(txn, lmdb_key: str, patch_size: int) -> torch.Tensor:
+    """Read a part image from an open LMDB transaction."""
+    b = txn.get(lmdb_key.encode("utf-8"))
+    if b is None:
+        raise KeyError(f"missing PartBank lmdb key: {lmdb_key}")
+    img = Image.open(io.BytesIO(bytes(b))).convert("L").resize(
+        (patch_size, patch_size), Image.BILINEAR
+    )
     arr = np.asarray(img, dtype=np.float32) / 255.0
     arr = arr * 2.0 - 1.0  # match main training normalization range [-1, 1]
     return torch.from_numpy(arr)[None, :, :].contiguous()  # (1, H, W)
 
 
-def sample_paths(paths: List[Path], n: int, rng: random.Random) -> Tuple[List[Path], List[float]]:
-    """Return n paths (with replacement if needed) and corresponding mask."""
-    if len(paths) >= n:
-        chosen = rng.sample(paths, n)
+def sample_keys(keys: List[str], n: int, rng: random.Random) -> Tuple[List[str], List[float]]:
+    """Return n lmdb keys (with replacement if needed) and corresponding mask."""
+    if len(keys) >= n:
+        chosen = rng.sample(keys, n)
     else:
-        chosen = list(paths)
+        chosen = list(keys)
         while len(chosen) < n:
-            chosen.append(rng.choice(paths))
+            chosen.append(rng.choice(keys))
     mask = [1.0] * len(chosen)
     return chosen, mask
 
 
 def split_parts_within_font(
-    bank: Dict[str, List[Path]],
+    bank: Dict[str, List[str]],
     val_ratio: float,
     seed: int,
-) -> Tuple[Dict[str, List[Path]], Dict[str, List[Path]]]:
-    """Split each font's part paths into train/val by ratio (e.g. 80/20)."""
+) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
+    """Split each font's part keys into train/val by ratio (e.g. 80/20)."""
     if val_ratio <= 0.0:
         return {k: list(v) for k, v in bank.items()}, {}
 
-    train_bank: Dict[str, List[Path]] = {}
-    val_bank: Dict[str, List[Path]] = {}
+    train_bank: Dict[str, List[str]] = {}
+    val_bank: Dict[str, List[str]] = {}
     for i, (font, paths) in enumerate(sorted(bank.items(), key=lambda x: x[0])):
         pool = list(paths)
         if len(pool) < 2:
@@ -212,7 +221,7 @@ def make_checkpoint(
 
 def run_one_batch(
     encoder: PartEncoderModule,
-    bank: Dict[str, List[Path]],
+    bank: Dict[str, List[str]],
     font_pool: List[str],
     batch_size: int,
     min_k: int,
@@ -221,6 +230,7 @@ def run_one_batch(
     temperature: float,
     rng: random.Random,
     device: torch.device,
+    lmdb_txn,
     opt: torch.optim.Optimizer | None = None,
 ) -> Tuple[float, float]:
     if len(font_pool) >= batch_size:
@@ -240,8 +250,8 @@ def run_one_batch(
         n1 = rng.randint(lb, ub)
         n2 = rng.randint(lb, ub)
 
-        set1, m1 = sample_paths(part_paths, n1, rng)
-        set2, m2 = sample_paths(part_paths, n2, rng)
+        set1, m1 = sample_keys(part_paths, n1, rng)
+        set2, m2 = sample_keys(part_paths, n2, rng)
 
         # Pad to max_k so we can batch
         while len(set1) < max_k:
@@ -251,9 +261,9 @@ def run_one_batch(
             set2.append(set2[0])
             m2.append(0.0)
 
-        imgs1_list.append(torch.stack([load_part_image(p, patch_size) for p in set1]))
+        imgs1_list.append(torch.stack([load_part_image_from_lmdb(lmdb_txn, k, patch_size) for k in set1]))
         mask1_list.append(torch.tensor(m1, dtype=torch.float32))
-        imgs2_list.append(torch.stack([load_part_image(p, patch_size) for p in set2]))
+        imgs2_list.append(torch.stack([load_part_image_from_lmdb(lmdb_txn, k, patch_size) for k in set2]))
         mask2_list.append(torch.tensor(m2, dtype=torch.float32))
 
     imgs1 = torch.stack(imgs1_list).to(device)  # (B, max_k, C, H, W)
@@ -286,6 +296,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project-root", type=Path, default=Path("."))
     parser.add_argument("--manifest", type=Path, default=Path("DataPreparation/PartBank/manifest.json"))
+    parser.add_argument("--part-lmdb", type=Path, default=Path("DataPreparation/LMDB/PartBank.lmdb"))
     parser.add_argument("--out", type=Path, default=Path("checkpoints/part_style_encoder_pretrain.pt"))
     parser.add_argument("--best-out", type=Path, default=Path("checkpoints/part_style_encoder_pretrain_best.pt"))
     parser.add_argument("--log-file", type=Path, default=Path("checkpoints/part_style_encoder_pretrain.log"))
@@ -321,6 +332,7 @@ def main() -> None:
 
     root = args.project_root.resolve()
     manifest_path = resolve_path(root, args.manifest)
+    part_lmdb_path = resolve_path(root, args.part_lmdb)
     out_path = resolve_path(root, args.out)
     best_out_path = resolve_path(root, args.best_out)
     log_path = resolve_path(root, args.log_file)
@@ -340,7 +352,16 @@ def main() -> None:
     else:
         device = torch.device(args.device)
 
-    bank = load_part_bank(manifest_path, root)
+    # Open PartBank LMDB
+    if not part_lmdb_path.exists():
+        raise FileNotFoundError(
+            f"PartBank LMDB not found: {part_lmdb_path}\n"
+            "Run scripts/build_part_bank_lmdb.py first."
+        )
+    part_env = lmdb.open(str(part_lmdb_path), readonly=True, lock=False, readahead=False)
+    part_txn = part_env.begin(buffers=True)
+
+    bank = load_part_bank_keys(manifest_path)
     # keep fonts with enough parts for two random views
     bank = {k: v for k, v in bank.items() if len(v) >= max(2, args.min_set_size)}
     if len(bank) < 2:
@@ -410,6 +431,7 @@ def main() -> None:
                 temperature=args.temperature,
                 rng=train_rng,
                 device=device,
+                lmdb_txn=part_txn,
                 opt=opt,
             )
             last_step = step
@@ -437,6 +459,7 @@ def main() -> None:
                             temperature=args.temperature,
                             rng=eval_rng,
                             device=device,
+                            lmdb_txn=part_txn,
                             opt=None,
                         )
                         val_losses.append(vl)
@@ -532,6 +555,7 @@ def main() -> None:
         log(f"Metrics jsonl: {metrics_path}")
         log_fp.close()
         metrics_fp.close()
+        part_env.close()
 
 
 if __name__ == "__main__":
