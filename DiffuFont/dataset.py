@@ -81,7 +81,7 @@ class FontImageDataset(Dataset):
         self._glyph_decode_cache: "OrderedDict[str, Any]" = OrderedDict()
 
         # ---- Memory footprint warning ----
-        _glyph_bytes_each = 1 * 256 * 256 * 4  # float32 tensor per cached glyph (1-ch grayscale)
+        _glyph_bytes_each = 1 * 128 * 128 * 4  # float32 tensor per cached glyph (1-ch grayscale, 128×128)
         _part_bytes_each = 1 * part_image_size * part_image_size * 4
         _est_gb = (
             self.lmdb_decode_cache_size * _glyph_bytes_each

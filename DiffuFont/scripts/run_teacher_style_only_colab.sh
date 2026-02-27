@@ -49,8 +49,8 @@ echo "[teacher_style_only] root=${ROOT} pid=$$ device=auto save_dir=${SAVE_DIR}"
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
-TARGET_STEPS=100000
-EPOCHS=39
+TARGET_STEPS=50000
+EPOCHS=20
 
 python -u train.py \
   --stage teacher \
@@ -58,20 +58,19 @@ python -u train.py \
   --trainer diffusion \
   --device auto \
   --precision bf16 \
-  --batch 16 \
-  --grad-accum 2 \
-  --lr 2e-4 \
+  --batch 64 \
+  --grad-accum 1 \
+  --lr 4e-4 \
   --epochs "${EPOCHS}" \
   --total-steps "${TARGET_STEPS}" \
   --lambda-diff 1.0 \
   --lambda-nce 0.0 \
   --cfg-drop-prob 0.1 \
   --part-drop-prob 0.0 \
-  --lambda-cons 0.0 \
-  --num-workers 0 \
-  --sample-every-steps 300 \
-  --log-every-steps 100 \
-  --save-every-steps 3000 \
+  --num-workers 4 \
+  --sample-every-steps 100 \
+  --log-every-steps 50 \
+  --save-every-steps 1000 \
   --save-dir "${SAVE_DIR}" \
   --attn-scales 16,32
 

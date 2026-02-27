@@ -296,7 +296,6 @@ def main() -> None:
         help="Path to pretrained part encoder checkpoint from pretrain_part_style_encoder.py.",
     )
     parser.add_argument("--part-drop-prob", type=float, default=0.0)
-    parser.add_argument("--lambda-cons", type=float, default=0.0)
     parser.add_argument("--lambda-kd", type=float, default=0.0)
     parser.add_argument("--teacher-ckpt", type=str, default=None)
     parser.add_argument(
@@ -352,6 +351,7 @@ def main() -> None:
         }
     )
     transform = T.Compose([
+        T.Resize((128, 128), interpolation=T.InterpolationMode.BILINEAR, antialias=True),
         T.ToTensor(),
         T.Normalize(0.5, 0.5),
     ])
@@ -476,7 +476,6 @@ def main() -> None:
         "grad_accum_steps": max(1, int(args.grad_accum)),
         "conditioning_mode": active_mode,
         "part_drop_prob": float(args.part_drop_prob),
-        "lambda_cons": float(args.lambda_cons),
         "lambda_kd": float(args.lambda_kd if stage == "student" else 0.0),
         "teacher_model": teacher_for_distill,
         "teacher_conditioning_mode": teacher_distill_mode,

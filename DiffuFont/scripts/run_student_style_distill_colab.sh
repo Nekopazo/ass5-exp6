@@ -64,8 +64,8 @@ echo "[student_style] teacher_ckpt=${TEACHER_CKPT} teacher_mode=${TEACHER_MODE}"
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
-TARGET_STEPS=30000
-EPOCHS=12
+TARGET_STEPS=15000
+EPOCHS=6
 
 python -u train.py \
   --stage student \
@@ -74,9 +74,9 @@ python -u train.py \
   --trainer diffusion \
   --device auto \
   --precision bf16 \
-  --batch 16 \
-  --grad-accum 2 \
-  --lr 1e-4 \
+  --batch 64 \
+  --grad-accum 1 \
+  --lr 4e-4 \
   --epochs "${EPOCHS}" \
   --total-steps "${TARGET_STEPS}" \
   --lambda-diff 1.0 \
@@ -85,10 +85,10 @@ python -u train.py \
   --cfg-drop-prob 0.1 \
   --part-set-max 8 \
   --part-set-min 1 \
-  --num-workers 0 \
-  --sample-every-steps 300 \
-  --log-every-steps 100 \
-  --save-every-steps 3000 \
+  --num-workers 4 \
+  --sample-every-steps 100 \
+  --log-every-steps 50 \
+  --save-every-steps 1000 \
   --save-dir "${SAVE_DIR}" \
   --attn-scales 16,32
 

@@ -119,7 +119,7 @@ def run_inference(
     """
     Returns: {font_name: {char: {"content": Tensor, "gt": Tensor, "gen": Tensor}}}
     """
-    transform = T.Compose([T.ToTensor(), T.Normalize(0.5, 0.5)])
+    transform = T.Compose([T.Resize((128, 128), interpolation=T.InterpolationMode.BILINEAR, antialias=True), T.ToTensor(), T.Normalize(0.5, 0.5)])
     device = trainer.device
     results: Dict[str, Dict[str, dict]] = {}
 
@@ -269,7 +269,7 @@ def main():
     use_style_image = mode_uses_style(profile)
 
     # Load dataset (for data access)
-    transform = T.Compose([T.ToTensor(), T.Normalize(0.5, 0.5)])
+    transform = T.Compose([T.Resize((128, 128), interpolation=T.InterpolationMode.BILINEAR, antialias=True), T.ToTensor(), T.Normalize(0.5, 0.5)])
     dataset = FontImageDataset(
         project_root=args.data_root,
         use_style_image=use_style_image,

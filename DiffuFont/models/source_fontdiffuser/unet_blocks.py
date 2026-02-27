@@ -455,23 +455,52 @@ class MCADownBlock2D(nn.Module):
             self.post_attn_resnets,
         ):
             
-            # content
+            # content — None means skip injection for this block (e.g. Down-0 when encoder runs at 128)
             current_content_feature = encoder_hidden_states[1][index]
-            hidden_states = content_attn(hidden_states, current_content_feature)
-            
-            # First ResBlock
-            hidden_states = resnet(hidden_states, temb)
-            # Self-Attn
-            hidden_states = self_attn(hidden_states)
 
-            # parts_vector condition is optional; when disabled we skip style cross-attention.
-            current_style_feature = None
-            if encoder_hidden_states is not None and len(encoder_hidden_states) > 2:
-                current_style_feature = encoder_hidden_states[2]
-            if current_style_feature is not None:
-                hidden_states = style_cross_attn(hidden_states, context=current_style_feature)
-            # Second ResBlock
-            hidden_states = post_resnet(hidden_states, temb)
+            if self.training and self.gradient_checkpointing:
+
+                def create_custom_forward(module):
+                    def custom_forward(*inputs):
+                        return module(*inputs)
+                    return custom_forward
+
+                # Content attention (conditional)
+                if current_content_feature is not None:
+                    hidden_states = torch.utils.checkpoint.checkpoint(
+                        create_custom_forward(content_attn), hidden_states, current_content_feature, use_reentrant=False
+                    )
+                # First ResBlock
+                hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(resnet), hidden_states, temb, use_reentrant=False)
+                # Self-Attn
+                hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(self_attn), hidden_states, use_reentrant=False)
+                # Style cross-attention (optional)
+                current_style_feature = None
+                if encoder_hidden_states is not None and len(encoder_hidden_states) > 2:
+                    current_style_feature = encoder_hidden_states[2]
+                if current_style_feature is not None:
+                    hidden_states = torch.utils.checkpoint.checkpoint(
+                        create_custom_forward(style_cross_attn), hidden_states, current_style_feature, use_reentrant=False
+                    )
+                # Second ResBlock
+                hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(post_resnet), hidden_states, temb, use_reentrant=False)
+            else:
+                # Content attention (conditional)
+                if current_content_feature is not None:
+                    hidden_states = content_attn(hidden_states, current_content_feature)
+                # First ResBlock
+                hidden_states = resnet(hidden_states, temb)
+                # Self-Attn
+                hidden_states = self_attn(hidden_states)
+
+                # parts_vector condition is optional; when disabled we skip style cross-attention.
+                current_style_feature = None
+                if encoder_hidden_states is not None and len(encoder_hidden_states) > 2:
+                    current_style_feature = encoder_hidden_states[2]
+                if current_style_feature is not None:
+                    hidden_states = style_cross_attn(hidden_states, context=current_style_feature)
+                # Second ResBlock
+                hidden_states = post_resnet(hidden_states, temb)
 
             output_states += (hidden_states,)
 
@@ -550,7 +579,7 @@ class DownBlock2D(nn.Module):
 
                     return custom_forward
 
-                hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(resnet), hidden_states, temb)
+                hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(resnet), hidden_states, temb, use_reentrant=False)
             else:
                 hidden_states = resnet(hidden_states, temb)
 
@@ -701,13 +730,13 @@ class StyleUpBlock2D(nn.Module):
 
                     return custom_forward
 
-                hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(resnet), hidden_states, temb)
-                hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(self_attn), hidden_states)
+                hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(resnet), hidden_states, temb, use_reentrant=False)
+                hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(self_attn), hidden_states, use_reentrant=False)
                 if encoder_hidden_states is not None:
                     hidden_states = torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(style_cross_attn), hidden_states, encoder_hidden_states
+                        create_custom_forward(style_cross_attn), hidden_states, encoder_hidden_states, use_reentrant=False
                     )
-                hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(post_resnet), hidden_states, temb)
+                hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(post_resnet), hidden_states, temb, use_reentrant=False)
             else:
                 hidden_states = resnet(hidden_states, temb)
                 hidden_states = self_attn(hidden_states)
@@ -785,7 +814,7 @@ class UpBlock2D(nn.Module):
 
                     return custom_forward
 
-                hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(resnet), hidden_states, temb)
+                hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(resnet), hidden_states, temb, use_reentrant=False)
             else:
                 hidden_states = resnet(hidden_states, temb)
 

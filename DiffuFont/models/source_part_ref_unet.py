@@ -50,9 +50,10 @@ class SourcePartRefUNet(nn.Module):
 
         self.conditioning_profile = self._normalize_conditioning_mode(conditioning_profile)
 
-        # Content encoder runs on 256 and we explicitly pick c128/c64/c32/c16 for UNet down blocks.
+        # Content encoder runs on 128 (half-res) and we inject into Down-1/2/3 only.
+        # Down-0 (128×128) is skipped to avoid holding 256×256 tensors in VRAM.
         self.content_encoder = ContentEncoder(
-            G_ch=content_start_channel, resolution=self.image_size, input_nc=self.in_channels,
+            G_ch=content_start_channel, resolution=self.unet_input_size, input_nc=self.in_channels,
         )
 
         # 256 → 128 / 128 → 256 via bilinear interpolation.
@@ -135,7 +136,7 @@ class SourcePartRefUNet(nn.Module):
             attention_head_dim=1,
             channel_attn=channel_attn,
             content_encoder_downsample_size=self.content_encoder_downsample_size,
-            content_start_channel=content_start_channel,
+            content_start_channel=content_start_channel // 2,  # halved: encoder runs at 128, features are half-channel vs 256 mode
             reduction=32,
             attn_scales=attn_scales,
             mid_enable_content_attn=False,
@@ -168,9 +169,10 @@ class SourcePartRefUNet(nn.Module):
 
     def _check_hw(self, x: torch.Tensor, name: str) -> None:
         h, w = int(x.shape[-2]), int(x.shape[-1])
-        if h != self.image_size or w != self.image_size:
+        expected = self.unet_input_size  # content/style images are now resized to 128 on CPU
+        if h != expected or w != expected:
             raise ValueError(
-                f"{name} must be {self.image_size}x{self.image_size}, got {h}x{w}. "
+                f"{name} must be {expected}x{expected}, got {h}x{w}. "
                 "Online resize is disabled."
             )
 
@@ -271,17 +273,19 @@ class SourcePartRefUNet(nn.Module):
 
     def _content_features_for_unet(self, content_img: torch.Tensor) -> list[torch.Tensor]:
         content_img_feature, content_residual_features = self.content_encoder(content_img)
-        # ContentEncoder(256) residuals: [x256, c128, c64, c32, c16, c8]
-        if len(content_residual_features) < 5:
+        # ContentEncoder(128) residuals: [x128, c64, c32, c16, c8]
+        # Down-0 (128×128) receives None → injection skipped.
+        # Down-1/2/3 receive feat[1]/[2]/[3] with matching spatial and channel sizes.
+        if len(content_residual_features) < 4:
             raise RuntimeError(
                 f"ContentEncoder residual feature count too small: {len(content_residual_features)}"
             )
         _ = content_img_feature  # keep parity with previous call pattern
         return [
-            content_residual_features[1],
-            content_residual_features[2],
-            content_residual_features[3],
-            content_residual_features[4],
+            None,                              # Down-0: no injection (128×128 level skipped)
+            content_residual_features[1],      # Down-1: 64×64
+            content_residual_features[2],      # Down-2: 32×32
+            content_residual_features[3],      # Down-3: 16×16
         ]
 
     def _resolve_style_hidden_states(
@@ -325,13 +329,21 @@ class SourcePartRefUNet(nn.Module):
     #  Pixel ↔ Latent helpers (used by Trainer, NOT inside forward)
     # ------------------------------------------------------------------ #
     def encode_to_latent(self, x_pixel: torch.Tensor) -> torch.Tensor:
-        """Pixel (B,1,256,256) → latent (B,1,128,128) via bilinear resize."""
+        """Pixel (B,1,H,W) → latent (B,1,unet_input_size,unet_input_size) via bilinear resize.
+
+        Since dataset now resizes glyph images to unet_input_size (128) on CPU,
+        this is effectively a no-op during training (128→128).
+        """
         return torch.nn.functional.interpolate(
             x_pixel, size=self.unet_input_size, mode="bilinear", align_corners=False,
         )
 
     def decode_from_latent(self, z_latent: torch.Tensor) -> torch.Tensor:
-        """Latent (B,1,128,128) → pixel (B,1,256,256) via bilinear resize."""
+        """Latent (B,1,128,128) → pixel (B,1,image_size,image_size) via bilinear resize.
+
+        image_size=256 (default): output is 256×256 for visualization/saving only.
+        This tensor is produced only at inference time, not during the training forward pass.
+        """
         return torch.nn.functional.interpolate(
             z_latent, size=self.image_size, mode="bilinear", align_corners=False,
         )
@@ -349,10 +361,10 @@ class SourcePartRefUNet(nn.Module):
         """Predict noise (or velocity) at 128×128.
 
         Args:
-            x_t_latent: noisy image (B, 1, 128, 128) — resized from 256.
+            x_t_latent: noisy image (B, 1, 128, 128) — resized from target.
             t:          timestep indices (B,).
-            content_img: pixel-space content glyph (B, 1, 256, 256).
-            style_img:  style reference image (B, 1, 256, 256) or None.
+            content_img: content glyph (B, 1, 128, 128) — resized to half-res on CPU.
+            style_img:  style reference image (B, 1, 128, 128) or None.
             part_imgs:  part images (B, P, 1, 64, 64) or None.
             part_mask:  (B, P) or None.
             condition_mode: one of baseline/part_only/style_only/part_style.

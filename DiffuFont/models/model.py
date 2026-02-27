@@ -135,7 +135,6 @@ class DiffusionTrainer:
         grad_accum_steps: int = 1,
         conditioning_mode: str = "part_only",
         part_drop_prob: float = 0.0,
-        lambda_cons: float = 0.0,
         lambda_kd: float = 0.0,
         teacher_model: nn.Module | None = None,
         teacher_conditioning_mode: str = "part_style",
@@ -144,7 +143,6 @@ class DiffusionTrainer:
         self.model = model.to(device)
         self.conditioning_mode = str(conditioning_mode).strip().lower()
         self.part_drop_prob = float(max(0.0, min(1.0, part_drop_prob)))
-        self.lambda_cons = float(max(0.0, lambda_cons))
         self.lambda_kd = float(max(0.0, lambda_kd))
         self.teacher_conditioning_mode = str(teacher_conditioning_mode).strip().lower()
         self.teacher_model = teacher_model.to(device) if teacher_model is not None else None
@@ -427,7 +425,7 @@ class DiffusionTrainer:
 
         # Convert pixel → latent BEFORE adding noise (no grad needed for bilinear resize).
         with torch.no_grad():
-            x0_latent = self.model.encode_to_latent(x0)     # (B,1,256,256) → (B,1,128,128)
+            x0_latent = self.model.encode_to_latent(x0)     # (B,1,128,128) → (B,1,128,128) no-op (dataset already resized)
 
         with torch.autocast(
             device_type=self.device.type,
@@ -445,38 +443,6 @@ class DiffusionTrainer:
             loss_mse = F.mse_loss(eps_hat_latent, eps_latent)
             loss_nce = self._compute_nce(batch)
             eff_lnce = self.effective_lambda_nce
-            loss_cons = torch.tensor(0.0, device=self.device)
-            if (
-                self.lambda_cons > 0.0
-                and self.conditioning_mode in {"part_style", "part_only", "parts_vector_only"}
-                and style_img_orig is not None
-                and "parts" in batch
-            ):
-                part_imgs_full = batch["parts"].to(self.device)
-                part_mask_full = batch["part_mask"].to(self.device) if "part_mask" in batch else None
-                eps_with_parts = self.model(
-                    x_t_latent, t, content_orig,
-                    style_img=style_img_orig,
-                    part_imgs=part_imgs_full,
-                    part_mask=part_mask_full,
-                    condition_mode="part_style",
-                )
-                eps_no_parts = self.model(
-                    x_t_latent, t, content_orig,
-                    style_img=style_img_orig,
-                    part_imgs=None,
-                    part_mask=None,
-                    condition_mode="style_only",
-                )
-                # Only compute consistency on samples NOT dropped by CFG
-                # (CFG-null content is meaningless for style consistency).
-                keep = ~cfg_mask
-                if keep.any():
-                    loss_cons = F.mse_loss(
-                        eps_with_parts[keep], eps_no_parts[keep].detach()
-                    )
-                else:
-                    loss_cons = torch.tensor(0.0, device=self.device)
 
             loss_kd = torch.tensor(0.0, device=self.device)
             if self.lambda_kd > 0.0 and self.teacher_model is not None:
@@ -500,7 +466,6 @@ class DiffusionTrainer:
             loss = (
                 self.lambda_mse * loss_mse
                 + eff_lnce * loss_nce
-                + self.lambda_cons * loss_cons
                 + self.lambda_kd * loss_kd
             )
 
@@ -512,7 +477,6 @@ class DiffusionTrainer:
                 "loss": loss.item(),
                 "loss_mse": loss_mse.item(),
                 "loss_nce": loss_nce.item(),
-                "loss_cons": loss_cons.item(),
                 "loss_kd": loss_kd.item(),
                 "cfg_dropped": int(cfg_mask.sum().item()),
                 "part_dropped": int(part_drop_mask.sum().item()) if part_drop_mask is not None else 0,
@@ -566,7 +530,6 @@ class DiffusionTrainer:
                 "loss": float(loss.item()),
                 "loss_mse": float(loss_mse.item()),
                 "loss_nce": float(loss_nce.item()),
-                "loss_cons": float(loss_cons.item()),
                 "loss_kd": float(loss_kd.item()),
                 "cfg_dropped": int(cfg_mask.sum().item()),
                 "part_dropped": int(part_drop_mask.sum().item()) if part_drop_mask is not None else 0,
@@ -584,7 +547,7 @@ class DiffusionTrainer:
                 f"[step] gstep={self.global_step} ep={self.current_epoch} estep={self.local_step} "
                 f"loss={loss.item():.4f} mse={loss_mse.item():.4f} "
                 f"nce={loss_nce.item():.4f} λnce={eff_lnce:.4f} "
-                f"cons={loss_cons.item():.4f} kd={loss_kd.item():.4f} "
+                f"kd={loss_kd.item():.4f} "
                 f"cfg_drop={int(cfg_mask.sum().item())}/{int(B)} lr={self.lr_schedule.get_last_lr()[0]:.6e} "
                 f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s"
             )
@@ -598,7 +561,6 @@ class DiffusionTrainer:
             "loss": loss.item(),
             "loss_mse": loss_mse.item(),
             "loss_nce": loss_nce.item(),
-            "loss_cons": loss_cons.item(),
             "loss_kd": loss_kd.item(),
             "cfg_dropped": int(cfg_mask.sum().item()),
             "part_dropped": int(part_drop_mask.sum().item()) if part_drop_mask is not None else 0,
@@ -679,8 +641,7 @@ class DiffusionTrainer:
                 eps_hat = eps_cond
             x_t = dpm.step(eps_hat, t, x_t).prev_sample
 
-        # Decode latent → pixel
-        return self.model.decode_from_latent(x_t).clamp(-1, 1)
+        return x_t.clamp(-1, 1)
 
     # ------------------------------------------------------------------ #
     #  Checkpoint
@@ -886,7 +847,6 @@ class FlowMatchingTrainer(DiffusionTrainer):
         grad_accum_steps: int = 1,
         conditioning_mode: str = "part_only",
         part_drop_prob: float = 0.0,
-        lambda_cons: float = 0.0,
         lambda_kd: float = 0.0,
         teacher_model: nn.Module | None = None,
         teacher_conditioning_mode: str = "part_style",
@@ -901,7 +861,6 @@ class FlowMatchingTrainer(DiffusionTrainer):
             grad_accum_steps=grad_accum_steps,
             conditioning_mode=conditioning_mode,
             part_drop_prob=part_drop_prob,
-            lambda_cons=lambda_cons,
             lambda_kd=lambda_kd,
             teacher_model=teacher_model,
             teacher_conditioning_mode=teacher_conditioning_mode,
@@ -937,7 +896,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
 
         # Convert pixel → latent
         with torch.no_grad():
-            x0_latent = self.model.encode_to_latent(x0)  # (B,1,256,256) → (B,1,128,128)
+            x0_latent = self.model.encode_to_latent(x0)  # (B,1,128,128) → (B,1,128,128) no-op
 
         # Linear path in latent space: x_t = (1-t) x0_l + t x1_l,  v* = x1_l - x0_l.
         t = torch.rand((b,), device=self.device, dtype=x0_latent.dtype)
@@ -993,37 +952,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
             loss_fm = F.mse_loss(v_hat, v_target)
             loss_nce = self._compute_nce(batch)
             eff_lnce = self.effective_lambda_nce
-            loss_cons = torch.tensor(0.0, device=self.device)
-            if (
-                self.lambda_cons > 0.0
-                and self.conditioning_mode in {"part_style", "part_only", "parts_vector_only"}
-                and style_img_orig is not None
-                and "parts" in batch
-            ):
-                part_imgs_full = batch["parts"].to(self.device)
-                part_mask_full = batch["part_mask"].to(self.device) if "part_mask" in batch else None
-                v_with_parts = self.model(
-                    x_t_latent, t_idx, content_orig,
-                    style_img=style_img_orig,
-                    part_imgs=part_imgs_full,
-                    part_mask=part_mask_full,
-                    condition_mode="part_style",
-                )
-                v_no_parts = self.model(
-                    x_t_latent, t_idx, content_orig,
-                    style_img=style_img_orig,
-                    part_imgs=None,
-                    part_mask=None,
-                    condition_mode="style_only",
-                )
-                # Only compute consistency on samples NOT dropped by CFG.
-                keep = ~cfg_mask
-                if keep.any():
-                    loss_cons = F.mse_loss(
-                        v_with_parts[keep], v_no_parts[keep].detach()
-                    )
-                else:
-                    loss_cons = torch.tensor(0.0, device=self.device)
+
             loss_kd = torch.tensor(0.0, device=self.device)
             if self.lambda_kd > 0.0 and self.teacher_model is not None:
                 teacher_style = style_img_orig if self._mode_uses_style(self.teacher_conditioning_mode) else None
@@ -1046,7 +975,6 @@ class FlowMatchingTrainer(DiffusionTrainer):
             loss = (
                 self.lambda_fm * loss_fm
                 + eff_lnce * loss_nce
-                + self.lambda_cons * loss_cons
                 + self.lambda_kd * loss_kd
             )
 
@@ -1057,7 +985,6 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 "loss": loss.item(),
                 "loss_fm": loss_fm.item(),
                 "loss_nce": loss_nce.item(),
-                "loss_cons": loss_cons.item(),
                 "loss_kd": loss_kd.item(),
                 "cfg_dropped": int(cfg_mask.sum().item()),
                 "part_dropped": int(part_drop_mask.sum().item()) if part_drop_mask is not None else 0,
@@ -1107,7 +1034,6 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 "loss": float(loss.item()),
                 "loss_fm": float(loss_fm.item()),
                 "loss_nce": float(loss_nce.item()),
-                "loss_cons": float(loss_cons.item()),
                 "loss_kd": float(loss_kd.item()),
                 "cfg_dropped": int(cfg_mask.sum().item()),
                 "part_dropped": int(part_drop_mask.sum().item()) if part_drop_mask is not None else 0,
@@ -1123,7 +1049,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 f"[fm-step] gstep={self.global_step} ep={self.current_epoch} estep={self.local_step} "
                 f"loss={loss.item():.4f} fm={loss_fm.item():.4f} "
                 f"nce={loss_nce.item():.4f} λnce={eff_lnce:.4f} "
-                f"cons={loss_cons.item():.4f} kd={loss_kd.item():.4f} "
+                f"kd={loss_kd.item():.4f} "
                 f"cfg_drop={int(cfg_mask.sum().item())}/{int(b)} lr={self.lr_schedule.get_last_lr()[0]:.6e} "
                 f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s"
             )
@@ -1137,7 +1063,6 @@ class FlowMatchingTrainer(DiffusionTrainer):
             "loss": loss.item(),
             "loss_fm": loss_fm.item(),
             "loss_nce": loss_nce.item(),
-            "loss_cons": loss_cons.item(),
             "loss_kd": loss_kd.item(),
             "cfg_dropped": int(cfg_mask.sum().item()),
             "part_dropped": int(part_drop_mask.sum().item()) if part_drop_mask is not None else 0,
@@ -1210,8 +1135,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
             else:
                 v_hat = v_cond
             x_t = x_t - dt * v_hat
-        # Decode latent → pixel
-        return self.model.decode_from_latent(x_t).clamp(-1, 1)
+        return x_t.clamp(-1, 1)
 
     def _generate_vis_samples(
         self, content, *, style_img, part_imgs, part_mask, gs, use_cfg,

@@ -12,6 +12,7 @@ from diffusers.utils import BaseOutput, logging
 
 from .embeddings import TimestepEmbedding, Timesteps
 from .unet_blocks import (DownBlock2D,
+                          MCADownBlock2D,
                           UNetMidMCABlock2D,
                           UpBlock2D,
                           StyleUpBlock2D,
@@ -221,7 +222,7 @@ class UNet(ModelMixin, ConfigMixin):
 
     def _set_gradient_checkpointing(self, enable: bool = True, gradient_checkpointing_func=None):
         for module in self.modules():
-            if isinstance(module, (DownBlock2D, UpBlock2D)):
+            if isinstance(module, (DownBlock2D, UpBlock2D, MCADownBlock2D, StyleUpBlock2D)):
                 module.gradient_checkpointing = enable
 
     def forward(
