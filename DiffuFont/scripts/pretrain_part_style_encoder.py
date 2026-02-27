@@ -5,7 +5,7 @@ Trains part_patch_encoder, part_set_norm, style_token_mlp, and contrastive_head
 with the **same architecture** as SourcePartRefUNet so that the pretrained
 weights can be loaded directly into the full model.
 
-Input:  DataPreparation/PartBank/manifest.json
+Input:  DataPreparation/LMDB/PartBank.lmdb  (scanned directly, no manifest needed)
 Output: checkpoint with keys that map 1-to-1 to SourcePartRefUNet state dict.
 """
 
@@ -112,23 +112,26 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def load_part_bank_keys(manifest_path: Path) -> Dict[str, List[str]]:
-    """Read manifest.json and return {font_name: [lmdb_key, ...]}."""
-    obj = json.loads(manifest_path.read_text(encoding="utf-8"))
-    fonts = obj.get("fonts", {})
-    out: Dict[str, List[str]] = {}
-    for font_name, info in fonts.items():
-        parts = info.get("parts", [])
-        keys: List[str] = []
-        for p in parts:
-            # prefer lmdb_key written by build_part_bank_lmdb; fallback to path
-            k = p.get("lmdb_key") or p.get("path")
-            if not k:
-                continue
-            keys.append(str(k) if not isinstance(k, str) else k)
-        if keys:
-            out[font_name] = keys
-    return out
+def load_part_bank_keys_from_lmdb(lmdb_env) -> Dict[str, List[str]]:
+    """Scan LMDB directly and return {font_name: [lmdb_key, ...]}.
+
+    This avoids any mismatch between manifest.json and the actual LMDB
+    content (e.g. when parts were re-generated but the manifest was not
+    updated, or vice-versa).
+    """
+    import collections
+    out: Dict[str, List[str]] = collections.defaultdict(list)
+    txn = lmdb_env.begin()
+    cursor = txn.cursor()
+    for raw_key, _ in cursor:
+        key = raw_key.decode("utf-8") if isinstance(raw_key, (bytes, memoryview)) else raw_key
+        # Expected format: DataPreparation/PartBank/<font_name>/part_NNN_UXXXX.png
+        parts = key.split("/")
+        if len(parts) >= 3:
+            font_name = parts[2]  # e.g. SourceHanSerifCN-Heavy
+            out[font_name].append(key)
+    # Sort keys within each font for determinism
+    return {k: sorted(v) for k, v in out.items()}
 
 
 def load_part_image_from_lmdb(txn, lmdb_key: str, patch_size: int) -> torch.Tensor:
@@ -295,7 +298,6 @@ def run_one_batch(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project-root", type=Path, default=Path("."))
-    parser.add_argument("--manifest", type=Path, default=Path("DataPreparation/PartBank/manifest.json"))
     parser.add_argument("--part-lmdb", type=Path, default=Path("DataPreparation/LMDB/PartBank.lmdb"))
     parser.add_argument("--out", type=Path, default=Path("checkpoints/part_style_encoder_pretrain.pt"))
     parser.add_argument("--best-out", type=Path, default=Path("checkpoints/part_style_encoder_pretrain_best.pt"))
@@ -331,7 +333,6 @@ def main() -> None:
     args = parser.parse_args()
 
     root = args.project_root.resolve()
-    manifest_path = resolve_path(root, args.manifest)
     part_lmdb_path = resolve_path(root, args.part_lmdb)
     out_path = resolve_path(root, args.out)
     best_out_path = resolve_path(root, args.best_out)
@@ -361,7 +362,8 @@ def main() -> None:
     part_env = lmdb.open(str(part_lmdb_path), readonly=True, lock=False, readahead=False)
     part_txn = part_env.begin(buffers=True)
 
-    bank = load_part_bank_keys(manifest_path)
+    # Scan actual LMDB keys instead of manifest to avoid key mismatch
+    bank = load_part_bank_keys_from_lmdb(part_env)
     # keep fonts with enough parts for two random views
     bank = {k: v for k, v in bank.items() if len(v) >= max(2, args.min_set_size)}
     if len(bank) < 2:

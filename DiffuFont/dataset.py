@@ -134,7 +134,7 @@ class FontImageDataset(Dataset):
                 raise FileNotFoundError(f"PartBank LMDB not found: {part_bank_lmdb_path}")
             self.part_env = lmdb.open(str(part_bank_lmdb_path), readonly=True, lock=False, readahead=False)
             self._p_txn = self.part_env.begin(buffers=True)
-            self.part_bank_by_font = self._load_part_bank_manifest(part_bank_manifest)
+            self.part_bank_by_font = self._load_part_bank_from_lmdb(self.part_env)
             self._filter_samples_by_part_bank()
 
         if not self.samples:
@@ -197,7 +197,7 @@ class FontImageDataset(Dataset):
         return entries
 
     # ------------------------------------------------------------------ #
-    #  PartBank manifest
+    #  PartBank – scan LMDB directly (no manifest.json dependency)
     # ------------------------------------------------------------------ #
     @staticmethod
     def _parse_part_index(path_like: str) -> int:
@@ -209,42 +209,46 @@ class FontImageDataset(Dataset):
         except ValueError:
             return 1_000_000_000
 
-    def _load_part_bank_manifest(self, part_bank_manifest: Union[str, Path]) -> Dict[str, List[Dict[str, Any]]]:
-        path = Path(part_bank_manifest)
-        if not path.is_absolute():
-            path = (self.root / path).resolve()
-        if not path.exists():
-            raise FileNotFoundError(f"PartBank manifest not found: {path}")
+    @staticmethod
+    def _unicode_key_to_char(lmdb_key: str) -> str:
+        """Extract the character from a key like .../part_002_U4EE5.png -> '以'."""
+        m = re.search(r"_U([0-9A-Fa-f]{4,6})", lmdb_key)
+        if m is None:
+            return ""
+        try:
+            return chr(int(m.group(1), 16))
+        except (ValueError, OverflowError):
+            return ""
 
-        obj = json.load(path.open("r", encoding="utf-8"))
-        fonts = obj.get("fonts", {}) if isinstance(obj, dict) else {}
-        if not isinstance(fonts, dict):
-            raise RuntimeError(f"Invalid PartBank manifest format: {path}")
+    def _load_part_bank_from_lmdb(self, part_env) -> Dict[str, List[Dict[str, Any]]]:
+        """Scan PartBank LMDB keys directly and return {font: [row, ...]}.
 
-        out: Dict[str, List[Dict[str, Any]]] = {}
-        for font_name, info in fonts.items():
-            if not isinstance(font_name, str) or not isinstance(info, dict):
+        This avoids any mismatch between manifest.json and the actual LMDB
+        content. Keys are expected to look like:
+            DataPreparation/PartBank/<font_name>/part_NNN_UXXXX.png
+        """
+        from collections import defaultdict
+        tmp: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        txn = part_env.begin()
+        cursor = txn.cursor()
+        for raw_key, _ in cursor:
+            key = raw_key.decode("utf-8") if isinstance(raw_key, (bytes, memoryview)) else raw_key
+            parts = key.split("/")
+            if len(parts) < 4:
                 continue
-            part_rows: List[Dict[str, Any]] = []
-            for row in info.get("parts", []):
-                if not isinstance(row, dict):
-                    continue
-                rel = row.get("path")
-                if not isinstance(rel, str) or not rel:
-                    continue
-                rel_posix = Path(rel).as_posix()
-                lmdb_key = row.get("lmdb_key", rel_posix)
-                if not isinstance(lmdb_key, str) or not lmdb_key:
-                    lmdb_key = rel_posix
-                ch = row.get("char")
-                part_rows.append({
-                    "lmdb_key": lmdb_key,
-                    "char": ch if isinstance(ch, str) and len(ch) == 1 else "",
-                    "index": self._parse_part_index(str(rel_posix)),
-                })
-            if part_rows:
-                part_rows.sort(key=lambda x: (int(x["index"]), str(x["lmdb_key"])))
-                out[font_name] = part_rows
+            font_name = parts[2]
+            ch = self._unicode_key_to_char(key)
+            tmp[font_name].append({
+                "lmdb_key": key,
+                "char": ch,
+                "index": self._parse_part_index(key),
+            })
+        # Sort for determinism
+        out: Dict[str, List[Dict[str, Any]]] = {}
+        for font_name in sorted(tmp):
+            rows = tmp[font_name]
+            rows.sort(key=lambda x: (int(x["index"]), str(x["lmdb_key"])))
+            out[font_name] = rows
         return out
 
     def _filter_samples_by_part_bank(self) -> None:
