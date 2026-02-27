@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/content/drive/MyDrive/ass5-exp6/DiffuFont"
+ROOT="/content/drive/MyDrive/ass5/ass5-exp6/DiffuFont"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 RUN_MODE="foreground"
 LOG_FILE=""
@@ -37,13 +37,14 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
   exit 0
 fi
 
-exec >> "${LOG_FILE}" 2>&1
+exec > >(tee -a "${LOG_FILE}") 2>&1
 echo "$$" > "${PID_FILE}"
 
 
 echo "[parts_only] start $(date '+%Y-%m-%d %H:%M:%S')"
 echo "[parts_only] root=${ROOT}  pid=$$  device=auto"
 
+export PYTORCH_CUDA_ALLOC_CONF="backend:cudaMallocAsync,expandable_segments:True"
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=8
 export MKL_NUM_THREADS=8
@@ -57,8 +58,8 @@ while true; do
     --trainer diffusion \
     --device auto \
     --precision bf16 \
-    --batch 32 \
-    --lr 2e-4 \
+    --batch 16 \
+    --lr 1e-4 \
     --epochs "${EPOCHS}" \
     --total-steps "${TARGET_STEPS}" \
     --conditioning-profile parts_vector_only \
@@ -77,6 +78,7 @@ while true; do
     --save-every-steps 5000 \
     --save-dir checkpoints/parts_only_diffusion_100k \
     --attn-scales 16,32
+    --grad-accum 2
   RC=$?
   set -e
 

@@ -31,6 +31,17 @@ def _try_enable_xformers(model: SourcePartRefUNet) -> bool:
         return False
 
 
+def _try_enable_gradient_checkpointing(model: SourcePartRefUNet) -> bool:
+    """Try to enable gradient checkpointing on the UNet to save activation memory."""
+    try:
+        model.unet.enable_gradient_checkpointing()
+        print("[train] gradient checkpointing enabled")
+        return True
+    except Exception as e:
+        print(f"[train] gradient checkpointing not available: {e}")
+        return False
+
+
 def collate_fn(samples) -> Dict[str, torch.Tensor]:
     contents, targets = [], []
     parts_list, part_masks = [], []
@@ -198,6 +209,10 @@ def main() -> None:
     parser.add_argument("--style-token-dim", type=int, default=256)
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument(
+        "--grad-accum", type=int, default=1,
+        help="Gradient accumulation steps. Effective batch = batch * grad_accum.",
+    )
+    parser.add_argument(
         "--pretrained-part-encoder", type=str, default=None,
         help="Path to pretrained part encoder checkpoint from pretrain_part_style_encoder.py.",
     )
@@ -280,6 +295,7 @@ def main() -> None:
     )
 
     _try_enable_xformers(model)
+    _try_enable_gradient_checkpointing(model)
 
     if args.pretrained_part_encoder:
         ckpt = torch.load(args.pretrained_part_encoder, map_location="cpu", weights_only=True)
@@ -300,6 +316,7 @@ def main() -> None:
         "save_every_steps": (args.save_every_steps if args.save_every_steps > 0 else None),
         "log_every_steps": (args.log_every_steps if args.log_every_steps > 0 else None),
         "detailed_log": args.detailed_log,
+        "grad_accum_steps": max(1, int(args.grad_accum)),
     }
     if args.trainer == "flow_matching":
         trainer_kwargs["lambda_fm"] = args.lambda_fm

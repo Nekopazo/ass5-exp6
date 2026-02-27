@@ -305,7 +305,7 @@ def main() -> None:
     parser.add_argument("--metrics-jsonl", type=Path, default=Path("checkpoints/part_style_encoder_pretrain.metrics.jsonl"))
 
     parser.add_argument("--steps", type=int, default=5000)
-    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--min-set-size", type=int, default=1)
     parser.add_argument("--max-set-size", type=int, default=8)
     parser.add_argument("--warmup-max-set-size", type=int, default=4)

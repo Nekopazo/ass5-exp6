@@ -132,9 +132,13 @@ class DiffusionTrainer:
         save_every_steps: int | None = None,
         log_every_steps: int | None = None,
         detailed_log: bool = True,
+        grad_accum_steps: int = 1,
     ):
         self.device = device
         self.model = model.to(device)
+
+        self.grad_accum_steps = max(1, int(grad_accum_steps))
+        self._accum_step = 0
 
         self.opt = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-4)
         if int(T) <= 0:
@@ -219,6 +223,77 @@ class DiffusionTrainer:
             self.grad_scaler = torch.cuda.amp.GradScaler(enabled=self.use_grad_scaler)
 
     # ------------------------------------------------------------------ #
+    #  Gradient accumulation helpers
+    # ------------------------------------------------------------------ #
+    def _do_optimizer_update(
+        self, loss: torch.Tensor, grad_clip: float | None
+    ) -> tuple[bool, float | None]:
+        """Scale loss, backward, and conditionally step optimizer.
+
+        Returns (did_update, grad_norm).
+        did_update is True only when the accumulation cycle completes and
+        the optimizer actually steps.
+        """
+        scaled_loss = loss / self.grad_accum_steps
+
+        # zero_grad at the start of each accumulation cycle
+        if self._accum_step == 0:
+            self.opt.zero_grad(set_to_none=True)
+
+        if self.use_grad_scaler:
+            self.grad_scaler.scale(scaled_loss).backward()
+        else:
+            scaled_loss.backward()
+
+        self._accum_step += 1
+        if self._accum_step < self.grad_accum_steps:
+            # Not yet time to step
+            return False, None
+
+        # Complete cycle: perform optimizer step
+        self._accum_step = 0
+        grad_norm: float | None = None
+        if self.use_grad_scaler:
+            if grad_clip is not None:
+                self.grad_scaler.unscale_(self.opt)
+                grad_norm = float(
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip).item()
+                )
+            self.grad_scaler.step(self.opt)
+            self.grad_scaler.update()
+        else:
+            if grad_clip is not None:
+                grad_norm = float(
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip).item()
+                )
+            self.opt.step()
+        return True, grad_norm
+
+    def _flush_accumulated_grads(self, grad_clip: float | None = 1.0) -> None:
+        """Flush any remaining accumulated gradients at epoch end.
+
+        Called by train_epoch when the number of batches is not divisible
+        by grad_accum_steps, so the last micro-batch group never completed.
+        """
+        if self._accum_step == 0:
+            return
+        self._accum_step = 0
+        if self.use_grad_scaler:
+            if grad_clip is not None:
+                self.grad_scaler.unscale_(self.opt)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
+            self.grad_scaler.step(self.opt)
+            self.grad_scaler.update()
+        else:
+            if grad_clip is not None:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
+            self.opt.step()
+        if self.global_step < self.total_steps:
+            self.lr_schedule.step()
+        self.global_step += 1
+        self.local_step += 1
+
+    # ------------------------------------------------------------------ #
     #  Step log
     # ------------------------------------------------------------------ #
     def _write_step_log(self, row: Dict[str, float | int]) -> None:
@@ -301,22 +376,21 @@ class DiffusionTrainer:
                 + self.lambda_nce * loss_nce
             )
 
-        self.opt.zero_grad(set_to_none=True)
-        grad_norm: float | None = None
-        if self.use_grad_scaler:
-            self.grad_scaler.scale(loss).backward()
-            if grad_clip is not None:
-                self.grad_scaler.unscale_(self.opt)
-                grad_norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip).item())
-            self.grad_scaler.step(self.opt)
-            self.grad_scaler.update()
-        else:
-            loss.backward()
-            if grad_clip is not None:
-                grad_norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip).item())
-            self.opt.step()
+        did_update, grad_norm = self._do_optimizer_update(loss, grad_clip)
 
-        # OneCycleLR steps per batch.
+        # For micro-steps (not yet an optimizer update), return early with metrics
+        if not did_update:
+            return {
+                "loss": loss.item(),
+                "loss_mse": loss_mse.item(),
+                "loss_nce": loss_nce.item(),
+                "cfg_dropped": int(cfg_mask.sum().item()),
+                "lr": float(self.lr_schedule.get_last_lr()[0]),
+                "data_time": float(self._step_data_time),
+                "train_time": float(time.perf_counter() - _train_t0),
+            }
+
+        # OneCycleLR steps per optimizer update.
         if self.global_step < self.total_steps:
             self.lr_schedule.step()
 
@@ -529,6 +603,8 @@ class DiffusionTrainer:
             for k, v in out.items():
                 sums[k] = sums.get(k, 0.0) + float(v)
             count += 1
+        # Flush any remaining accumulated gradients at epoch end
+        self._flush_accumulated_grads(grad_clip)
         if count == 0:
             return {}
         return {k: v / count for k, v in sums.items()}
@@ -621,6 +697,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
         save_every_steps: int | None = None,
         log_every_steps: int | None = None,
         detailed_log: bool = True,
+        grad_accum_steps: int = 1,
     ):
         super().__init__(
             model=model, device=device, lr=lr,
@@ -629,6 +706,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
             sample_every_steps=sample_every_steps, precision=precision,
             save_every_steps=save_every_steps, log_every_steps=log_every_steps,
             detailed_log=detailed_log,
+            grad_accum_steps=grad_accum_steps,
         )
         self.lambda_fm = float(lambda_fm)
 
@@ -695,20 +773,18 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 + self.lambda_nce * loss_nce
             )
 
-        self.opt.zero_grad(set_to_none=True)
-        grad_norm: float | None = None
-        if self.use_grad_scaler:
-            self.grad_scaler.scale(loss).backward()
-            if grad_clip is not None:
-                self.grad_scaler.unscale_(self.opt)
-                grad_norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip).item())
-            self.grad_scaler.step(self.opt)
-            self.grad_scaler.update()
-        else:
-            loss.backward()
-            if grad_clip is not None:
-                grad_norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip).item())
-            self.opt.step()
+        did_update, grad_norm = self._do_optimizer_update(loss, grad_clip)
+
+        if not did_update:
+            return {
+                "loss": loss.item(),
+                "loss_fm": loss_fm.item(),
+                "loss_nce": loss_nce.item(),
+                "cfg_dropped": int(cfg_mask.sum().item()),
+                "lr": float(self.lr_schedule.get_last_lr()[0]),
+                "data_time": float(self._step_data_time),
+                "train_time": float(time.perf_counter() - _train_t0),
+            }
 
         if self.global_step < self.total_steps:
             self.lr_schedule.step()
