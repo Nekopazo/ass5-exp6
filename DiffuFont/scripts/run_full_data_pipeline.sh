@@ -6,6 +6,15 @@ ROOT="DiffuFont/"
 
 cd "${ROOT}"
 export PYTHONUNBUFFERED=1
+PRETRAIN_PART_SET_MIN="${PRETRAIN_PART_SET_MIN:-8}"
+PRETRAIN_PART_SET_MAX="${PRETRAIN_PART_SET_MAX:-8}"
+PRETRAIN_PART_SAMPLE_WITH_REPLACEMENT="${PRETRAIN_PART_SAMPLE_WITH_REPLACEMENT:-0}"
+PRETRAIN_PART_SAMPLE_ARGS=(--part-set-min "${PRETRAIN_PART_SET_MIN}" --part-set-max "${PRETRAIN_PART_SET_MAX}")
+if [[ "${PRETRAIN_PART_SAMPLE_WITH_REPLACEMENT}" == "1" ]]; then
+  PRETRAIN_PART_SAMPLE_ARGS+=(--part-sample-with-replacement)
+else
+  PRETRAIN_PART_SAMPLE_ARGS+=(--no-part-sample-with-replacement)
+fi
 
 echo "=========================================="
 echo "[pipeline] Step 1: Render ContentFont (grayscale)"
@@ -68,9 +77,9 @@ echo "[pipeline] Step 7: Pretrain part style encoder (contrastive)"
 echo "=========================================="
 python scripts/pretrain_part_style_encoder.py \
     --project-root "${ROOT}" \
-    --manifest DataPreparation/PartBank/manifest.json \
     --steps 10000 \
     --batch-size 64 \
+    "${PRETRAIN_PART_SAMPLE_ARGS[@]}" \
     --device auto \
     --log-every 50
 

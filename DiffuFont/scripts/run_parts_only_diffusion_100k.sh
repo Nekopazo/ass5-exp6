@@ -52,6 +52,15 @@ export OMP_NUM_THREADS=8
 export MKL_NUM_THREADS=8
 TARGET_STEPS=100000
 EPOCHS=39
+PART_SET_MIN="${PART_SET_MIN:-8}"
+PART_SET_MAX="${PART_SET_MAX:-8}"
+PART_SAMPLE_WITH_REPLACEMENT="${PART_SAMPLE_WITH_REPLACEMENT:-0}"
+PART_SAMPLE_ARGS=(--part-set-min "${PART_SET_MIN}" --part-set-max "${PART_SET_MAX}")
+if [[ "${PART_SAMPLE_WITH_REPLACEMENT}" == "1" ]]; then
+  PART_SAMPLE_ARGS+=(--part-sample-with-replacement)
+else
+  PART_SAMPLE_ARGS+=(--no-part-sample-with-replacement)
+fi
 
 RETRY=0
 while true; do
@@ -65,10 +74,8 @@ while true; do
     --epochs "${EPOCHS}" \
     --total-steps "${TARGET_STEPS}" \
     --conditioning-profile parts_vector_only \
-    --part-set-max 8 \
-    --part-set-min 1 \
+    "${PART_SAMPLE_ARGS[@]}" \
     --lambda-nce 0.05 \
-    --cfg-drop-prob 0.1 \
     --pretrained-part-encoder checkpoints/part_style_encoder_pretrain_best.pt \
     --num-workers 0 \
     --part-image-cache-size 2000 \

@@ -48,8 +48,9 @@ class FontImageDataset(Dataset):
         use_part_bank: bool = False,
         part_bank_manifest: Optional[Union[str, Path]] = None,
         part_bank_lmdb: Optional[Union[str, Path]] = None,
+        part_set_min: Optional[int] = None,
         part_set_max: int = 8,
-        part_set_min: int = 1,
+        part_sample_with_replacement: bool = False,
         part_image_size: int = 64,
         part_image_cache_size: int = 50_000,
         lmdb_decode_cache_size: int = 20_000,
@@ -68,11 +69,12 @@ class FontImageDataset(Dataset):
         self.use_part_bank = bool(use_part_bank)
         self.part_env: Any = None
         self.part_set_max = max(1, int(part_set_max))
-        self.part_set_min = max(1, int(part_set_min))
+        self.part_set_min = self.part_set_max if part_set_min is None else max(1, int(part_set_min))
         if self.part_set_min > self.part_set_max:
             raise ValueError(
-                f"part_set_min ({self.part_set_min}) must be <= part_set_max ({self.part_set_max})"
+                f"part_set_min must be <= part_set_max, got {self.part_set_min} > {self.part_set_max}"
             )
+        self.part_sample_with_replacement = bool(part_sample_with_replacement)
         self.part_image_size = max(8, int(part_image_size))
         self.part_image_cache_size = max(0, int(part_image_cache_size))
         self.lmdb_decode_cache_size = max(0, int(lmdb_decode_cache_size))
@@ -331,15 +333,26 @@ class FontImageDataset(Dataset):
             print(f"[FontImageDataset] PartBank filter removed {before - after} samples.")
 
     # ------------------------------------------------------------------ #
-    #  Part sampling -- direct label-based, random min..max per view
+    #  Part sampling -- fixed-size or variable-size range
     # ------------------------------------------------------------------ #
+    def _sample_part_count(self) -> int:
+        if self.part_set_min == self.part_set_max:
+            return int(self.part_set_max)
+        return int(self.rng.randint(self.part_set_min, self.part_set_max))
+
     def _sample_parts_for_font(self, font_name: str) -> List[Dict[str, Any]]:
-        """Random-sample part_set_min..part_set_max parts from the font's PartBank."""
+        """Sample parts from one font using configured set-size and replacement mode."""
         rows = self.part_bank_by_font.get(font_name, [])
         if not rows:
             return []
-        k = self.rng.randint(self.part_set_min, min(self.part_set_max, len(rows)))
-        return self.rng.sample(rows, k) if len(rows) >= k else rows[:]
+        k = self._sample_part_count()
+        if self.part_sample_with_replacement:
+            return [self.rng.choice(rows) for _ in range(k)]
+        if len(rows) >= k:
+            return self.rng.sample(rows, k)
+        # No replacement requested but available parts are fewer than k.
+        # Return all available parts and let collate_fn pad within the batch.
+        return self.rng.sample(rows, len(rows))
 
     def _part_array_from_bytes(self, b: bytes) -> np.ndarray:
         img = Image.open(io.BytesIO(b)).convert("L")

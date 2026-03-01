@@ -14,7 +14,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torchvision import transforms as T
 
 from dataset import FontImageDataset
@@ -45,6 +45,23 @@ def _try_enable_gradient_checkpointing(model: SourcePartRefUNet) -> bool:
 
 
 def collate_fn(samples) -> Dict[str, torch.Tensor]:
+    def _pad_part_tensors(
+        tensors: list[torch.Tensor],
+        masks: list[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        max_p = max(int(t.size(0)) for t in tensors)
+        bsz = len(tensors)
+        c = int(tensors[0].size(1))
+        h = int(tensors[0].size(2))
+        w = int(tensors[0].size(3))
+        parts_out = torch.zeros((bsz, max_p, c, h, w), dtype=tensors[0].dtype)
+        mask_out = torch.zeros((bsz, max_p), dtype=torch.float32)
+        for i, (t, m) in enumerate(zip(tensors, masks)):
+            p = int(t.size(0))
+            parts_out[i, :p] = t
+            mask_out[i, :p] = m.to(dtype=torch.float32)
+        return parts_out, mask_out
+
     contents, targets = [], []
     style_imgs = []
     has_style = False
@@ -52,11 +69,7 @@ def collate_fn(samples) -> Dict[str, torch.Tensor]:
     parts_list_b, part_masks_b = [], []
     has_parts_flags = []
 
-    # Track which sample indices have parts so we can align with full batch.
-    parts_indices = []
-    parts_b_indices = []
-
-    for si, s in enumerate(samples):
+    for s in samples:
         contents.append(s["content"])
         targets.append(s["input"])
         has_parts_flags.append(float(s.get("has_parts", 1.0 if "parts" in s else 0.0)))
@@ -67,11 +80,9 @@ def collate_fn(samples) -> Dict[str, torch.Tensor]:
         if "parts" in s:
             parts_list.append(s["parts"])
             part_masks.append(s.get("part_mask", torch.ones((s["parts"].size(0),), dtype=torch.float32)))
-            parts_indices.append(si)
         if "parts_b" in s:
             parts_list_b.append(s["parts_b"])
             part_masks_b.append(s.get("part_mask_b", torch.ones((s["parts_b"].size(0),), dtype=torch.float32)))
-            parts_b_indices.append(si)
 
     n_samples = len(samples)
 
@@ -94,38 +105,10 @@ def collate_fn(samples) -> Dict[str, torch.Tensor]:
     if has_style and len(style_imgs) == len(samples):
         batch["style_img"] = torch.stack(style_imgs)
 
-    def _pad_parts(plist, mlist, indices):
-        """Pad part tensors to a uniform batch, filling missing samples with zeros.
-
-        plist/mlist may be shorter than batch size when only some samples have
-        parts. `indices` maps each element back to its position in the batch.
-        """
-        max_parts = max(int(x.size(0)) for x in plist)
-        c = int(plist[0].size(1))
-        h = int(plist[0].size(2))
-        w = int(plist[0].size(3))
-        parts = torch.zeros((n_samples, max_parts, c, h, w), dtype=plist[0].dtype)
-        mask = torch.zeros((n_samples, max_parts), dtype=torch.float32)
-
-        for j, p in enumerate(plist):
-            bi = indices[j]  # actual batch index
-            n = int(p.size(0))
-            parts[bi, :n] = p
-            m = mlist[j]
-            if m.dim() == 1 and m.size(0) == n:
-                mask[bi, :n] = m.float()
-            else:
-                mask[bi, :n] = 1.0
-        return parts, mask
-
     if parts_list:
-        parts, mask = _pad_parts(parts_list, part_masks, parts_indices)
-        batch["parts"] = parts
-        batch["part_mask"] = mask
+        batch["parts"], batch["part_mask"] = _pad_part_tensors(parts_list, part_masks)
     if parts_list_b:
-        parts_b, mask_b = _pad_parts(parts_list_b, part_masks_b, parts_b_indices)
-        batch["parts_b"] = parts_b
-        batch["part_mask_b"] = mask_b
+        batch["parts_b"], batch["part_mask_b"] = _pad_part_tensors(parts_list_b, part_masks_b)
     return batch
 
 
@@ -211,6 +194,116 @@ def _seed_worker(worker_id: int) -> None:
     np.random.seed(ws)
 
 
+def split_indices_by_font(
+    dataset: FontImageDataset,
+    val_ratio: float,
+    seed: int,
+) -> tuple[list[int], list[int], dict[str, int]]:
+    """Split sample indices by font so train/val fonts are disjoint."""
+    total_samples = len(dataset.samples)
+    if total_samples <= 0:
+        return [], [], {"total_fonts": 0, "train_fonts": 0, "val_fonts": 0}
+
+    fonts = sorted({font for font, _ in dataset.samples})
+    if val_ratio <= 0.0 or len(fonts) < 2:
+        return (
+            list(range(total_samples)),
+            [],
+            {"total_fonts": len(fonts), "train_fonts": len(fonts), "val_fonts": 0},
+        )
+
+    rng = random.Random(int(seed) + 2027)
+    rng.shuffle(fonts)
+    val_n = int(round(len(fonts) * float(val_ratio)))
+    val_n = max(1, min(len(fonts) - 1, val_n))
+    val_fonts = set(fonts[:val_n])
+
+    train_indices: list[int] = []
+    val_indices: list[int] = []
+    for i, (font, _) in enumerate(dataset.samples):
+        if font in val_fonts:
+            val_indices.append(i)
+        else:
+            train_indices.append(i)
+
+    if not train_indices:
+        # Safety fallback: keep at least one sample in train.
+        train_indices = [val_indices.pop()]
+    if not val_indices:
+        # Safety fallback: keep at least one sample in val.
+        val_indices = [train_indices.pop()]
+
+    return (
+        train_indices,
+        val_indices,
+        {"total_fonts": len(fonts), "train_fonts": len(fonts) - val_n, "val_fonts": val_n},
+    )
+
+
+def build_mixed_visual_batch(
+    train_batch: Dict[str, torch.Tensor],
+    val_batch: Dict[str, torch.Tensor],
+    total_batch_size: int,
+) -> Dict[str, torch.Tensor]:
+    """Build a visualization batch by concatenating half train + half val."""
+    train_bs = int(train_batch["content"].size(0))
+    val_bs = int(val_batch["content"].size(0))
+    target_bs = max(2, int(total_batch_size))
+    n_train = min(max(1, target_bs // 2), train_bs)
+    n_val = min(max(1, target_bs - n_train), val_bs)
+
+    train_cut = {k: v[:n_train] for k, v in train_batch.items()}
+    val_cut = {k: v[:n_val] for k, v in val_batch.items()}
+    mixed: Dict[str, torch.Tensor] = {}
+
+    for k in train_cut:
+        if k not in val_cut:
+            continue
+        t = train_cut[k]
+        v = val_cut[k]
+        if not (torch.is_tensor(t) and torch.is_tensor(v)):
+            continue
+
+        if k in {"parts", "parts_b"} and t.dim() == 5 and v.dim() == 5:
+            max_p = max(int(t.size(1)), int(v.size(1)))
+            if int(t.size(1)) < max_p:
+                pad = torch.zeros(
+                    (int(t.size(0)), max_p - int(t.size(1)), int(t.size(2)), int(t.size(3)), int(t.size(4))),
+                    dtype=t.dtype,
+                    device=t.device,
+                )
+                t = torch.cat([t, pad], dim=1)
+            if int(v.size(1)) < max_p:
+                pad = torch.zeros(
+                    (int(v.size(0)), max_p - int(v.size(1)), int(v.size(2)), int(v.size(3)), int(v.size(4))),
+                    dtype=v.dtype,
+                    device=v.device,
+                )
+                v = torch.cat([v, pad], dim=1)
+        elif k in {"part_mask", "part_mask_b"} and t.dim() == 2 and v.dim() == 2:
+            max_p = max(int(t.size(1)), int(v.size(1)))
+            if int(t.size(1)) < max_p:
+                pad = torch.zeros((int(t.size(0)), max_p - int(t.size(1))), dtype=t.dtype, device=t.device)
+                t = torch.cat([t, pad], dim=1)
+            if int(v.size(1)) < max_p:
+                pad = torch.zeros((int(v.size(0)), max_p - int(v.size(1))), dtype=v.dtype, device=v.device)
+                v = torch.cat([v, pad], dim=1)
+
+        mixed[k] = torch.cat([t, v], dim=0)
+
+    mixed["viz_split_flag"] = torch.cat(
+        [
+            torch.ones((n_train,), dtype=torch.long),
+            torch.zeros((n_val,), dtype=torch.long),
+        ],
+        dim=0,
+    )
+
+    if "content" not in mixed:
+        raise RuntimeError("failed to build mixed visualization batch: missing content tensor")
+    return mixed
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-root", type=Path, default=Path("."))
@@ -231,7 +324,6 @@ def main() -> None:
         "--nce-warmup-steps", type=int, default=5000,
         help="Linearly ramp lambda_nce from 0 to its target over this many steps (0 = no warmup).",
     )
-    parser.add_argument("--cfg-drop-prob", type=float, default=0.1)
     parser.add_argument("--diffusion-steps", type=int, default=1000)
     parser.add_argument(
         "--total-steps",
@@ -241,6 +333,12 @@ def main() -> None:
     )
 
     parser.add_argument("--max-fonts", type=int, default=0)
+    parser.add_argument(
+        "--val-ratio",
+        type=float,
+        default=0.1,
+        help="Validation split ratio by font identity. 0 disables val split.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--stage", type=str, default="teacher", choices=["teacher", "student"])
     parser.add_argument(
@@ -267,16 +365,20 @@ def main() -> None:
 
     parser.add_argument("--part-bank-manifest", type=str, default="DataPreparation/PartBank/manifest.json")
     parser.add_argument("--part-bank-lmdb", type=str, default="DataPreparation/LMDB/PartBank.lmdb")
+    parser.add_argument("--part-set-min", type=int, default=None)
     parser.add_argument("--part-set-max", type=int, default=8)
-    parser.add_argument("--part-set-min", type=int, default=1)
+    parser.add_argument(
+        "--part-sample-with-replacement",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Sample part entries with replacement. Default false (no replacement).",
+    )
     parser.add_argument("--part-image-size", type=int, default=64)
     parser.add_argument("--part-image-cache-size", type=int, default=4096)
     parser.add_argument("--lmdb-decode-cache-size", type=int, default=1024)
 
     parser.add_argument("--sample-every-steps", type=int, default=300)
     parser.add_argument("--sample-solver", type=str, default="dpm", choices=["dpm", "ddim"])
-    parser.add_argument("--sample-guidance-scale", type=float, default=7.5)
-    parser.add_argument("--sample-use-cfg", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--sample-inference-steps", type=int, default=20)
     parser.add_argument("--log-every-steps", type=int, default=100)
     parser.add_argument("--detailed-log", action=argparse.BooleanOptionalAction, default=True)
@@ -284,8 +386,15 @@ def main() -> None:
     parser.add_argument("--save-every-steps", type=int, default=5000)
     parser.add_argument("--save-dir", type=str, default="checkpoints")
     parser.add_argument("--split-save-components", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--style-token-count", type=int, default=8)
+    parser.add_argument("--style-token-count", type=int, default=8,
+                        help="(Deprecated, ignored) Token count is now automatic: 1 per part image, 1 for style image.")
     parser.add_argument("--style-token-dim", type=int, default=256)
+    parser.add_argument(
+        "--part-encode-chunk-size",
+        type=int,
+        default=128,
+        help="Chunk size for part encoder forward over B*P samples. 0 disables chunking.",
+    )
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument(
         "--grad-accum", type=int, default=1,
@@ -307,10 +416,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.part_set_min > args.part_set_max:
-        raise ValueError(
-            f"--part-set-min ({args.part_set_min}) must be <= --part-set-max ({args.part_set_max})"
-        )
     stage = str(args.stage).strip().lower()
     if stage not in {"teacher", "student"}:
         raise ValueError(f"Unsupported --stage: {stage}")
@@ -364,8 +469,9 @@ def main() -> None:
         use_part_bank=bool(use_part_bank),
         part_bank_manifest=args.part_bank_manifest,
         part_bank_lmdb=args.part_bank_lmdb,
-        part_set_max=args.part_set_max,
         part_set_min=args.part_set_min,
+        part_set_max=args.part_set_max,
+        part_sample_with_replacement=bool(args.part_sample_with_replacement),
         part_image_size=args.part_image_size,
         part_image_cache_size=args.part_image_cache_size,
         lmdb_decode_cache_size=args.lmdb_decode_cache_size,
@@ -373,11 +479,35 @@ def main() -> None:
         transform=transform,
     )
 
+    train_indices, val_indices, split_stats = split_indices_by_font(
+        dataset=dataset,
+        val_ratio=float(args.val_ratio),
+        seed=int(args.seed),
+    )
+    train_subset = Subset(dataset, train_indices)
+    val_subset = Subset(dataset, val_indices) if val_indices else None
+    print(
+        "[train] split=by-font "
+        f"train_fonts={split_stats['train_fonts']} val_fonts={split_stats['val_fonts']} "
+        f"train_samples={len(train_indices)} val_samples={len(val_indices)}"
+    )
+    run_cfg.update(
+        {
+            "split_strategy": "by_font",
+            "val_ratio": float(args.val_ratio),
+            "split_total_fonts": int(split_stats["total_fonts"]),
+            "split_train_fonts": int(split_stats["train_fonts"]),
+            "split_val_fonts": int(split_stats["val_fonts"]),
+            "split_train_samples": int(len(train_indices)),
+            "split_val_samples": int(len(val_indices)),
+        }
+    )
+
     loader_gen = torch.Generator()
     loader_gen.manual_seed(int(args.seed))
 
     loader_kwargs: Dict[str, Any] = {
-        "dataset": dataset,
+        "dataset": train_subset,
         "batch_size": args.batch,
         "shuffle": True,
         "num_workers": int(args.num_workers),
@@ -389,8 +519,19 @@ def main() -> None:
         loader_kwargs["worker_init_fn"] = _seed_worker
     if int(args.num_workers) > 0 and int(args.prefetch_factor) > 0:
         loader_kwargs["prefetch_factor"] = int(args.prefetch_factor)
-    loader = DataLoader(**loader_kwargs)
-    steps_per_epoch = len(loader)
+    train_loader = DataLoader(**loader_kwargs)
+    val_loader = None
+    if val_subset is not None and len(val_subset) > 0:
+        val_loader = DataLoader(
+            dataset=val_subset,
+            batch_size=min(int(args.batch), len(val_subset)),
+            shuffle=False,
+            num_workers=0,
+            pin_memory=True,
+            collate_fn=collate_fn,
+        )
+
+    steps_per_epoch = len(train_loader)
     total_train_steps = steps_per_epoch * args.epochs
     if total_train_steps <= 0:
         raise ValueError(f"Invalid steps: steps_per_epoch={steps_per_epoch}, epochs={args.epochs}")
@@ -418,6 +559,7 @@ def main() -> None:
         attn_scales=attn_scales,
         style_token_count=int(args.style_token_count),
         style_token_dim=int(args.style_token_dim),
+        part_encode_chunk_size=int(args.part_encode_chunk_size),
     )
 
     _try_enable_xformers(model)
@@ -446,6 +588,7 @@ def main() -> None:
             attn_scales=attn_scales,
             style_token_count=int(args.style_token_count),
             style_token_dim=int(args.style_token_dim),
+            part_encode_chunk_size=int(args.part_encode_chunk_size),
         )
         ckpt = torch.load(args.teacher_ckpt, map_location="cpu")
         if isinstance(ckpt, dict):
@@ -466,7 +609,6 @@ def main() -> None:
         "lr": args.lr,
         "lambda_nce": eff_lambda_nce,
         "nce_warmup_steps": args.nce_warmup_steps,
-        "cfg_drop_prob": args.cfg_drop_prob,
         "T": args.diffusion_steps,
         "total_steps": total_steps,
         "precision": args.precision,
@@ -491,8 +633,6 @@ def main() -> None:
         **trainer_kwargs,
     )
     trainer.sample_solver = str(args.sample_solver).lower()
-    trainer.sample_guidance_scale = float(args.sample_guidance_scale)
-    trainer.sample_use_cfg = bool(args.sample_use_cfg)
     trainer.sample_inference_steps = int(args.sample_inference_steps)
     trainer.save_split_components = bool(args.split_save_components)
 
@@ -501,16 +641,26 @@ def main() -> None:
         print(f"Resumed from {args.resume}")
 
     try:
-        fixed_batch = next(iter(loader))
+        if args.trainer == "diffusion" and val_loader is not None:
+            train_viz_batch = next(iter(train_loader))
+            val_viz_batch = next(iter(val_loader))
+            fixed_batch = build_mixed_visual_batch(
+                train_batch=train_viz_batch,
+                val_batch=val_viz_batch,
+                total_batch_size=int(args.batch),
+            )
+        else:
+            fixed_batch = next(iter(train_loader))
     except Exception as e:
         print(
-            "[train] failed to fetch fixed sample batch from training DataLoader; "
+            "[train] failed to fetch fixed sample batch from selected DataLoader; "
             f"fallback to single-process loader. reason={type(e).__name__}: {e}"
         )
+        fallback_dataset = val_subset if (args.trainer == "diffusion" and val_subset is not None) else train_subset
         sample_loader = DataLoader(
-            dataset,
+            fallback_dataset,
             batch_size=min(int(args.batch), 8),
-            shuffle=True,
+            shuffle=False,
             num_workers=0,
             pin_memory=True,
             collate_fn=collate_fn,
@@ -527,7 +677,7 @@ def main() -> None:
     )
 
     trainer.fit(
-        loader,
+        train_loader,
         epochs=args.epochs,
         save_every=(args.save_every_epochs if args.save_every_epochs > 0 else None),
         save_dir=args.save_dir,

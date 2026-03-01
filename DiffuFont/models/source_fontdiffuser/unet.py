@@ -11,6 +11,7 @@ from diffusers.configuration_utils import (ConfigMixin,
 from diffusers.utils import BaseOutput, logging
 
 from .embeddings import TimestepEmbedding, Timesteps
+from .attention import CrossAttention
 from .unet_blocks import (DownBlock2D,
                           MCADownBlock2D,
                           UNetMidMCABlock2D,
@@ -224,6 +225,42 @@ class UNet(ModelMixin, ConfigMixin):
         for module in self.modules():
             if isinstance(module, (DownBlock2D, UpBlock2D, MCADownBlock2D, StyleUpBlock2D)):
                 module.gradient_checkpointing = enable
+
+    def set_attention_logging(self, enabled: bool) -> None:
+        for module in self.modules():
+            if isinstance(module, CrossAttention):
+                module.set_attention_logging(bool(enabled))
+
+    def reset_attention_logging(self) -> None:
+        for module in self.modules():
+            if isinstance(module, CrossAttention):
+                module.reset_attention_logging()
+
+    def collect_attention_logging(self) -> dict[int, list[float]]:
+        # Aggregate per-context-length token masses over all cross-attn modules.
+        total_sum: dict[int, torch.Tensor] = {}
+        total_count: dict[int, int] = {}
+        for module in self.modules():
+            if not isinstance(module, CrossAttention):
+                continue
+            stats = module.get_attention_logging()
+            for klen, payload in stats.items():
+                mass_sum, count = payload
+                if count <= 0:
+                    continue
+                if klen not in total_sum:
+                    total_sum[klen] = mass_sum.clone()
+                    total_count[klen] = int(count)
+                else:
+                    total_sum[klen] = total_sum[klen] + mass_sum
+                    total_count[klen] = int(total_count[klen]) + int(count)
+
+        out: dict[int, list[float]] = {}
+        for klen, mass_sum in total_sum.items():
+            cnt = max(1, int(total_count.get(klen, 1)))
+            avg = (mass_sum / float(cnt)).to(dtype=torch.float64)
+            out[int(klen)] = [float(x) for x in avg.tolist()]
+        return out
 
     def forward(
         self,

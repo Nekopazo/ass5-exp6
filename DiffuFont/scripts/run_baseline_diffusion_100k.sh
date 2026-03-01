@@ -65,7 +65,6 @@ while true; do
     --epochs "${EPOCHS}" \
     --total-steps "${TARGET_STEPS}" \
     --conditioning-profile baseline \
-    --cfg-drop-prob 0.1 \
     --num-workers 0 \
     --part-image-cache-size 2000 \
     --lmdb-decode-cache-size 0 \

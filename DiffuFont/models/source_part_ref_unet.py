@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""Source-aligned FontDiffuser model with online-retrieved PartBank style tokens.
+"""Source-aligned FontDiffuser model — 1 token per branch.
 
 Model inputs: noisy image x_t, timestep t, content image, part images + mask.
-No style reference image (RSI) branch.
+Part images → CNN each → DeepSets sum-pool → 1 token (B, 1, D).
+Style image → CNN → 1 token (B, 1, D).
+Part+Style fused via concatenation → (B, 2, D) for cross-attention.
+
+Contrastive learning and cross-attention share the *same* aggregated vector,
+ensuring optimisation target consistency.
 """
 
 from __future__ import annotations
@@ -32,8 +37,9 @@ class SourcePartRefUNet(nn.Module):
         channel_attn: bool = True,
         conditioning_profile: str = "parts_vector_only",
         attn_scales: Optional[tuple[int, ...]] = None,
-        style_token_count: int = 8,
+        style_token_count: int = 8,  # ignored (kept for backward compat); token count = num part images
         style_token_dim: int = 256,
+        part_encode_chunk_size: int = 128,
     ):
         super().__init__()
         self.in_channels = int(in_channels)
@@ -43,10 +49,10 @@ class SourcePartRefUNet(nn.Module):
             raise ValueError(f"image_size must be even for stem/head path, got {self.image_size}")
 
         self.content_encoder_downsample_size = int(content_encoder_downsample_size)
-        self.style_token_count = int(style_token_count)
         self.style_token_dim = int(style_token_dim)
-        if self.style_token_count <= 0 or self.style_token_dim <= 0:
-            raise ValueError("style_token_count and style_token_dim must be > 0")
+        self.part_encode_chunk_size = max(0, int(part_encode_chunk_size))
+        if self.style_token_dim <= 0:
+            raise ValueError("style_token_dim must be > 0")
 
         self.conditioning_profile = self._normalize_conditioning_mode(conditioning_profile)
 
@@ -60,7 +66,8 @@ class SourcePartRefUNet(nn.Module):
         # UNet operates directly on 1-channel 128×128 images (grayscale).
         self.unet_in_channels = self.in_channels  # 1
 
-        # Part set encoder + DeepSets(mean+LN) -> fixed M style tokens.
+        # Part patch encoder: each part image → CNN → 1 vector (style_token_dim).
+        # Multiple part vectors are DeepSets-summed into 1 aggregated token.
         self.part_patch_encoder = nn.Sequential(
             nn.Conv2d(self.in_channels, 64, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(64),
@@ -75,13 +82,9 @@ class SourcePartRefUNet(nn.Module):
             nn.Flatten(),
             nn.Linear(256, self.style_token_dim),
         )
-        self.part_set_norm = nn.LayerNorm(self.style_token_dim)
-        self.style_token_mlp = nn.Sequential(
-            nn.Linear(self.style_token_dim, self.style_token_dim * 4),
-            nn.SiLU(inplace=True),
-            nn.Linear(self.style_token_dim * 4, self.style_token_count * self.style_token_dim),
-        )
-        # Style image encoder -> tokens (same token geometry as part tokens).
+        self.part_token_norm = nn.LayerNorm(self.style_token_dim)
+
+        # Style image encoder → 1 token (style_token_dim).  Same arch as part.
         self.style_img_encoder = nn.Sequential(
             nn.Conv2d(self.in_channels, 64, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(64),
@@ -97,19 +100,9 @@ class SourcePartRefUNet(nn.Module):
             nn.Linear(256, self.style_token_dim),
         )
         self.style_img_norm = nn.LayerNorm(self.style_token_dim)
-        self.style_img_token_mlp = nn.Sequential(
-            nn.Linear(self.style_token_dim, self.style_token_dim * 4),
-            nn.SiLU(inplace=True),
-            nn.Linear(self.style_token_dim * 4, self.style_token_count * self.style_token_dim),
-        )
-        # Gate controls how much part tokens are injected into style tokens.
-        self.style_part_gate = nn.Sequential(
-            nn.Linear(self.style_token_dim * 2 + 1, self.style_token_dim),
-            nn.SiLU(inplace=True),
-            nn.Linear(self.style_token_dim, 1),
-        )
-        self.style_part_fuse_norm = nn.LayerNorm(self.style_token_dim)
-        # Contrastive projection head: tokens -> mean -> LN -> MLP -> L2 norm
+        self.part_agg_norm = nn.LayerNorm(self.style_token_dim)
+
+        # Contrastive projection head: aggregated part token -> LN -> MLP -> L2 norm
         self.contrastive_head = nn.Sequential(
             nn.LayerNorm(self.style_token_dim),
             nn.Linear(self.style_token_dim, self.style_token_dim),
@@ -154,7 +147,13 @@ class SourcePartRefUNet(nn.Module):
         return m
 
     def load_part_vector_pretrained(self, ckpt_path: str) -> None:
-        """Optional warm-start for the part encoder/token MLP branch."""
+        """Optional warm-start for the part encoder / contrastive head.
+
+        Supports three checkpoint layouts:
+          1. {"part_encoder": state_dict, ...}  (from pretrain_part_style_encoder)
+          2. {"state_dict": state_dict, ...}    (legacy full-model snapshot)
+          3. plain state_dict
+        """
         try:
             obj = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         except TypeError:
@@ -162,10 +161,19 @@ class SourcePartRefUNet(nn.Module):
 
         if not isinstance(obj, dict):
             raise RuntimeError(f"Unsupported part-vector checkpoint format: {type(obj)}")
-        if "state_dict" in obj and isinstance(obj.get("state_dict"), dict):
-            self.load_state_dict(obj["state_dict"], strict=False)
-            return
-        self.load_state_dict(obj, strict=False)
+        # Prefer "part_encoder" key (pretrain script output).
+        if "part_encoder" in obj and isinstance(obj["part_encoder"], dict):
+            sd = obj["part_encoder"]
+        elif "state_dict" in obj and isinstance(obj["state_dict"], dict):
+            sd = obj["state_dict"]
+        else:
+            sd = obj
+        missing, unexpected = self.load_state_dict(sd, strict=False)
+        loaded = len(sd) - len(unexpected)
+        print(
+            f"[load_part_vector_pretrained] loaded={loaded} "
+            f"missing={len(missing)} unexpected={len(unexpected)}"
+        )
 
     def _check_hw(self, x: torch.Tensor, name: str) -> None:
         h, w = int(x.shape[-2]), int(x.shape[-1])
@@ -176,76 +184,114 @@ class SourcePartRefUNet(nn.Module):
                 "Online resize is disabled."
             )
 
+    def set_attention_logging(self, enabled: bool) -> None:
+        if hasattr(self.unet, "set_attention_logging"):
+            self.unet.set_attention_logging(bool(enabled))
+
+    def reset_attention_logging(self) -> None:
+        if hasattr(self.unet, "reset_attention_logging"):
+            self.unet.reset_attention_logging()
+
+    def collect_attention_logging(self) -> dict[str, float]:
+        if not hasattr(self.unet, "collect_attention_logging"):
+            return {}
+        raw = self.unet.collect_attention_logging()
+        out: dict[str, float] = {}
+        if 2 in raw and len(raw[2]) >= 2:
+            # In part_style mode, token order is [part, style].
+            out["attn_part"] = float(raw[2][0])
+            out["attn_style"] = float(raw[2][1])
+        if 1 in raw and len(raw[1]) >= 1:
+            out["attn_single"] = float(raw[1][0])
+        return out
+
     @staticmethod
     def _check_part_mask_shape(mask: torch.Tensor, b: int, p: int) -> torch.Tensor:
         if mask.shape != (b, p):
             raise ValueError(f"part_mask shape must be {(b, p)}, got {tuple(mask.shape)}")
         return mask
 
-    def _part_vector(
+    # ------------------------------------------------------------------ #
+    #  Part encoding: P images → 1 aggregated token
+    # ------------------------------------------------------------------ #
+    def _encode_per_part_vectors(
         self,
         part_imgs: torch.Tensor,
         part_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
+        """Encode each part image independently into 1 vector each.
+
+        Internal helper — callers should use encode_part_tokens() or
+        encode_part_vector() instead.
+
+        Args:
+            part_imgs: (B, P, C, H, W)
+            part_mask: (B, P) or None.  0 = padding, 1 = valid.
+
+        Returns:
+            vectors: (B, P, D) — per-image vectors, LayerNorm'd.
+                     Padding positions are zeroed out.
+        """
         b, p, c, h, w = part_imgs.shape
         if c != self.in_channels:
             raise ValueError(f"part_imgs channels mismatch: got {c}, expected {self.in_channels}")
 
         x = part_imgs.view(b * p, c, h, w)
-        z = self.part_patch_encoder(x).view(b, p, self.style_token_dim)
-
-        if part_mask is None:
-            mask = torch.ones((b, p), dtype=z.dtype, device=z.device)
+        if self.part_encode_chunk_size > 0 and x.size(0) > self.part_encode_chunk_size:
+            z_chunks = []
+            for xc in x.split(self.part_encode_chunk_size, dim=0):
+                z_chunks.append(self.part_patch_encoder(xc))
+            z_flat = torch.cat(z_chunks, dim=0)
         else:
-            mask_bool = self._check_part_mask_shape(part_mask, b, p).to(device=z.device) > 0
-            mask = mask_bool.to(dtype=z.dtype)
+            z_flat = self.part_patch_encoder(x)
+        vectors = z_flat.view(b, p, self.style_token_dim)  # (B, P, D)
+        vectors = self.part_token_norm(vectors)             # LayerNorm per vector
 
-        denom = mask.sum(dim=1, keepdim=True).clamp_min(1.0)
-        pooled = (z * mask.unsqueeze(-1)).sum(dim=1) / denom
-        pooled = self.part_set_norm(pooled)
-        return pooled
+        # Zero out padding positions
+        if part_mask is not None:
+            mask_bool = self._check_part_mask_shape(part_mask, b, p).to(device=vectors.device) > 0
+            vectors = vectors * mask_bool.unsqueeze(-1).to(dtype=vectors.dtype)
+
+        return vectors
+
+    def _masked_sum_pool(
+        self,
+        vectors: torch.Tensor,
+        part_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """DeepSets-style sum-pool (B, P, D) → (B, D) respecting mask."""
+        if part_mask is not None:
+            mask_f = part_mask.to(device=vectors.device, dtype=vectors.dtype).unsqueeze(-1)
+            return (vectors * mask_f).sum(dim=1)  # (B, D)
+        return vectors.sum(dim=1)  # (B, D)
 
     def encode_part_vector(
         self,
         part_imgs: torch.Tensor,
         part_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        return self._part_vector(part_imgs, part_mask)
+        """Part images → 1 aggregated vector (B, D)."""
+        vectors = self._encode_per_part_vectors(part_imgs, part_mask)
+        pooled = self._masked_sum_pool(vectors, part_mask)
+        return self.part_agg_norm(pooled)
 
     def encode_part_tokens(
         self,
         part_imgs: torch.Tensor,
         part_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        return self._parts_vector_hidden_states(part_imgs, part_mask)
+        """Part images → 1 aggregated token (B, 1, D)."""
+        return self.encode_part_vector(part_imgs, part_mask).unsqueeze(1)
 
     def encode_style_tokens(self, style_img: torch.Tensor) -> torch.Tensor:
+        """Encode 1 style image into 1 token: (B, 1, D)."""
         self._check_hw(style_img, "style_img")
         b, c, _, _ = style_img.shape
         if c != self.in_channels:
             raise ValueError(f"style_img channels mismatch: got {c}, expected {self.in_channels}")
         style_vec = self.style_img_encoder(style_img).view(b, self.style_token_dim)
         style_vec = self.style_img_norm(style_vec)
-        tokens = self.style_img_token_mlp(style_vec)
-        return tokens.view(b, self.style_token_count, self.style_token_dim)
-
-    def _fuse_style_part_tokens(
-        self,
-        style_tokens: torch.Tensor,
-        part_tokens: torch.Tensor,
-        has_parts: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        b = int(style_tokens.shape[0])
-        style_pool = style_tokens.mean(dim=1)
-        part_pool = part_tokens.mean(dim=1)
-        if has_parts is None:
-            has = torch.ones((b, 1), dtype=style_tokens.dtype, device=style_tokens.device)
-        else:
-            has = has_parts.to(device=style_tokens.device, dtype=style_tokens.dtype).view(b, 1)
-        gate_in = torch.cat([style_pool, part_pool, has], dim=1)
-        gate = torch.sigmoid(self.style_part_gate(gate_in)).view(b, 1, 1) * has.view(b, 1, 1)
-        fused = style_tokens + gate * part_tokens
-        return self.style_part_fuse_norm(fused)
+        return style_vec.unsqueeze(1)  # (B, 1, D)
 
     def encode_contrastive_z(
         self,
@@ -254,22 +300,13 @@ class SourcePartRefUNet(nn.Module):
     ) -> torch.Tensor:
         """Encode a part set into an L2-normalised contrastive embedding.
 
-        parts -> CNN -> DeepSets mean-pool -> MLP -> M tokens -> mean -> proj -> L2.
+        Aggregated part vector (same as cross-attention token) → proj → L2.
+        Contrastive loss directly shapes the token that UNet cross-attention uses.
         """
-        tokens = self._parts_vector_hidden_states(part_imgs, part_mask)  # (B, M, D)
-        pooled = tokens.mean(dim=1)                                      # (B, D)
-        z = self.contrastive_head(pooled)                                # (B, D)
-        z = torch.nn.functional.normalize(z, dim=-1)                     # L2
+        pooled = self.encode_part_vector(part_imgs, part_mask)  # (B, D)
+        z = self.contrastive_head(pooled)                       # (B, D)
+        z = torch.nn.functional.normalize(z, dim=-1)            # L2
         return z
-
-    def _parts_vector_hidden_states(
-        self,
-        part_imgs: torch.Tensor,
-        part_mask: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        part_style_vec = self._part_vector(part_imgs, part_mask)
-        tokens = self.style_token_mlp(part_style_vec)
-        return tokens.view(int(part_style_vec.shape[0]), self.style_token_count, self.style_token_dim)
 
     def _content_features_for_unet(self, content_img: torch.Tensor) -> list[torch.Tensor]:
         content_img_feature, content_residual_features = self.content_encoder(content_img)
@@ -295,21 +332,22 @@ class SourcePartRefUNet(nn.Module):
         part_imgs: Optional[torch.Tensor],
         part_mask: Optional[torch.Tensor],
     ) -> Optional[torch.Tensor]:
+        """Build the cross-attention token sequence for the UNet.
+
+        part_only  → (B, 1, D)    1 aggregated part token
+        style_only → (B, 1, D)    1 style token
+        part_style → (B, 2, D)    concat(part_token, style_token)
+        baseline   → None
+        """
         mode_norm = self._normalize_conditioning_mode(mode)
 
         style_tokens: Optional[torch.Tensor] = None
         part_tokens: Optional[torch.Tensor] = None
-        has_parts: Optional[torch.Tensor] = None
 
         if style_img is not None:
-            style_tokens = self.encode_style_tokens(style_img)
+            style_tokens = self.encode_style_tokens(style_img)           # (B, 1, D)
         if part_imgs is not None:
-            part_tokens = self._parts_vector_hidden_states(part_imgs, part_mask)
-            if part_mask is None:
-                b = int(part_imgs.shape[0])
-                has_parts = torch.ones((b,), device=part_imgs.device, dtype=part_imgs.dtype)
-            else:
-                has_parts = (part_mask.to(device=part_imgs.device) > 0).any(dim=1).to(dtype=part_imgs.dtype)
+            part_tokens = self.encode_part_tokens(part_imgs, part_mask)   # (B, 1, D)
 
         if mode_norm == "baseline":
             return None
@@ -322,7 +360,8 @@ class SourcePartRefUNet(nn.Module):
                 return part_tokens
             if part_tokens is None:
                 return style_tokens
-            return self._fuse_style_part_tokens(style_tokens, part_tokens, has_parts=has_parts)
+            # (B, 1, D) + (B, 1, D) → (B, 2, D)
+            return torch.cat([part_tokens, style_tokens], dim=1)
         return None
 
     # ------------------------------------------------------------------ #

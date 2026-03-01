@@ -81,8 +81,6 @@ def load_model_and_trainer(
     trainer = trainer_cls(model, device, **trainer_kwargs)
     trainer.load(ckpt_path)
     trainer.model.eval()
-    trainer.sample_use_cfg = True
-    trainer.sample_guidance_scale = 7.5
     print(f"[inference] loaded checkpoint from {ckpt_path} (step={trainer.global_step})")
     return trainer
 
@@ -113,8 +111,6 @@ def run_inference(
     font_names: List[str],
     char_list: List[str],
     num_inference_steps: int = 20,
-    guidance_scale: float = 7.5,
-    use_cfg: bool = True,
 ) -> Dict[str, Dict[str, dict]]:
     """
     Returns: {font_name: {char: {"content": Tensor, "gt": Tensor, "gen": Tensor}}}
@@ -148,8 +144,6 @@ def run_inference(
                 part_mask = sample["part_mask"].unsqueeze(0).to(device)
 
             if isinstance(trainer, FlowMatchingTrainer):
-                trainer.sample_use_cfg = use_cfg
-                trainer.sample_guidance_scale = guidance_scale
                 gen = trainer.flow_sample(
                     content, c=num_inference_steps,
                     style_img=style_img,
@@ -160,8 +154,6 @@ def run_inference(
                     content,
                     style_img=style_img,
                     num_inference_steps=num_inference_steps,
-                    guidance_scale=guidance_scale,
-                    use_cfg=use_cfg,
                     part_imgs=part_imgs,
                     part_mask=part_mask,
                 )
@@ -237,8 +229,6 @@ def main():
     parser.add_argument("--image-size", type=int, default=256)
     parser.add_argument("--diffusion-steps", type=int, default=1000)
     parser.add_argument("--inference-steps", type=int, default=20, help="Sampling steps")
-    parser.add_argument("--guidance-scale", type=float, default=7.5)
-    parser.add_argument("--no-cfg", action="store_true")
     parser.add_argument("--num-fonts", type=int, default=4, help="Number of fonts to compare")
     parser.add_argument("--num-chars", type=int, default=6, help="Number of characters per font")
     parser.add_argument("--font-names", type=str, default=None,
@@ -247,14 +237,14 @@ def main():
                         help="Comma-separated characters to generate (overrides --num-chars)")
     parser.add_argument("--cell-size", type=int, default=128)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--style-token-count", type=int, default=8)
+    parser.add_argument("--style-token-count", type=int, default=8,
+                        help="(Deprecated, ignored) Token count is now automatic.")
     parser.add_argument("--style-token-dim", type=int, default=256)
 
     # PartBank
     parser.add_argument("--part-bank-manifest", type=str, default="DataPreparation/PartBank/manifest.json")
     parser.add_argument("--part-bank-lmdb", type=str, default="DataPreparation/LMDB/PartBank.lmdb")
     parser.add_argument("--part-set-max", type=int, default=8)
-    parser.add_argument("--part-set-min", type=int, default=1)
     parser.add_argument("--part-image-size", type=int, default=64)
 
     args = parser.parse_args()
@@ -277,7 +267,6 @@ def main():
         part_bank_manifest=args.part_bank_manifest,
         part_bank_lmdb=args.part_bank_lmdb,
         part_set_max=args.part_set_max,
-        part_set_min=args.part_set_min,
         part_image_size=args.part_image_size,
         transform=transform,
     )
@@ -323,8 +312,6 @@ def main():
         font_names=font_names,
         char_list=char_list,
         num_inference_steps=args.inference_steps,
-        guidance_scale=args.guidance_scale,
-        use_cfg=not args.no_cfg,
     )
 
     # Build and save comparison grid

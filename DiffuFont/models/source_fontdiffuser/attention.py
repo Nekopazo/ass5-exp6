@@ -205,6 +205,33 @@ class CrossAttention(nn.Module):
         self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
 
         self.to_out = nn.Sequential(nn.Linear(inner_dim, query_dim), nn.Dropout(dropout))
+        self._log_attention_enabled = False
+        self._attn_mass_sum_by_klen: dict[int, torch.Tensor] = {}
+        self._attn_mass_count_by_klen: dict[int, int] = {}
+
+    def set_attention_logging(self, enabled: bool) -> None:
+        self._log_attention_enabled = bool(enabled)
+
+    def reset_attention_logging(self) -> None:
+        self._attn_mass_sum_by_klen.clear()
+        self._attn_mass_count_by_klen.clear()
+
+    def get_attention_logging(self) -> dict[int, tuple[torch.Tensor, int]]:
+        out: dict[int, tuple[torch.Tensor, int]] = {}
+        for klen, mass_sum in self._attn_mass_sum_by_klen.items():
+            out[int(klen)] = (mass_sum.clone(), int(self._attn_mass_count_by_klen.get(klen, 0)))
+        return out
+
+    def _record_attention_probs(self, attention_probs: torch.Tensor) -> None:
+        # attention_probs: (B*H, Q, K), average over heads and query positions -> (K,)
+        klen = int(attention_probs.shape[-1])
+        mass = attention_probs.mean(dim=(0, 1)).detach().to(device="cpu", dtype=torch.float64)
+        if klen not in self._attn_mass_sum_by_klen:
+            self._attn_mass_sum_by_klen[klen] = mass
+            self._attn_mass_count_by_klen[klen] = 1
+        else:
+            self._attn_mass_sum_by_klen[klen] = self._attn_mass_sum_by_klen[klen] + mass
+            self._attn_mass_count_by_klen[klen] = int(self._attn_mass_count_by_klen[klen]) + 1
 
     def reshape_heads_to_batch_dim(self, tensor):
         batch_size, seq_len, dim = tensor.shape
@@ -238,7 +265,9 @@ class CrossAttention(nn.Module):
 
         # attention, what we cannot get enough of
 
-        if self._slice_size is None or query.shape[0] // self._slice_size == 1:
+        if self._log_attention_enabled:
+            hidden_states = self._attention(query, key, value)
+        elif self._slice_size is None or query.shape[0] // self._slice_size == 1:
             hidden_states = self._attention(query, key, value)
         else:
             hidden_states = self._sliced_attention(query, key, value, sequence_length, dim)
@@ -246,6 +275,15 @@ class CrossAttention(nn.Module):
         return self.to_out(hidden_states)
 
     def _attention(self, query, key, value):
+        # Use explicit attention path when logging is enabled so probabilities are available.
+        if self._log_attention_enabled:
+            attention_scores = torch.matmul(query, key.transpose(-1, -2)) * self.scale
+            attention_probs = attention_scores.softmax(dim=-1)
+            self._record_attention_probs(attention_probs)
+            hidden_states = torch.matmul(attention_probs, value)
+            hidden_states = self.reshape_batch_dim_to_heads(hidden_states)
+            return hidden_states
+
         # Use PyTorch SDPA to avoid explicitly materializing large attention score tensors.
         try:
             batch_heads, sequence_length, head_dim = query.shape

@@ -6,6 +6,8 @@ SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SO
 RUN_MODE="foreground"
 LOG_FILE=""
 PID_FILE=""
+RESUME_CKPT=""
+SAVE_DIR_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -13,8 +15,10 @@ while [[ $# -gt 0 ]]; do
     --daemon)     RUN_MODE="daemon";     shift ;;
     --log-file)   LOG_FILE="${2:?--log-file requires a value}"; shift 2 ;;
     --pid-file)   PID_FILE="${2:?--pid-file requires a value}"; shift 2 ;;
+    --resume)     RESUME_CKPT="${2:?--resume requires a value}"; shift 2 ;;
+    --save-dir)   SAVE_DIR_OVERRIDE="${2:?--save-dir requires a value}"; shift 2 ;;
     -h|--help)
-      echo "Usage: $0 [--foreground|--daemon] [--log-file PATH] [--pid-file PATH]"
+      echo "Usage: $0 [--foreground|--daemon] [--log-file PATH] [--pid-file PATH] [--resume CKPT] [--save-dir DIR]"
       exit 0 ;;
     *) echo "[teacher_part_only] unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -25,12 +29,26 @@ mkdir -p logs checkpoints
 
 RUN_TS="$(date '+%Y%m%d_%H%M%S')"
 SAVE_DIR="checkpoints/teacher_part_only_${RUN_TS}"
+if [[ -n "${SAVE_DIR_OVERRIDE}" ]]; then
+  SAVE_DIR="${SAVE_DIR_OVERRIDE}"
+fi
 
 [[ -z "${LOG_FILE}" ]] && LOG_FILE="logs/teacher_part_only_${RUN_TS}.log"
 [[ -z "${PID_FILE}" ]] && PID_FILE="logs/teacher_part_only.pid"
+if [[ -n "${RESUME_CKPT}" && ! -f "${RESUME_CKPT}" ]]; then
+  echo "[teacher_part_only] resume checkpoint not found: ${RESUME_CKPT}" >&2
+  exit 2
+fi
 
 if [[ "${RUN_MODE}" == "daemon" ]]; then
-  nohup bash "${SCRIPT_PATH}" --foreground --log-file "${LOG_FILE}" --pid-file "${PID_FILE}" \
+  _daemon_args=(--foreground --log-file "${LOG_FILE}" --pid-file "${PID_FILE}")
+  if [[ -n "${RESUME_CKPT}" ]]; then
+    _daemon_args+=(--resume "${RESUME_CKPT}")
+  fi
+  if [[ -n "${SAVE_DIR_OVERRIDE}" ]]; then
+    _daemon_args+=(--save-dir "${SAVE_DIR_OVERRIDE}")
+  fi
+  nohup bash "${SCRIPT_PATH}" "${_daemon_args[@]}" \
     >> "${LOG_FILE}" 2>&1 < /dev/null &
   DAEMON_PID=$!
   echo "${DAEMON_PID}" > "${PID_FILE}"
@@ -45,39 +63,59 @@ echo "$$" > "${PID_FILE}"
 
 echo "[teacher_part_only] start $(date '+%Y-%m-%d %H:%M:%S')"
 echo "[teacher_part_only] root=${ROOT} pid=$$ device=auto save_dir=${SAVE_DIR}"
+if [[ -n "${RESUME_CKPT}" ]]; then
+  echo "[teacher_part_only] resume_ckpt=${RESUME_CKPT} (will continue from checkpoint step)"
+fi
 
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
-TARGET_STEPS=50000
-EPOCHS=20
+TARGET_STEPS=30000
+PART_SET_MIN="${PART_SET_MIN:-8}"
+PART_SET_MAX="${PART_SET_MAX:-8}"
+PART_SAMPLE_WITH_REPLACEMENT="${PART_SAMPLE_WITH_REPLACEMENT:-0}"
+PART_SAMPLE_ARGS=(--part-set-min "${PART_SET_MIN}" --part-set-max "${PART_SET_MAX}")
+if [[ "${PART_SAMPLE_WITH_REPLACEMENT}" == "1" ]]; then
+  PART_SAMPLE_ARGS+=(--part-sample-with-replacement)
+else
+  PART_SAMPLE_ARGS+=(--no-part-sample-with-replacement)
+fi
 
 PRETRAINED_ENC="${ROOT}/checkpoints/part_style_encoder_pretrain_best.pt"
+if [[ -n "${RESUME_CKPT}" ]]; then
+  set -- --resume "${RESUME_CKPT}"
+  PRETRAINED_ARGS=()
+  echo "[teacher_part_only] resume enabled: skip --pretrained-part-encoder"
+else
+  set --
+  PRETRAINED_ARGS=(--pretrained-part-encoder "${PRETRAINED_ENC}")
+fi
 
 python -u train.py \
   --stage teacher \
   --teacher-line part_only \
-  --pretrained-part-encoder "${PRETRAINED_ENC}" \
+  "${PRETRAINED_ARGS[@]}" \
   --trainer diffusion \
   --device auto \
   --precision bf16 \
   --batch 64 \
   --grad-accum 1 \
   --lr 4e-4 \
-  --epochs "${EPOCHS}" \
   --total-steps "${TARGET_STEPS}" \
   --lambda-diff 1.0 \
   --lambda-nce 0.05 \
   --nce-warmup-steps 5000 \
-  --cfg-drop-prob 0.1 \
-  --part-set-max 8 \
-  --part-set-min 1 \
+  "${PART_SAMPLE_ARGS[@]}" \
   --part-drop-prob 0.0 \
   --num-workers 4 \
-  --sample-every-steps 100 \
-  --log-every-steps 50 \
-  --save-every-steps 1000 \
+  --sample-every-steps 200 \
+  --log-every-steps 100 \
+  --save-every-steps 500 \
   --save-dir "${SAVE_DIR}" \
-  --attn-scales 16,32
+  --attn-scales 16,32 \
+  --part-set-min 8 \
+  --part-set-max 8 \
+  --no-part-sample-with-replacement \
+  "$@"
 
 echo "[teacher_part_only] done $(date '+%Y-%m-%d %H:%M:%S')"
