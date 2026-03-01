@@ -71,15 +71,6 @@ export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
 TARGET_STEPS=30000
-PART_SET_MIN="${PART_SET_MIN:-8}"
-PART_SET_MAX="${PART_SET_MAX:-8}"
-PART_SAMPLE_WITH_REPLACEMENT="${PART_SAMPLE_WITH_REPLACEMENT:-0}"
-PART_SAMPLE_ARGS=(--part-set-min "${PART_SET_MIN}" --part-set-max "${PART_SET_MAX}")
-if [[ "${PART_SAMPLE_WITH_REPLACEMENT}" == "1" ]]; then
-  PART_SAMPLE_ARGS+=(--part-sample-with-replacement)
-else
-  PART_SAMPLE_ARGS+=(--no-part-sample-with-replacement)
-fi
 
 PRETRAINED_ENC="${ROOT}/checkpoints/part_style_encoder_pretrain_best.pt"
 if [[ -n "${RESUME_CKPT}" ]]; then
@@ -103,9 +94,8 @@ python -u train.py \
   --lr 4e-4 \
   --total-steps "${TARGET_STEPS}" \
   --lambda-diff 1.0 \
-  --lambda-nce 0.05 \
+  --lambda-nce 0 \
   --nce-warmup-steps 5000 \
-  "${PART_SAMPLE_ARGS[@]}" \
   --part-drop-prob 0.0 \
   --num-workers 4 \
   --sample-every-steps 200 \
@@ -113,9 +103,7 @@ python -u train.py \
   --save-every-steps 500 \
   --save-dir "${SAVE_DIR}" \
   --attn-scales 16,32 \
-  --part-set-min 8 \
-  --part-set-max 8 \
-  --no-part-sample-with-replacement \
+  --part-encode-chunk-size 0 \
   "$@"
 
 echo "[teacher_part_only] done $(date '+%Y-%m-%d %H:%M:%S')"

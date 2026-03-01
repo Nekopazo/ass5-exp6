@@ -50,7 +50,6 @@ class FontImageDataset(Dataset):
         part_bank_lmdb: Optional[Union[str, Path]] = None,
         part_set_min: Optional[int] = None,
         part_set_max: int = 8,
-        part_sample_with_replacement: bool = False,
         part_image_size: int = 40,
         part_image_cache_size: int = 50_000,
         lmdb_decode_cache_size: int = 20_000,
@@ -71,7 +70,6 @@ class FontImageDataset(Dataset):
         # Deprecated: part count is now determined by actual part files per font+char.
         self.part_set_max = max(1, int(part_set_max))
         self.part_set_min = self.part_set_max if part_set_min is None else max(1, int(part_set_min))
-        self.part_sample_with_replacement = bool(part_sample_with_replacement)
         self.part_image_size = max(8, int(part_image_size))
         self.part_image_cache_size = max(0, int(part_image_cache_size))
         self.lmdb_decode_cache_size = max(0, int(lmdb_decode_cache_size))
