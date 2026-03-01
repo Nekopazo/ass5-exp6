@@ -132,6 +132,9 @@ def filter_fonts(all_fonts: List[str], font_indices: List[int] | None) -> List[s
     return selected
 
 
+
+import concurrent.futures
+
 def generate_images(
     chars: Iterable[str],
     font_items: Iterable[str],
@@ -145,7 +148,7 @@ def generate_images(
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for font_item in font_items:
+    def process_font(font_item: str):
         font_path = resolve_font_path(project_root, font_dir, font_item)
         if not font_path.exists():
             raise FileNotFoundError(f"font not found: {font_item} -> {font_path}")
@@ -159,13 +162,12 @@ def generate_images(
         saved = 0
         unsupported_chars: List[str] = []
         print(f"Processing font: {font_name}")
-        for ch in chars:
+
+        def process_char(ch: str):
             if len(ch) != 1:
                 raise ValueError(f"invalid char entry '{ch}' in charset (expected single character)")
             if not char_supported(ch, font_path):
-                unsupported_chars.append(ch)
-                continue
-
+                return (ch, None)
             try:
                 img = draw_char(
                     ch=ch,
@@ -175,13 +177,23 @@ def generate_images(
                     x_offset=x_offset,
                     y_offset=y_offset,
                 )
+                save_path = font_out_dir / f"{font_name}@{ch}.png"
+                img.save(save_path, dpi=(300, 300))
+                return (ch, True)
             except Exception as exc:
                 raise RuntimeError(
                     f"failed to render char '{ch}' for font '{font_name}' ({font_path})"
                 ) from exc
-            save_path = font_out_dir / f"{font_name}@{ch}.png"
-            img.save(save_path, dpi=(300, 300))
-            saved += 1
+
+        results = []
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = {executor.submit(process_char, ch): ch for ch in chars}
+            for future in concurrent.futures.as_completed(futures):
+                ch, result = future.result()
+                if result is None:
+                    unsupported_chars.append(ch)
+                elif result:
+                    saved += 1
 
         if unsupported_chars:
             sample = "".join(unsupported_chars[:20])
@@ -192,6 +204,16 @@ def generate_images(
         if saved == 0:
             raise RuntimeError(f"font '{font_name}' generation failed: no glyph images were saved")
         print(f"  done: saved={saved}, unsupported=0")
+
+    # 多线程处理每个字体
+    with concurrent.futures.ThreadPoolExecutor() as font_executor:
+        font_futures = [font_executor.submit(process_font, font_item) for font_item in font_items]
+        for future in concurrent.futures.as_completed(font_futures):
+            # 这里可以捕获异常并输出
+            try:
+                future.result()
+            except Exception as e:
+                print(f"Error: {e}")
 
 
 def main() -> None:

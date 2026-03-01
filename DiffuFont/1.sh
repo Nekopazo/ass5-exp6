@@ -11,7 +11,7 @@ pip install lmdb pillow opencv-python fonttools
 echo "=========================================="
 echo "[pipeline] Step 1: Render ContentFont (grayscale)"
 echo "=========================================="
-python DiffuFont/DataPreparation/generate_font_images.py \
+python DataPreparation/generate_font_images.py \
     --project-root "${ROOT}" \
     --char-list-json CharacterData/CharList.json \
     --font-list-json DataPreparation/ContentFontList.json \
@@ -21,7 +21,7 @@ python DiffuFont/DataPreparation/generate_font_images.py \
 echo "=========================================="
 echo "[pipeline] Step 2: Render TrainFonts (grayscale)"
 echo "=========================================="
-python DiffuFont/DataPreparation/generate_font_images.py \
+python DataPreparation/generate_font_images.py \
     --project-root "${ROOT}" \
     --char-list-json CharacterData/CharList.json \
     --font-list-json DataPreparation/FontList.json \

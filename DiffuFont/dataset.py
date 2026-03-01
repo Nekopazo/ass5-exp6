@@ -296,7 +296,8 @@ class FontImageDataset(Dataset):
 
         This avoids any mismatch between manifest.json and the actual LMDB
         content. Keys are expected to look like:
-            DataPreparation/PartBank/<font_name>/part_NNN_UXXXX.png
+            DataPreparation/PartBank/<font_name>/<Uxxxx>/part_NNN_UXXXX.png
+        (legacy flat keys without the <Uxxxx> level are also supported)
         """
         from collections import defaultdict
         tmp: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
