@@ -362,7 +362,7 @@ class DiffusionTrainer:
     @staticmethod
     def _mode_uses_style(mode: str) -> bool:
         m = str(mode).strip().lower()
-        return m in {"style_only", "part_style"}
+        return m in {"style_only"}
 
     def _ensure_required_conditions(
         self,

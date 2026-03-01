@@ -51,7 +51,7 @@ class FontImageDataset(Dataset):
         part_set_min: Optional[int] = None,
         part_set_max: int = 8,
         part_sample_with_replacement: bool = False,
-        part_image_size: int = 64,
+        part_image_size: int = 40,
         part_image_cache_size: int = 50_000,
         lmdb_decode_cache_size: int = 20_000,
         random_seed: int = 42,
@@ -68,17 +68,15 @@ class FontImageDataset(Dataset):
         self.enforce_part_bank_font_match = bool(enforce_part_bank_font_match)
         self.use_part_bank = bool(use_part_bank)
         self.part_env: Any = None
+        # Deprecated: part count is now determined by actual part files per font+char.
         self.part_set_max = max(1, int(part_set_max))
         self.part_set_min = self.part_set_max if part_set_min is None else max(1, int(part_set_min))
-        if self.part_set_min > self.part_set_max:
-            raise ValueError(
-                f"part_set_min must be <= part_set_max, got {self.part_set_min} > {self.part_set_max}"
-            )
         self.part_sample_with_replacement = bool(part_sample_with_replacement)
         self.part_image_size = max(8, int(part_image_size))
         self.part_image_cache_size = max(0, int(part_image_cache_size))
         self.lmdb_decode_cache_size = max(0, int(lmdb_decode_cache_size))
         self.part_bank_by_font: Dict[str, List[Dict[str, Any]]] = {}
+        self.part_bank_by_font_char: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
         self._part_tensor_cache: "OrderedDict[str, Any]" = OrderedDict()
         self._glyph_decode_cache: "OrderedDict[str, Any]" = OrderedDict()
 
@@ -139,6 +137,7 @@ class FontImageDataset(Dataset):
 
         # ---- PartBank (direct label-based) ----
         if self.use_part_bank:
+            print("[FontImageDataset] Part sampling mode: use-all-parts-per-font-char (part_set_min/max ignored).")
             if part_bank_manifest is None:
                 part_bank_manifest = self.root / "DataPreparation" / "PartBank" / "manifest.json"
             if part_bank_lmdb is None:
@@ -301,6 +300,7 @@ class FontImageDataset(Dataset):
         """
         from collections import defaultdict
         tmp: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        tmp_char: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
         txn = part_env.begin()
         cursor = txn.cursor()
         for raw_key, _ in cursor:
@@ -315,12 +315,27 @@ class FontImageDataset(Dataset):
                 "char": ch,
                 "index": self._parse_part_index(key),
             })
+            if ch:
+                tmp_char[font_name][ch].append({
+                    "lmdb_key": key,
+                    "char": ch,
+                    "index": self._parse_part_index(key),
+                })
         # Sort for determinism
         out: Dict[str, List[Dict[str, Any]]] = {}
         for font_name in sorted(tmp):
             rows = tmp[font_name]
             rows.sort(key=lambda x: (int(x["index"]), str(x["lmdb_key"])))
             out[font_name] = rows
+        by_font_char: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+        for font_name in sorted(tmp_char):
+            char_rows: Dict[str, List[Dict[str, Any]]] = {}
+            for ch in sorted(tmp_char[font_name]):
+                rows = tmp_char[font_name][ch]
+                rows.sort(key=lambda x: (int(x["index"]), str(x["lmdb_key"])))
+                char_rows[ch] = rows
+            by_font_char[font_name] = char_rows
+        self.part_bank_by_font_char = by_font_char
         return out
 
     def _filter_samples_by_part_bank(self) -> None:
@@ -336,24 +351,22 @@ class FontImageDataset(Dataset):
     # ------------------------------------------------------------------ #
     #  Part sampling -- fixed-size or variable-size range
     # ------------------------------------------------------------------ #
-    def _sample_part_count(self) -> int:
-        if self.part_set_min == self.part_set_max:
-            return int(self.part_set_max)
-        return int(self.rng.randint(self.part_set_min, self.part_set_max))
-
-    def _sample_parts_for_font(self, font_name: str) -> List[Dict[str, Any]]:
-        """Sample parts from one font using configured set-size and replacement mode."""
-        rows = self.part_bank_by_font.get(font_name, [])
+    def _sample_parts_for_font(
+        self,
+        font_name: str,
+        ref_char: str,
+        rng: random.Random,
+    ) -> List[Dict[str, Any]]:
+        """Return all parts for one font+char; fallback to font-level when char is absent."""
+        _ = rng  # kept for backward API compatibility
+        char_map = self.part_bank_by_font_char.get(font_name, {})
+        rows = char_map.get(ref_char, [])
+        if not rows:
+            rows = self.part_bank_by_font.get(font_name, [])
         if not rows:
             return []
-        k = self._sample_part_count()
-        if self.part_sample_with_replacement:
-            return [self.rng.choice(rows) for _ in range(k)]
-        if len(rows) >= k:
-            return self.rng.sample(rows, k)
-        # No replacement requested but available parts are fewer than k.
-        # Return all available parts and let collate_fn pad within the batch.
-        return self.rng.sample(rows, len(rows))
+        # Deterministic order is already ensured at LMDB scan stage.
+        return list(rows)
 
     def _part_array_from_bytes(self, b: bytes) -> np.ndarray:
         img = Image.open(io.BytesIO(b)).convert("L")
@@ -422,7 +435,20 @@ class FontImageDataset(Dataset):
             self._cache_put(cache_key, img)
         return img
 
-    def _sample_style_char_index(self, font_name: str, target_index: int) -> int:
+    def _rng_for_index(self, sample_index: int, salt: int) -> random.Random:
+        seed = (
+            int(self._random_seed) * 1_000_003
+            + int(sample_index) * 9_176
+            + int(salt)
+        ) & 0xFFFFFFFF
+        return random.Random(seed)
+
+    def _sample_style_char_index(
+        self,
+        font_name: str,
+        target_index: int,
+        rng: random.Random,
+    ) -> int:
         """Pick a style reference index from the same font (prefer different char)."""
         candidates = self.valid_indices_by_font.get(font_name, [])
         if not candidates:
@@ -433,7 +459,7 @@ class FontImageDataset(Dataset):
         # Filter out target to guarantee a different char, then choose uniformly.
         others = [idx for idx in candidates if int(idx) != int(target_index)]
         if others:
-            return int(self.rng.choice(others))
+            return int(rng.choice(others))
         return int(target_index)
 
     # ------------------------------------------------------------------ #
@@ -499,9 +525,13 @@ class FontImageDataset(Dataset):
             "has_parts": 0.0,
         }
 
-        if self.use_style_image:
-            style_idx = self._sample_style_char_index(font_name, real_idx)
+        ref_char = ch
+        if self.use_style_image or self.use_part_bank:
+            style_rng = self._rng_for_index(index, salt=17)
+            style_idx = self._sample_style_char_index(font_name, real_idx, rng=style_rng)
             style_ch = self.char_list[style_idx]
+            ref_char = style_ch
+        if self.use_style_image:
             style_key = f"{font_name}@{style_ch}"
             style_bytes = self._t_txn.get(style_key.encode("utf-8"))
             # Fallback to target glyph if style glyph is missing unexpectedly.
@@ -515,8 +545,16 @@ class FontImageDataset(Dataset):
         if self.use_part_bank:
             if self._p_txn is None:
                 raise RuntimeError("PartBank enabled but _p_txn is not initialized.")
-            part_rows_a = self._sample_parts_for_font(font_name)
-            part_rows_b = self._sample_parts_for_font(font_name)
+            part_rows_a = self._sample_parts_for_font(
+                font_name=font_name,
+                ref_char=ref_char,
+                rng=self._rng_for_index(index, salt=101),
+            )
+            part_rows_b = self._sample_parts_for_font(
+                font_name=font_name,
+                ref_char=ref_char,
+                rng=self._rng_for_index(index, salt=202),
+            )
             if not part_rows_a or not part_rows_b:
                 raise KeyError(f"Missing PartBank parts for font: {font_name}")
             part_imgs_a = [self._load_part_tensor(self._p_txn, str(r["lmdb_key"])) for r in part_rows_a]
@@ -526,6 +564,7 @@ class FontImageDataset(Dataset):
             sample["part_mask"] = torch.ones((len(part_imgs_a),), dtype=torch.float32)
             sample["part_mask_b"] = torch.ones((len(part_imgs_b),), dtype=torch.float32)
             sample["has_parts"] = 1.0
+            sample["part_char"] = ref_char
 
         return sample
 

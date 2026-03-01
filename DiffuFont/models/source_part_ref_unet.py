@@ -4,7 +4,7 @@
 Model inputs: noisy image x_t, timestep t, content image, part images + mask.
 Part images → CNN each → DeepSets sum-pool → 1 token (B, 1, D).
 Style image → CNN → 1 token (B, 1, D).
-Part+Style fused via concatenation → (B, 2, D) for cross-attention.
+part_style is temporarily aligned with part_only (single part token).
 
 Contrastive learning and cross-attention share the *same* aggregated vector,
 ensuring optimisation target consistency.
@@ -16,6 +16,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .source_fontdiffuser import ContentEncoder, UNet
 
@@ -31,13 +32,12 @@ class SourcePartRefUNet(nn.Module):
         in_channels: int = 1,
         image_size: int = 256,
         content_start_channel: int = 64,
-        style_start_channel: int = 64,  # kept for backward arg compatibility
+        style_start_channel: int = 16,
         unet_channels: tuple[int, int, int, int] = (64, 128, 256, 512),
         content_encoder_downsample_size: int = 4,
         channel_attn: bool = True,
         conditioning_profile: str = "parts_vector_only",
         attn_scales: Optional[tuple[int, ...]] = None,
-        style_token_count: int = 8,  # ignored (kept for backward compat); token count = num part images
         style_token_dim: int = 256,
         part_encode_chunk_size: int = 128,
     ):
@@ -50,9 +50,12 @@ class SourcePartRefUNet(nn.Module):
 
         self.content_encoder_downsample_size = int(content_encoder_downsample_size)
         self.style_token_dim = int(style_token_dim)
+        self.style_start_channel = int(style_start_channel)
         self.part_encode_chunk_size = max(0, int(part_encode_chunk_size))
         if self.style_token_dim <= 0:
             raise ValueError("style_token_dim must be > 0")
+        if self.style_start_channel <= 0:
+            raise ValueError("style_start_channel must be > 0")
 
         self.conditioning_profile = self._normalize_conditioning_mode(conditioning_profile)
 
@@ -66,41 +69,43 @@ class SourcePartRefUNet(nn.Module):
         # UNet operates directly on 1-channel 128×128 images (grayscale).
         self.unet_in_channels = self.in_channels  # 1
 
-        # Part patch encoder: each part image → CNN → 1 vector (style_token_dim).
-        # Multiple part vectors are DeepSets-summed into 1 aggregated token.
+        # Part/style encoders: 1x128x128 or 1x40x40 grayscale -> style_start*16 channels.
+        # With style_start_channel=16 this gives 256 channels as requested.
+        c1 = self.style_start_channel
+        c2 = self.style_start_channel * 4
+        c3 = self.style_start_channel * 16
+        self._style_feat_channels = c3
+
         self.part_patch_encoder = nn.Sequential(
-            nn.Conv2d(self.in_channels, 64, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(self.in_channels, c1, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(c1),
             nn.SiLU(inplace=True),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(128),
+            nn.Conv2d(c1, c2, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(c2),
             nn.SiLU(inplace=True),
-            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(256),
+            nn.Conv2d(c2, c3, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(c3),
             nn.SiLU(inplace=True),
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(256, self.style_token_dim),
         )
-        self.part_token_norm = nn.LayerNorm(self.style_token_dim)
+        self.part_feat_to_token = (
+            nn.Identity() if c3 == self.style_token_dim else nn.Linear(c3, self.style_token_dim)
+        )
 
         # Style image encoder → 1 token (style_token_dim).  Same arch as part.
         self.style_img_encoder = nn.Sequential(
-            nn.Conv2d(self.in_channels, 64, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(self.in_channels, c1, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(c1),
             nn.SiLU(inplace=True),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(128),
+            nn.Conv2d(c1, c2, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(c2),
             nn.SiLU(inplace=True),
-            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(256),
+            nn.Conv2d(c2, c3, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(c3),
             nn.SiLU(inplace=True),
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(256, self.style_token_dim),
         )
-        self.style_img_norm = nn.LayerNorm(self.style_token_dim)
-        self.part_agg_norm = nn.LayerNorm(self.style_token_dim)
+        self.style_feat_to_token = (
+            nn.Identity() if c3 == self.style_token_dim else nn.Linear(c3, self.style_token_dim)
+        )
 
         # Contrastive projection head: aggregated part token -> LN -> MLP -> L2 norm
         self.contrastive_head = nn.Sequential(
@@ -198,7 +203,6 @@ class SourcePartRefUNet(nn.Module):
         raw = self.unet.collect_attention_logging()
         out: dict[str, float] = {}
         if 2 in raw and len(raw[2]) >= 2:
-            # In part_style mode, token order is [part, style].
             out["attn_part"] = float(raw[2][0])
             out["attn_style"] = float(raw[2][1])
         if 1 in raw and len(raw[1]) >= 1:
@@ -229,7 +233,7 @@ class SourcePartRefUNet(nn.Module):
             part_mask: (B, P) or None.  0 = padding, 1 = valid.
 
         Returns:
-            vectors: (B, P, D) — per-image vectors, LayerNorm'd.
+            vectors: (B, P, D) — per-image vectors.
                      Padding positions are zeroed out.
         """
         b, p, c, h, w = part_imgs.shape
@@ -244,8 +248,9 @@ class SourcePartRefUNet(nn.Module):
             z_flat = torch.cat(z_chunks, dim=0)
         else:
             z_flat = self.part_patch_encoder(x)
-        vectors = z_flat.view(b, p, self.style_token_dim)  # (B, P, D)
-        vectors = self.part_token_norm(vectors)             # LayerNorm per vector
+        vec_flat = F.adaptive_avg_pool2d(z_flat, 1).flatten(1)
+        vec_flat = self.part_feat_to_token(vec_flat)
+        vectors = vec_flat.view(b, p, self.style_token_dim)  # (B, P, D)
 
         # Zero out padding positions
         if part_mask is not None:
@@ -273,7 +278,7 @@ class SourcePartRefUNet(nn.Module):
         """Part images → 1 aggregated vector (B, D)."""
         vectors = self._encode_per_part_vectors(part_imgs, part_mask)
         pooled = self._masked_sum_pool(vectors, part_mask)
-        return self.part_agg_norm(pooled)
+        return F.normalize(pooled, dim=-1, eps=1e-12)
 
     def encode_part_tokens(
         self,
@@ -289,8 +294,9 @@ class SourcePartRefUNet(nn.Module):
         b, c, _, _ = style_img.shape
         if c != self.in_channels:
             raise ValueError(f"style_img channels mismatch: got {c}, expected {self.in_channels}")
-        style_vec = self.style_img_encoder(style_img).view(b, self.style_token_dim)
-        style_vec = self.style_img_norm(style_vec)
+        style_feat = self.style_img_encoder(style_img)
+        style_vec = F.adaptive_avg_pool2d(style_feat, 1).flatten(1)
+        style_vec = self.style_feat_to_token(style_vec).view(b, self.style_token_dim)
         return style_vec.unsqueeze(1)  # (B, 1, D)
 
     def encode_contrastive_z(
@@ -356,12 +362,8 @@ class SourcePartRefUNet(nn.Module):
         if mode_norm == "style_only":
             return style_tokens
         if mode_norm == "part_style":
-            if style_tokens is None:
-                return part_tokens
-            if part_tokens is None:
-                return style_tokens
-            # (B, 1, D) + (B, 1, D) → (B, 2, D)
-            return torch.cat([part_tokens, style_tokens], dim=1)
+            # Temporary alignment requested: make part_style branch identical to part_only.
+            return part_tokens
         return None
 
     # ------------------------------------------------------------------ #
@@ -404,7 +406,7 @@ class SourcePartRefUNet(nn.Module):
             t:          timestep indices (B,).
             content_img: content glyph (B, 1, 128, 128) — resized to half-res on CPU.
             style_img:  style reference image (B, 1, 128, 128) or None.
-            part_imgs:  part images (B, P, 1, 64, 64) or None.
+            part_imgs:  part images (B, P, 1, 40, 40) or None.
             part_mask:  (B, P) or None.
             condition_mode: one of baseline/part_only/style_only/part_style.
 

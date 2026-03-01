@@ -61,8 +61,9 @@ def list_chars_in_dir(font_dir: str) -> List[Tuple[str, str]]:
     return results
 
 
-def save_part_png(patch_mask: np.ndarray, out_path: str) -> None:
-    arr = (patch_mask * 255).clip(0, 255).astype(np.uint8)
+def save_part_png(gray_patch: np.ndarray, out_path: str) -> None:
+    """Save a 40×40 grayscale patch as PNG (black stroke, white background)."""
+    arr = gray_patch.astype(np.uint8)
     img = Image.fromarray(arr, mode="L")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     img.save(out_path, format="PNG", compress_level=1)
@@ -118,8 +119,9 @@ def _process_font_worker(args_tuple: tuple) -> Dict[str, Any]:
             for pi, part_info in enumerate(all_parts):
                 fname = f"part_{pi:03d}_{utag}.png"
                 part_path = os.path.join(char_out_dir, fname)
-                mask_arr = np.array(part_info["patch_mask"], dtype=np.float32)
-                save_part_png(mask_arr, part_path)
+                # Save grayscale crop (black stroke, white background)
+                gray_arr = np.array(part_info["patch_gray"], dtype=np.uint8)
+                save_part_png(gray_arr, part_path)
 
                 lmdb_key = f"DataPreparation/PartBank/{font_name}/{utag}/{fname}"
                 manifest_parts.append({

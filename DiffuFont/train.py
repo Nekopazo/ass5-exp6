@@ -129,7 +129,7 @@ def mode_uses_parts(mode: str) -> bool:
 
 
 def mode_uses_style(mode: str) -> bool:
-    return normalize_conditioning_mode(mode) in {"style_only", "part_style"}
+    return normalize_conditioning_mode(mode) in {"style_only"}
 
 
 def resolve_device(device_arg: str) -> torch.device:
@@ -373,7 +373,7 @@ def main() -> None:
         default=False,
         help="Sample part entries with replacement. Default false (no replacement).",
     )
-    parser.add_argument("--part-image-size", type=int, default=64)
+    parser.add_argument("--part-image-size", type=int, default=40)
     parser.add_argument("--part-image-cache-size", type=int, default=4096)
     parser.add_argument("--lmdb-decode-cache-size", type=int, default=1024)
 
@@ -386,8 +386,7 @@ def main() -> None:
     parser.add_argument("--save-every-steps", type=int, default=5000)
     parser.add_argument("--save-dir", type=str, default="checkpoints")
     parser.add_argument("--split-save-components", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--style-token-count", type=int, default=8,
-                        help="(Deprecated, ignored) Token count is now automatic: 1 per part image, 1 for style image.")
+    parser.add_argument("--style-start-channel", type=int, default=16)
     parser.add_argument("--style-token-dim", type=int, default=256)
     parser.add_argument(
         "--part-encode-chunk-size",
@@ -551,13 +550,12 @@ def main() -> None:
         in_channels=1,
         image_size=args.image_size,
         content_start_channel=64,
-        style_start_channel=64,
+        style_start_channel=int(args.style_start_channel),
         unet_channels=(64, 128, 256, 512),
         content_encoder_downsample_size=4,
         channel_attn=True,
         conditioning_profile=active_mode,
         attn_scales=attn_scales,
-        style_token_count=int(args.style_token_count),
         style_token_dim=int(args.style_token_dim),
         part_encode_chunk_size=int(args.part_encode_chunk_size),
     )
@@ -580,13 +578,12 @@ def main() -> None:
             in_channels=1,
             image_size=args.image_size,
             content_start_channel=64,
-            style_start_channel=64,
+            style_start_channel=int(args.style_start_channel),
             unet_channels=(64, 128, 256, 512),
             content_encoder_downsample_size=4,
             channel_attn=True,
             conditioning_profile=teacher_distill_mode,
             attn_scales=attn_scales,
-            style_token_count=int(args.style_token_count),
             style_token_dim=int(args.style_token_dim),
             part_encode_chunk_size=int(args.part_encode_chunk_size),
         )

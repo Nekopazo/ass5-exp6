@@ -49,31 +49,32 @@ class PartEncoderModule(nn.Module):
     def __init__(
         self,
         in_channels: int = 1,
+        style_start_channel: int = 16,
         style_token_dim: int = 256,
-        style_token_count: int = 8,  # ignored (kept for backward compat)
     ):
         super().__init__()
         self.in_channels = in_channels
+        self.style_start_channel = int(style_start_channel)
         self.style_token_dim = style_token_dim
 
         # Same architecture as SourcePartRefUNet.part_patch_encoder
+        c1 = self.style_start_channel
+        c2 = self.style_start_channel * 4
+        c3 = self.style_start_channel * 16
         self.part_patch_encoder = nn.Sequential(
-            nn.Conv2d(in_channels, 64, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(in_channels, c1, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(c1),
             nn.SiLU(inplace=True),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(128),
+            nn.Conv2d(c1, c2, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(c2),
             nn.SiLU(inplace=True),
-            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(256),
+            nn.Conv2d(c2, c3, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(c3),
             nn.SiLU(inplace=True),
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(256, style_token_dim),
         )
-        # Per-part token norm (matches SourcePartRefUNet.part_token_norm)
-        self.part_token_norm = nn.LayerNorm(style_token_dim)
-        self.part_agg_norm = nn.LayerNorm(style_token_dim)
+        self.part_feat_to_token = (
+            nn.Identity() if c3 == self.style_token_dim else nn.Linear(c3, self.style_token_dim)
+        )
         self.contrastive_head = nn.Sequential(
             nn.LayerNorm(style_token_dim),
             nn.Linear(style_token_dim, style_token_dim),
@@ -93,12 +94,13 @@ class PartEncoderModule(nn.Module):
         """
         b, p, c, h, w = part_imgs.shape
         x = part_imgs.view(b * p, c, h, w)
-        z = self.part_patch_encoder(x).view(b, p, self.style_token_dim)  # (B, P, D)
-        z = self.part_token_norm(z)  # LayerNorm per token
+        feat = self.part_patch_encoder(x)
+        vec = F.adaptive_avg_pool2d(feat, 1).flatten(1)
+        vec = self.part_feat_to_token(vec).view(b, p, self.style_token_dim)  # (B, P, D)
 
-        mask_f = part_mask.to(dtype=z.dtype, device=z.device).unsqueeze(-1)  # (B, P, 1)
-        pooled = (z * mask_f).sum(dim=1)  # (B, D)
-        pooled = self.part_agg_norm(pooled)
+        mask_f = part_mask.to(dtype=vec.dtype, device=vec.device).unsqueeze(-1)  # (B, P, 1)
+        pooled = (vec * mask_f).sum(dim=1)  # (B, D)
+        pooled = F.normalize(pooled, dim=-1, eps=1e-12)
 
         out = self.contrastive_head(pooled)  # (B, D)
         return F.normalize(out, dim=-1)
@@ -116,26 +118,49 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def load_part_bank_keys_from_lmdb(lmdb_env) -> Dict[str, List[str]]:
-    """Scan LMDB directly and return {font_name: [lmdb_key, ...]}.
+def _unicode_key_to_char(lmdb_key: str) -> str:
+    """Extract char from key suffix ..._U4E00.png -> '一'."""
+    import re
+    m = re.search(r"_U([0-9A-Fa-f]{4,6})", lmdb_key)
+    if m is None:
+        return ""
+    try:
+        return chr(int(m.group(1), 16))
+    except (ValueError, OverflowError):
+        return ""
+
+
+def load_part_bank_keys_from_lmdb(lmdb_env) -> Dict[str, Dict[str, List[str]]]:
+    """Scan LMDB directly and return {font_name: {char: [lmdb_key, ...]}}.
 
     This avoids any mismatch between manifest.json and the actual LMDB
     content (e.g. when parts were re-generated but the manifest was not
     updated, or vice-versa).
     """
     import collections
-    out: Dict[str, List[str]] = collections.defaultdict(list)
+    out: Dict[str, Dict[str, List[str]]] = collections.defaultdict(
+        lambda: collections.defaultdict(list)
+    )
     txn = lmdb_env.begin()
     cursor = txn.cursor()
     for raw_key, _ in cursor:
         key = raw_key.decode("utf-8") if isinstance(raw_key, (bytes, memoryview)) else raw_key
-        # Expected format: DataPreparation/PartBank/<font_name>/part_NNN_UXXXX.png
+        # Expected format:
+        # DataPreparation/PartBank/<font_name>/<Uxxxx>/part_NNN_UXXXX.png
         parts = key.split("/")
         if len(parts) >= 3:
             font_name = parts[2]  # e.g. SourceHanSerifCN-Heavy
-            out[font_name].append(key)
-    # Sort keys within each font for determinism
-    return {k: sorted(v) for k, v in out.items()}
+            ch = _unicode_key_to_char(key)
+            if not ch:
+                continue
+            out[font_name][ch].append(key)
+    # Sort keys within each font/char for determinism
+    merged: Dict[str, Dict[str, List[str]]] = {}
+    for font_name, char_map in out.items():
+        merged[font_name] = {
+            ch: sorted(paths) for ch, paths in sorted(char_map.items()) if paths
+        }
+    return merged
 
 
 def load_part_image_from_lmdb(txn, lmdb_key: str, patch_size: int) -> torch.Tensor:
@@ -151,25 +176,9 @@ def load_part_image_from_lmdb(txn, lmdb_key: str, patch_size: int) -> torch.Tens
     return torch.from_numpy(arr)[None, :, :].contiguous()  # (1, H, W)
 
 
-def sample_keys(
-    keys: List[str],
-    n_min: int,
-    n_max: int,
-    sample_with_replacement: bool,
-    rng: random.Random,
-) -> Tuple[List[str], List[float]]:
-    """Return sampled lmdb keys and validity mask (all ones, padding happens later)."""
-    n_min = max(1, int(n_min))
-    n_max = max(n_min, int(n_max))
-    target_n = n_min if n_min == n_max else rng.randint(n_min, n_max)
-
-    if sample_with_replacement:
-        chosen = [rng.choice(keys) for _ in range(target_n)]
-    elif len(keys) >= target_n:
-        chosen = rng.sample(keys, target_n)
-    else:
-        chosen = rng.sample(keys, len(keys))
-
+def all_keys(keys: List[str]) -> Tuple[List[str], List[float]]:
+    """Return all lmdb keys with full-valid mask."""
+    chosen = list(keys)
     mask = [1.0] * len(chosen)
     return chosen, mask
 
@@ -194,17 +203,23 @@ def pad_part_batch(
 
 
 def split_fonts(
-    bank: Dict[str, List[str]],
+    bank: Dict[str, Dict[str, List[str]]],
     val_ratio: float,
     seed: int,
-) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
+) -> Tuple[Dict[str, Dict[str, List[str]]], Dict[str, Dict[str, List[str]]]]:
     """Split train/val by font identity (no font overlap across splits)."""
     if val_ratio <= 0.0:
-        return {k: list(v) for k, v in bank.items()}, {}
+        return (
+            {k: {ck: list(cv) for ck, cv in v.items()} for k, v in bank.items()},
+            {},
+        )
 
     fonts = sorted(bank.keys())
     if len(fonts) < 2:
-        return {k: list(v) for k, v in bank.items()}, {}
+        return (
+            {k: {ck: list(cv) for ck, cv in v.items()} for k, v in bank.items()},
+            {},
+        )
 
     rng = random.Random(seed + 1009)
     rng.shuffle(fonts)
@@ -213,13 +228,13 @@ def split_fonts(
     val_n = max(1, min(len(fonts) - 1, val_n))
     val_fonts = set(fonts[:val_n])
 
-    train_bank: Dict[str, List[str]] = {}
-    val_bank: Dict[str, List[str]] = {}
+    train_bank: Dict[str, Dict[str, List[str]]] = {}
+    val_bank: Dict[str, Dict[str, List[str]]] = {}
     for font, paths in bank.items():
         if font in val_fonts:
-            val_bank[font] = list(paths)
+            val_bank[font] = {ck: list(cv) for ck, cv in paths.items()}
         else:
-            train_bank[font] = list(paths)
+            train_bank[font] = {ck: list(cv) for ck, cv in paths.items()}
     return train_bank, val_bank
 
 
@@ -258,7 +273,7 @@ def make_checkpoint(
 
 def run_one_batch(
     encoder: PartEncoderModule,
-    bank: Dict[str, List[str]],
+    bank: Dict[str, Dict[str, List[str]]],
     font_pool: List[str],
     batch_size: int,
     part_set_min: int,
@@ -282,26 +297,22 @@ def run_one_batch(
     mask2_list: List[torch.Tensor] = []
 
     for font in batch_fonts:
-        part_paths = bank[font]
-        set1, m1 = sample_keys(
-            part_paths,
-            n_min=part_set_min,
-            n_max=part_set_max,
-            sample_with_replacement=part_sample_with_replacement,
-            rng=rng,
-        )
-        set2, m2 = sample_keys(
-            part_paths,
-            n_min=part_set_min,
-            n_max=part_set_max,
-            sample_with_replacement=part_sample_with_replacement,
-            rng=rng,
-        )
+        char_map = bank[font]
+        chars = [c for c, ks in char_map.items() if ks]
+        if not chars:
+            continue
+        ref_char = rng.choice(chars)
+        part_paths = char_map[ref_char]
+        set1, m1 = all_keys(part_paths)
+        set2, m2 = all_keys(part_paths)
 
         imgs1_list.append(torch.stack([load_part_image_from_lmdb(lmdb_txn, k, patch_size) for k in set1]))
         mask1_list.append(torch.tensor(m1, dtype=torch.float32))
         imgs2_list.append(torch.stack([load_part_image_from_lmdb(lmdb_txn, k, patch_size) for k in set2]))
         mask2_list.append(torch.tensor(m2, dtype=torch.float32))
+
+    if not imgs1_list or not imgs2_list:
+        raise RuntimeError("Empty batch after sampling font/char-part sets.")
 
     imgs1, mask1 = pad_part_batch(imgs1_list, mask1_list)
     imgs2, mask2 = pad_part_batch(imgs2_list, mask2_list)
@@ -342,19 +353,14 @@ def main() -> None:
 
     parser.add_argument("--steps", type=int, default=2000)
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument(
-        "--part-set-size",
-        type=int,
-        default=None,
-        help="Deprecated alias. If set, forces fixed size by setting min=max=part_set_size.",
-    )
-    parser.add_argument("--part-set-min", type=int, default=1)
-    parser.add_argument("--part-set-max", type=int, default=8)
+    parser.add_argument("--part-set-size", type=int, default=None, help="Deprecated, ignored.")
+    parser.add_argument("--part-set-min", type=int, default=1, help="Deprecated, ignored.")
+    parser.add_argument("--part-set-max", type=int, default=8, help="Deprecated, ignored.")
     parser.add_argument(
         "--part-sample-with-replacement",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Sample part entries with replacement. Default false (no replacement).",
+        help="Deprecated, ignored.",
     )
     parser.add_argument("--val-ratio", type=float, default=0.1)
     parser.add_argument("--val-batches", type=int, default=8)
@@ -367,9 +373,9 @@ def main() -> None:
     parser.add_argument("--early-stop-patience", type=int, default=0, help="In units of log events. 0 disables early stop.")
     parser.add_argument("--early-stop-min-delta", type=float, default=1e-4)
 
-    parser.add_argument("--patch-size", type=int, default=64)
+    parser.add_argument("--patch-size", type=int, default=40)
+    parser.add_argument("--style-start-channel", type=int, default=16)
     parser.add_argument("--style-token-dim", type=int, default=256)
-    parser.add_argument("--style-token-count", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--temperature", type=float, default=0.4)
 
@@ -441,26 +447,15 @@ def main() -> None:
     )
     log(f"Using device={device}, monitor={monitor_name}, steps={args.steps}, batch_size={args.batch_size}")
 
-    if args.part_set_size is not None:
-        part_set_min = max(1, int(args.part_set_size))
-        part_set_max = part_set_min
-    else:
-        part_set_min = max(1, int(args.part_set_min))
-        part_set_max = max(1, int(args.part_set_max))
-    if part_set_min > part_set_max:
-        raise ValueError(
-            f"part_set_min must be <= part_set_max, got {part_set_min} > {part_set_max}"
-        )
-    part_sample_with_replacement = bool(args.part_sample_with_replacement)
-    log(
-        f"Part-set sampling: min={part_set_min} max={part_set_max} "
-        f"replacement={part_sample_with_replacement}"
-    )
+    part_set_min = 0
+    part_set_max = 0
+    part_sample_with_replacement = False
+    log("Part-set sampling: use-all-parts-per-font-char (min/max/replacement ignored)")
 
     encoder = PartEncoderModule(
         in_channels=1,
+        style_start_channel=args.style_start_channel,
         style_token_dim=args.style_token_dim,
-        style_token_count=args.style_token_count,
     ).to(device)
 
     params = list(encoder.parameters())

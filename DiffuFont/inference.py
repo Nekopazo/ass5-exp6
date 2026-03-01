@@ -40,7 +40,7 @@ def mode_uses_parts(mode: str) -> bool:
 
 
 def mode_uses_style(mode: str) -> bool:
-    return normalize_conditioning_mode(mode) in {"style_only", "part_style"}
+    return normalize_conditioning_mode(mode) in {"style_only"}
 
 
 def load_model_and_trainer(
@@ -50,7 +50,7 @@ def load_model_and_trainer(
     conditioning_profile: str = "part_style",
     attn_scales: Optional[tuple[int, ...]] = None,
     image_size: int = 256,
-    style_token_count: int = 8,
+    style_start_channel: int = 16,
     style_token_dim: int = 256,
     diffusion_steps: int = 1000,
 ) -> DiffusionTrainer | FlowMatchingTrainer:
@@ -60,13 +60,12 @@ def load_model_and_trainer(
         in_channels=1,
         image_size=image_size,
         content_start_channel=64,
-        style_start_channel=64,
+        style_start_channel=style_start_channel,
         unet_channels=(64, 128, 256, 512),
         content_encoder_downsample_size=4,
         channel_attn=True,
         conditioning_profile=mode,
         attn_scales=attn_scales,
-        style_token_count=style_token_count,
         style_token_dim=style_token_dim,
     )
     trainer_cls = DiffusionTrainer if trainer_type == "diffusion" else FlowMatchingTrainer
@@ -237,15 +236,14 @@ def main():
                         help="Comma-separated characters to generate (overrides --num-chars)")
     parser.add_argument("--cell-size", type=int, default=128)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--style-token-count", type=int, default=8,
-                        help="(Deprecated, ignored) Token count is now automatic.")
+    parser.add_argument("--style-start-channel", type=int, default=16)
     parser.add_argument("--style-token-dim", type=int, default=256)
 
     # PartBank
     parser.add_argument("--part-bank-manifest", type=str, default="DataPreparation/PartBank/manifest.json")
     parser.add_argument("--part-bank-lmdb", type=str, default="DataPreparation/LMDB/PartBank.lmdb")
     parser.add_argument("--part-set-max", type=int, default=8)
-    parser.add_argument("--part-image-size", type=int, default=64)
+    parser.add_argument("--part-image-size", type=int, default=40)
 
     args = parser.parse_args()
     random.seed(args.seed)
@@ -300,7 +298,7 @@ def main():
         conditioning_profile=args.conditioning_profile,
         attn_scales=attn_scales,
         image_size=args.image_size,
-        style_token_count=args.style_token_count,
+        style_start_channel=int(args.style_start_channel),
         style_token_dim=args.style_token_dim,
         diffusion_steps=args.diffusion_steps,
     )
