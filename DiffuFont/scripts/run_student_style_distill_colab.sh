@@ -66,15 +66,6 @@ export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
 TARGET_STEPS=15000
 EPOCHS=6
-PART_SET_MIN="${PART_SET_MIN:-8}"
-PART_SET_MAX="${PART_SET_MAX:-8}"
-PART_SAMPLE_WITH_REPLACEMENT="${PART_SAMPLE_WITH_REPLACEMENT:-0}"
-PART_SAMPLE_ARGS=(--part-set-min "${PART_SET_MIN}" --part-set-max "${PART_SET_MAX}")
-if [[ "${PART_SAMPLE_WITH_REPLACEMENT}" == "1" ]]; then
-  PART_SAMPLE_ARGS+=(--part-sample-with-replacement)
-else
-  PART_SAMPLE_ARGS+=(--no-part-sample-with-replacement)
-fi
 
 python -u train.py \
   --stage student \
@@ -91,7 +82,6 @@ python -u train.py \
   --lambda-diff 1.0 \
   --lambda-kd 1.0 \
   --lambda-nce 0.0 \
-  "${PART_SAMPLE_ARGS[@]}" \
   --num-workers 4 \
   --sample-every-steps 100 \
   --log-every-steps 50 \

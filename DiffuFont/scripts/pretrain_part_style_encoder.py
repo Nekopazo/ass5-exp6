@@ -183,6 +183,19 @@ def all_keys(keys: List[str]) -> Tuple[List[str], List[float]]:
     return chosen, mask
 
 
+def flatten_font_part_keys(bank: Dict[str, Dict[str, List[str]]]) -> Dict[str, List[str]]:
+    """Flatten {font: {char: [keys]}} -> {font: [all keys across chars]}."""
+    flat: Dict[str, List[str]] = {}
+    for font, char_map in bank.items():
+        merged: List[str] = []
+        for ch in sorted(char_map.keys()):
+            merged.extend(char_map[ch])
+        if merged:
+            # Deterministic order: by char then path.
+            flat[font] = merged
+    return flat
+
+
 def pad_part_batch(
     imgs_list: List[torch.Tensor],
     mask_list: List[torch.Tensor],
@@ -274,6 +287,7 @@ def make_checkpoint(
 def run_one_batch(
     encoder: PartEncoderModule,
     bank: Dict[str, Dict[str, List[str]]],
+    flat_bank: Dict[str, List[str]],
     font_pool: List[str],
     batch_size: int,
     part_set_min: int,
@@ -286,6 +300,7 @@ def run_one_batch(
     lmdb_txn,
     opt: torch.optim.Optimizer | None = None,
 ) -> Tuple[float, float]:
+    _ = bank  # backward-compatible signature
     if len(font_pool) >= batch_size:
         batch_fonts = rng.sample(font_pool, batch_size)
     else:
@@ -297,12 +312,9 @@ def run_one_batch(
     mask2_list: List[torch.Tensor] = []
 
     for font in batch_fonts:
-        char_map = bank[font]
-        chars = [c for c, ks in char_map.items() if ks]
-        if not chars:
+        part_paths = flat_bank.get(font, [])
+        if not part_paths:
             continue
-        ref_char = rng.choice(chars)
-        part_paths = char_map[ref_char]
         set1, m1 = all_keys(part_paths)
         set2, m2 = all_keys(part_paths)
 
@@ -312,7 +324,7 @@ def run_one_batch(
         mask2_list.append(torch.tensor(m2, dtype=torch.float32))
 
     if not imgs1_list or not imgs2_list:
-        raise RuntimeError("Empty batch after sampling font/char-part sets.")
+        raise RuntimeError("Empty batch after sampling font-level part sets.")
 
     imgs1, mask1 = pad_part_batch(imgs1_list, mask1_list)
     imgs2, mask2 = pad_part_batch(imgs2_list, mask2_list)
@@ -427,6 +439,8 @@ def main() -> None:
 
     if len(train_bank) < 2:
         raise RuntimeError("Train split has too few fonts for contrastive pretraining.")
+    train_flat_bank = flatten_font_part_keys(train_bank)
+    val_flat_bank = flatten_font_part_keys(val_bank) if has_val else {}
 
     monitor_name = args.monitor
     if monitor_name.startswith("val_") and not has_val:
@@ -450,7 +464,7 @@ def main() -> None:
     part_set_min = 0
     part_set_max = 0
     part_sample_with_replacement = False
-    log("Part-set sampling: use-all-parts-per-font-char (min/max/replacement ignored)")
+    log("Part-set sampling: use-all-parts-per-font (across all chars; min/max/replacement ignored)")
 
     encoder = PartEncoderModule(
         in_channels=1,
@@ -472,6 +486,7 @@ def main() -> None:
             train_loss, train_acc = run_one_batch(
                 encoder=encoder,
                 bank=train_bank,
+                flat_bank=train_flat_bank,
                 font_pool=list(train_bank.keys()),
                 batch_size=args.batch_size,
                 part_set_min=part_set_min,
@@ -501,6 +516,7 @@ def main() -> None:
                         vl, va = run_one_batch(
                             encoder=encoder,
                             bank=val_bank,
+                            flat_bank=val_flat_bank,
                             font_pool=list(val_bank.keys()),
                             batch_size=min(args.batch_size, len(val_bank)),
                             part_set_min=part_set_min,

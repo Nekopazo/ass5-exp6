@@ -365,14 +365,8 @@ def main() -> None:
 
     parser.add_argument("--part-bank-manifest", type=str, default="DataPreparation/PartBank/manifest.json")
     parser.add_argument("--part-bank-lmdb", type=str, default="DataPreparation/LMDB/PartBank.lmdb")
-    parser.add_argument("--part-set-min", type=int, default=None)
-    parser.add_argument("--part-set-max", type=int, default=8)
-    parser.add_argument(
-        "--part-sample-with-replacement",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Sample part entries with replacement. Default false (no replacement).",
-    )
+    parser.add_argument("--part-set-min", type=int, default=None, help="Deprecated, ignored.")
+    parser.add_argument("--part-set-max", type=int, default=0, help="Deprecated, ignored.")
     parser.add_argument("--part-image-size", type=int, default=40)
     parser.add_argument("--part-image-cache-size", type=int, default=4096)
     parser.add_argument("--lmdb-decode-cache-size", type=int, default=1024)
@@ -470,7 +464,6 @@ def main() -> None:
         part_bank_lmdb=args.part_bank_lmdb,
         part_set_min=args.part_set_min,
         part_set_max=args.part_set_max,
-        part_sample_with_replacement=bool(args.part_sample_with_replacement),
         part_image_size=args.part_image_size,
         part_image_cache_size=args.part_image_cache_size,
         lmdb_decode_cache_size=args.lmdb_decode_cache_size,
