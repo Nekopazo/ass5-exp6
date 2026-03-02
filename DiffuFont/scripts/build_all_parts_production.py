@@ -76,9 +76,9 @@ def save_part_png(gray_patch: np.ndarray, out_path: str) -> None:
 def _process_font_worker(args_tuple: tuple) -> Dict[str, Any]:
     """Process ALL chars of one font.  Runs in a child process.
 
-    args_tuple = (font_dir, out_bank_root, patch_size, save_debug, scripts_dir)
+    args_tuple = (font_dir, out_bank_root, patch_size, min_fg_ratio, save_debug, scripts_dir)
     """
-    font_dir_str, out_bank_root_str, patch_size, save_debug, scripts_dir = args_tuple
+    font_dir_str, out_bank_root_str, patch_size, min_fg_ratio, save_debug, scripts_dir = args_tuple
 
     # -- late imports in child --
     import sys as _sys
@@ -106,7 +106,11 @@ def _process_font_worker(args_tuple: tuple) -> Dict[str, Any]:
             pil_img = Image.open(img_path_str).convert("L")
             gray = np.array(pil_img.resize((IMG_SIZE, IMG_SIZE), Image.BILINEAR))
 
-            result, debug_img = process_one_glyph(gray, patch_size=patch_size)
+            result, debug_img = process_one_glyph(
+                gray,
+                patch_size=patch_size,
+                min_fg_ratio=float(min_fg_ratio),
+            )
 
             utag = char_to_unicode_tag(ch)
             all_parts = result.get("all_parts", [])
@@ -119,8 +123,8 @@ def _process_font_worker(args_tuple: tuple) -> Dict[str, Any]:
             for pi, part_info in enumerate(all_parts):
                 fname = f"part_{pi:03d}_{utag}.png"
                 part_path = os.path.join(char_out_dir, fname)
-                # Save grayscale crop (black stroke, white background)
-                gray_arr = np.array(part_info["patch_gray"], dtype=np.uint8)
+                patch_gray = part_info["patch_gray"]
+                gray_arr = np.array(patch_gray, dtype=np.uint8)
                 save_part_png(gray_arr, part_path)
 
                 lmdb_key = f"DataPreparation/PartBank/{font_name}/{utag}/{fname}"
@@ -224,6 +228,8 @@ def main() -> None:
     ap.add_argument("--lmdb-dir", type=Path,
                     default=Path("DataPreparation/LMDB"))
     ap.add_argument("--patch-size", type=int, default=PATCH_SIZE)
+    ap.add_argument("--min-fg-ratio", type=float, default=0.05,
+                    help="Minimum foreground ratio of a patch (lower helps ultra-thin glyphs).")
     ap.add_argument("--workers", type=int, default=0,
                     help="Process pool size. 0 = auto (nproc).")
     ap.add_argument("--debug", action="store_true",
@@ -267,7 +273,7 @@ def main() -> None:
     out_bank.mkdir(parents=True, exist_ok=True)
 
     tasks = [
-        (str(fd), str(out_bank), args.patch_size, args.debug, scripts_dir)
+        (str(fd), str(out_bank), args.patch_size, args.min_fg_ratio, args.debug, scripts_dir)
         for fd in font_dirs
     ]
 
