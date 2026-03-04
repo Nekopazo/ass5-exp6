@@ -355,12 +355,10 @@ class FontImageDataset(Dataset):
         ref_char: str,
         rng: random.Random,
     ) -> List[Dict[str, Any]]:
-        """Return all parts for one font+char; fallback to font-level when char is absent."""
+        """Return all parts for one font+char only (no font-level fallback)."""
         _ = rng  # kept for backward API compatibility
         char_map = self.part_bank_by_font_char.get(font_name, {})
         rows = char_map.get(ref_char, [])
-        if not rows:
-            rows = self.part_bank_by_font.get(font_name, [])
         if not rows:
             return []
         # Deterministic order is already ensured at LMDB scan stage.

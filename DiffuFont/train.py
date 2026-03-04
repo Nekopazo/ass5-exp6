@@ -398,6 +398,12 @@ def main() -> None:
         help="Path to pretrained part encoder checkpoint from pretrain_part_style_encoder.py.",
     )
     parser.add_argument("--part-drop-prob", type=float, default=0.0)
+    parser.add_argument(
+        "--freeze-part-encoder-steps",
+        type=int,
+        default=5000,
+        help="Freeze part_patch_encoder/part_feat_to_token for first N global steps; then unfreeze.",
+    )
     parser.add_argument("--lambda-kd", type=float, default=0.0)
     parser.add_argument("--teacher-ckpt", type=str, default=None)
     parser.add_argument(
@@ -608,6 +614,7 @@ def main() -> None:
         "grad_accum_steps": max(1, int(args.grad_accum)),
         "conditioning_mode": active_mode,
         "part_drop_prob": float(args.part_drop_prob),
+        "freeze_part_encoder_steps": int(args.freeze_part_encoder_steps),
         "lambda_kd": float(args.lambda_kd if stage == "student" else 0.0),
         "teacher_model": teacher_for_distill,
         "teacher_conditioning_mode": teacher_distill_mode,

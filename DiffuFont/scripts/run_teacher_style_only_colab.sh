@@ -6,7 +6,7 @@ SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SO
 RUN_MODE="foreground"
 LOG_FILE=""
 PID_FILE=""
-RESUME_CKPT=""
+RESUME_CKPT="/content/drive/MyDrive/ass5/ass5-exp6/DiffuFont/checkpoints/teacher_style_only_20260303_043849/ckpt_step_24000.pt"
 SAVE_DIR_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do

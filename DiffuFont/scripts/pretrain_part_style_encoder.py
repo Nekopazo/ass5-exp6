@@ -176,9 +176,21 @@ def load_part_image_from_lmdb(txn, lmdb_key: str, patch_size: int) -> torch.Tens
     return torch.from_numpy(arr)[None, :, :].contiguous()  # (1, H, W)
 
 
-def all_keys(keys: List[str]) -> Tuple[List[str], List[float]]:
-    """Return all lmdb keys with full-valid mask."""
-    chosen = list(keys)
+def sample_fixed_keys(
+    keys: List[str],
+    rng: random.Random,
+    fixed_parts_per_font: int,
+) -> Tuple[List[str], List[float]]:
+    """Randomly sample a fixed number of parts from one font."""
+    n_total = len(keys)
+    if n_total <= 0:
+        return [], []
+    n_pick = max(1, int(fixed_parts_per_font))
+    if n_total >= n_pick:
+        chosen = rng.sample(keys, n_pick)
+    else:
+        # Keep per-font sample size fixed even when available parts are fewer.
+        chosen = [rng.choice(keys) for _ in range(n_pick)]
     mask = [1.0] * len(chosen)
     return chosen, mask
 
@@ -290,16 +302,14 @@ def run_one_batch(
     flat_bank: Dict[str, List[str]],
     font_pool: List[str],
     batch_size: int,
-    part_set_min: int,
-    part_set_max: int,
-    part_sample_with_replacement: bool,
+    parts_per_font: int,
     patch_size: int,
     temperature: float,
     rng: random.Random,
     device: torch.device,
     lmdb_txn,
     opt: torch.optim.Optimizer | None = None,
-) -> Tuple[float, float]:
+) -> Tuple[float, float, float]:
     _ = bank  # backward-compatible signature
     if len(font_pool) >= batch_size:
         batch_fonts = rng.sample(font_pool, batch_size)
@@ -315,8 +325,18 @@ def run_one_batch(
         part_paths = flat_bank.get(font, [])
         if not part_paths:
             continue
-        set1, m1 = all_keys(part_paths)
-        set2, m2 = all_keys(part_paths)
+        set1, m1 = sample_fixed_keys(
+            keys=part_paths,
+            rng=rng,
+            fixed_parts_per_font=parts_per_font,
+        )
+        set2, m2 = sample_fixed_keys(
+            keys=part_paths,
+            rng=rng,
+            fixed_parts_per_font=parts_per_font,
+        )
+        if not set1 or not set2:
+            continue
 
         imgs1_list.append(torch.stack([load_part_image_from_lmdb(lmdb_txn, k, patch_size) for k in set1]))
         mask1_list.append(torch.tensor(m1, dtype=torch.float32))
@@ -344,14 +364,15 @@ def run_one_batch(
     loss = 0.5 * (loss_12 + loss_21)
 
     if opt is not None:
-        opt.zero_grad()
+        opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
 
     with torch.no_grad():
         pred = logits.argmax(dim=1)
         acc = (pred == labels).float().mean().item()
-    return float(loss.item()), float(acc)
+        mean_parts = 0.5 * (float(mask1.sum(dim=1).mean().item()) + float(mask2.sum(dim=1).mean().item()))
+    return float(loss.item()), float(acc), float(mean_parts)
 
 
 def main() -> None:
@@ -365,15 +386,7 @@ def main() -> None:
 
     parser.add_argument("--steps", type=int, default=2000)
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--part-set-size", type=int, default=None, help="Deprecated, ignored.")
-    parser.add_argument("--part-set-min", type=int, default=1, help="Deprecated, ignored.")
-    parser.add_argument("--part-set-max", type=int, default=8, help="Deprecated, ignored.")
-    parser.add_argument(
-        "--part-sample-with-replacement",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Deprecated, ignored.",
-    )
+    parser.add_argument("--parts-per-font", type=int, default=12, help="Fixed random sampled parts per font per view.")
     parser.add_argument("--val-ratio", type=float, default=0.1)
     parser.add_argument("--val-batches", type=int, default=8)
     parser.add_argument(
@@ -382,7 +395,7 @@ def main() -> None:
         default="val_loss",
         choices=["val_loss", "val_acc", "train_loss", "train_acc"],
     )
-    parser.add_argument("--early-stop-patience", type=int, default=0, help="In units of log events. 0 disables early stop.")
+    parser.add_argument("--early-stop-patience", type=int, default=20, help="In units of log events. 0 disables early stop.")
     parser.add_argument("--early-stop-min-delta", type=float, default=1e-4)
 
     parser.add_argument("--patch-size", type=int, default=40)
@@ -428,7 +441,7 @@ def main() -> None:
 
     # Scan actual LMDB keys instead of manifest to avoid key mismatch
     bank = load_part_bank_keys_from_lmdb(part_env)
-    # Keep fonts with at least one part; fixed-size sampling uses replacement.
+    # Keep fonts with at least one part.
     bank = {k: v for k, v in bank.items() if len(v) >= 1}
     if len(bank) < 2:
         raise RuntimeError("Part bank has too few fonts for contrastive pretraining.")
@@ -461,10 +474,8 @@ def main() -> None:
     )
     log(f"Using device={device}, monitor={monitor_name}, steps={args.steps}, batch_size={args.batch_size}")
 
-    part_set_min = 0
-    part_set_max = 0
-    part_sample_with_replacement = False
-    log("Part-set sampling: use-all-parts-per-font (across all chars; min/max/replacement ignored)")
+    parts_per_font = max(1, int(args.parts_per_font))
+    log(f"Part sampling: fixed parts_per_font={parts_per_font} per view")
 
     encoder = PartEncoderModule(
         in_channels=1,
@@ -483,15 +494,13 @@ def main() -> None:
     try:
         encoder.train()
         for step in range(1, args.steps + 1):
-            train_loss, train_acc = run_one_batch(
+            train_loss, train_acc, train_mean_parts = run_one_batch(
                 encoder=encoder,
                 bank=train_bank,
                 flat_bank=train_flat_bank,
                 font_pool=list(train_bank.keys()),
                 batch_size=args.batch_size,
-                part_set_min=part_set_min,
-                part_set_max=part_set_max,
-                part_sample_with_replacement=part_sample_with_replacement,
+                parts_per_font=parts_per_font,
                 patch_size=args.patch_size,
                 temperature=args.temperature,
                 rng=train_rng,
@@ -513,15 +522,13 @@ def main() -> None:
                 val_accs: List[float] = []
                 with torch.no_grad():
                     for _ in range(max(1, args.val_batches)):
-                        vl, va = run_one_batch(
+                        vl, va, _ = run_one_batch(
                             encoder=encoder,
                             bank=val_bank,
                             flat_bank=val_flat_bank,
                             font_pool=list(val_bank.keys()),
                             batch_size=min(args.batch_size, len(val_bank)),
-                            part_set_min=part_set_min,
-                            part_set_max=part_set_max,
-                            part_sample_with_replacement=part_sample_with_replacement,
+                            parts_per_font=parts_per_font,
                             patch_size=args.patch_size,
                             temperature=args.temperature,
                             rng=eval_rng,
@@ -537,11 +544,10 @@ def main() -> None:
 
             metrics = {
                 "step": step,
-                "part_set_min": part_set_min,
-                "part_set_max": part_set_max,
-                "part_sample_with_replacement": part_sample_with_replacement,
+                "parts_per_font": parts_per_font,
                 "train_loss": train_loss,
                 "train_acc": train_acc,
+                "train_mean_parts_per_font": train_mean_parts,
                 "val_loss": val_loss,
                 "val_acc": val_acc,
                 "lr": float(opt.param_groups[0]["lr"]),
@@ -585,8 +591,9 @@ def main() -> None:
 
             msg = (
                 f"step={step:05d} "
-                f"part_set={part_set_min}-{part_set_max} "
-                f"train_loss={train_loss:.4f} train_acc={train_acc:.3f}"
+                f"parts_per_font={parts_per_font} "
+                f"train_loss={train_loss:.4f} train_acc={train_acc:.3f} "
+                f"train_parts={train_mean_parts:.1f}"
             )
             if val_loss is not None and val_acc is not None:
                 msg += f" val_loss={val_loss:.4f} val_acc={val_acc:.3f}"

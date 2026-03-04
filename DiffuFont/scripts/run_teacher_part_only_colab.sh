@@ -6,7 +6,7 @@ SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SO
 RUN_MODE="foreground"
 LOG_FILE=""
 PID_FILE=""
-RESUME_CKPT=""
+RESUME_CKPT="/content/drive/MyDrive/ass5/ass5-exp6/DiffuFont/checkpoints/teacher_part_only_20260302_041234/ckpt_step_17500.pt"
 SAVE_DIR_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
@@ -104,6 +104,7 @@ python -u train.py \
   --save-dir "${SAVE_DIR}" \
   --attn-scales 16,32 \
   --part-encode-chunk-size 0 \
+  --freeze-part-encoder-steps 5000 \
   "$@"
 
 echo "[teacher_part_only] done $(date '+%Y-%m-%d %H:%M:%S')"

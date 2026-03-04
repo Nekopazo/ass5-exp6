@@ -136,6 +136,7 @@ class DiffusionTrainer:
         lambda_kd: float = 0.0,
         teacher_model: nn.Module | None = None,
         teacher_conditioning_mode: str = "part_style",
+        freeze_part_encoder_steps: int = 0,
         cfg_drop_prob: float = 0.0,  # deprecated, kept for backward compat (ignored)
     ):
         self.device = device
@@ -152,6 +153,8 @@ class DiffusionTrainer:
 
         self.grad_accum_steps = max(1, int(grad_accum_steps))
         self._accum_step = 0
+        self.freeze_part_encoder_steps = max(0, int(freeze_part_encoder_steps))
+        self._part_encoder_is_frozen = False
 
         self.opt = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-4)
         if int(T) <= 0:
@@ -232,6 +235,42 @@ class DiffusionTrainer:
             self.grad_scaler = torch.amp.GradScaler("cuda", enabled=self.use_grad_scaler)
         else:
             self.grad_scaler = torch.cuda.amp.GradScaler(enabled=self.use_grad_scaler)
+
+        if self.freeze_part_encoder_steps > 0:
+            frozen_params = self._set_part_encoder_requires_grad(False)
+            if frozen_params > 0:
+                self._part_encoder_is_frozen = True
+                print(
+                    f"[trainer] froze part encoder params={frozen_params} "
+                    f"until global_step>={self.freeze_part_encoder_steps}",
+                    flush=True,
+                )
+
+    def _set_part_encoder_requires_grad(self, requires_grad: bool) -> int:
+        """Set requires_grad for part encoder submodules if present."""
+        module_names = ("part_patch_encoder", "part_feat_to_token")
+        changed = 0
+        for name in module_names:
+            module = getattr(self.model, name, None)
+            if module is None:
+                continue
+            for p in module.parameters():
+                p.requires_grad_(requires_grad)
+                changed += 1
+        return changed
+
+    def _maybe_unfreeze_part_encoder(self) -> None:
+        if not self._part_encoder_is_frozen:
+            return
+        if self.global_step < self.freeze_part_encoder_steps:
+            return
+        unfrozen_params = self._set_part_encoder_requires_grad(True)
+        self._part_encoder_is_frozen = False
+        print(
+            f"[trainer] unfroze part encoder at global_step={self.global_step} "
+            f"(params={unfrozen_params})",
+            flush=True,
+        )
 
     # ------------------------------------------------------------------ #
     #  Gradient accumulation helpers
@@ -408,6 +447,7 @@ class DiffusionTrainer:
     def train_step(self, batch: Dict[str, torch.Tensor], grad_clip: float | None = 1.0):
         _train_t0 = time.perf_counter()
         self.model.train()
+        self._maybe_unfreeze_part_encoder()
         attn_log_enabled = self._prepare_attention_logging()
         x0 = batch["target"].to(self.device)
         content = batch["content"].to(self.device)
@@ -959,6 +999,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
         lambda_kd: float = 0.0,
         teacher_model: nn.Module | None = None,
         teacher_conditioning_mode: str = "part_style",
+        freeze_part_encoder_steps: int = 0,
         cfg_drop_prob: float = 0.0,  # deprecated, kept for backward compat (ignored)
     ):
         super().__init__(
@@ -974,6 +1015,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
             lambda_kd=lambda_kd,
             teacher_model=teacher_model,
             teacher_conditioning_mode=teacher_conditioning_mode,
+            freeze_part_encoder_steps=freeze_part_encoder_steps,
         )
         self.lambda_fm = float(lambda_fm)
 
@@ -994,6 +1036,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
     def train_step(self, batch: Dict[str, torch.Tensor], grad_clip: float | None = 1.0):
         _train_t0 = time.perf_counter()
         self.model.train()
+        self._maybe_unfreeze_part_encoder()
         attn_log_enabled = self._prepare_attention_logging()
         x0 = batch["target"].to(self.device)
         content = batch["content"].to(self.device)
