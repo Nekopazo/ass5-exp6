@@ -22,7 +22,6 @@ echo "=========================================="
 echo "[pipeline] Step 2: Render TrainFonts (grayscale)"
 echo "=========================================="
 python DataPreparation/generate_font_images.py \
-    --project-root "${ROOT}" \
     --char-list-json CharacterData/CharList.json \
     --font-list-json DataPreparation/FontList.json \
     --font-dir Fonts \
@@ -48,6 +47,8 @@ echo "=========================================="
 echo "[pipeline] Step 5: Build PartBank (component-aware, grayscale)"
 echo "=========================================="
 python scripts/build_all_parts_production.py --workers 3
+
+nohup python scripts/build_all_parts_production.py --workers 3 > build.log 2>&1 &
 
 
 
