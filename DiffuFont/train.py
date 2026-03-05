@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Training entry for DiffuFont (source-aligned UNet + PartBank + InfoNCE)."""
+"""Teacher training entry for DiffuFont (baseline / part_only / style_only)."""
 
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 import json
 import os
 import random
@@ -14,16 +15,15 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Subset
-from torchvision import transforms as T
+from torch.utils.data import DataLoader, Sampler, Subset
 
 from dataset import FontImageDataset
 from models.model import DiffusionTrainer, FlowMatchingTrainer
 from models.source_part_ref_unet import SourcePartRefUNet
+from style_augment import build_base_glyph_transform, build_style_reference_transform
 
 
 def _try_enable_xformers(model: SourcePartRefUNet) -> bool:
-    """Try to enable xformers memory-efficient attention on the UNet."""
     try:
         model.unet.enable_xformers_memory_efficient_attention()
         print("[train] xformers memory-efficient attention enabled")
@@ -34,7 +34,6 @@ def _try_enable_xformers(model: SourcePartRefUNet) -> bool:
 
 
 def _try_enable_gradient_checkpointing(model: SourcePartRefUNet) -> bool:
-    """Try to enable gradient checkpointing on the UNet to save activation memory."""
     try:
         model.unet.enable_gradient_checkpointing()
         print("[train] gradient checkpointing enabled")
@@ -45,48 +44,9 @@ def _try_enable_gradient_checkpointing(model: SourcePartRefUNet) -> bool:
 
 
 def collate_fn(samples) -> Dict[str, torch.Tensor]:
-    def _pad_part_tensors(
-        tensors: list[torch.Tensor],
-        masks: list[torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        max_p = max(int(t.size(0)) for t in tensors)
-        bsz = len(tensors)
-        c = int(tensors[0].size(1))
-        h = int(tensors[0].size(2))
-        w = int(tensors[0].size(3))
-        parts_out = torch.zeros((bsz, max_p, c, h, w), dtype=tensors[0].dtype)
-        mask_out = torch.zeros((bsz, max_p), dtype=torch.float32)
-        for i, (t, m) in enumerate(zip(tensors, masks)):
-            p = int(t.size(0))
-            parts_out[i, :p] = t
-            mask_out[i, :p] = m.to(dtype=torch.float32)
-        return parts_out, mask_out
+    contents = [s["content"] for s in samples]
+    targets = [s["input"] for s in samples]
 
-    contents, targets = [], []
-    style_imgs = []
-    has_style = False
-    parts_list, part_masks = [], []
-    parts_list_b, part_masks_b = [], []
-    has_parts_flags = []
-
-    for s in samples:
-        contents.append(s["content"])
-        targets.append(s["input"])
-        has_parts_flags.append(float(s.get("has_parts", 1.0 if "parts" in s else 0.0)))
-        if "style_img" in s:
-            has_style = True
-            style_imgs.append(s["style_img"])
-
-        if "parts" in s:
-            parts_list.append(s["parts"])
-            part_masks.append(s.get("part_mask", torch.ones((s["parts"].size(0),), dtype=torch.float32)))
-        if "parts_b" in s:
-            parts_list_b.append(s["parts_b"])
-            part_masks_b.append(s.get("part_mask_b", torch.ones((s["parts_b"].size(0),), dtype=torch.float32)))
-
-    n_samples = len(samples)
-
-    # Build per-batch integer font IDs for InfoNCE.
     font_names = [s["font"] for s in samples]
     unique_fonts = sorted(set(font_names))
     font_to_id = {f: i for i, f in enumerate(unique_fonts)}
@@ -96,40 +56,50 @@ def collate_fn(samples) -> Dict[str, torch.Tensor]:
         "content": torch.stack(contents),
         "target": torch.stack(targets),
         "font_ids": font_ids,
-        "has_parts": torch.tensor(has_parts_flags, dtype=torch.float32),
     }
-    if has_style and len(style_imgs) != len(samples):
-        raise ValueError(
-            f"Inconsistent style_img presence in batch: got {len(style_imgs)}/{len(samples)} samples."
-        )
-    if has_style and len(style_imgs) == len(samples):
-        batch["style_img"] = torch.stack(style_imgs)
 
-    if parts_list:
-        batch["parts"], batch["part_mask"] = _pad_part_tensors(parts_list, part_masks)
-    if parts_list_b:
-        batch["parts_b"], batch["part_mask_b"] = _pad_part_tensors(parts_list_b, part_masks_b)
+    has_style = any("style_img" in s for s in samples)
+    if has_style:
+        if not all("style_img" in s for s in samples):
+            raise ValueError("Inconsistent style_img presence in batch")
+        style_img = torch.stack([s["style_img"] for s in samples])
+        batch["style_img"] = style_img
+
+        if all("style_ref_mask" in s for s in samples):
+            batch["style_ref_mask"] = torch.stack([s["style_ref_mask"] for s in samples])
+        elif style_img.dim() == 5:
+            # (B, R, C, H, W)
+            bsz, ref_n = int(style_img.size(0)), int(style_img.size(1))
+            batch["style_ref_mask"] = torch.ones((bsz, ref_n), dtype=torch.float32)
+
+    has_style_v2 = any("style_img_view2" in s for s in samples)
+    if has_style_v2:
+        if not all("style_img_view2" in s for s in samples):
+            raise ValueError("Inconsistent style_img_view2 presence in batch")
+        style_img_v2 = torch.stack([s["style_img_view2"] for s in samples])
+        batch["style_img_view2"] = style_img_v2
+
+        if all("style_ref_mask_view2" in s for s in samples):
+            batch["style_ref_mask_view2"] = torch.stack([s["style_ref_mask_view2"] for s in samples])
+        elif style_img_v2.dim() == 5:
+            bsz2, ref_n2 = int(style_img_v2.size(0)), int(style_img_v2.size(1))
+            batch["style_ref_mask_view2"] = torch.ones((bsz2, ref_n2), dtype=torch.float32)
+
     return batch
 
 
 def normalize_conditioning_mode(raw_mode: str) -> str:
     mode = str(raw_mode).strip().lower()
-    alias = {
-        "parts_vector_only": "part_only",
-    }
+    alias = {"parts_vector_only": "part_only"}
     mode = alias.get(mode, mode)
-    valid = {"baseline", "part_only", "style_only", "part_style"}
+    valid = {"baseline", "part_only", "style_only"}
     if mode not in valid:
         raise ValueError(f"conditioning mode must be one of {sorted(valid)}, got '{raw_mode}'")
     return mode
 
 
-def mode_uses_parts(mode: str) -> bool:
-    return normalize_conditioning_mode(mode) in {"part_only", "part_style"}
-
-
 def mode_uses_style(mode: str) -> bool:
-    return normalize_conditioning_mode(mode) in {"style_only"}
+    return normalize_conditioning_mode(mode) in {"part_only", "style_only"}
 
 
 def resolve_device(device_arg: str) -> torch.device:
@@ -167,15 +137,8 @@ def _parse_int_csv(raw: str | None) -> tuple[int, ...] | None:
     text = str(raw).strip()
     if not text:
         return None
-    vals = []
-    for token in text.split(","):
-        t = token.strip()
-        if not t:
-            continue
-        vals.append(int(t))
-    if not vals:
-        return None
-    return tuple(vals)
+    vals = [int(t.strip()) for t in text.split(",") if t.strip()]
+    return tuple(vals) if vals else None
 
 
 def set_global_seed(seed: int) -> None:
@@ -188,10 +151,12 @@ def set_global_seed(seed: int) -> None:
 
 
 def _seed_worker(worker_id: int) -> None:
-    # Derive per-worker seed from torch initial seed for reproducibility.
+    _ = worker_id
     ws = torch.initial_seed() % 2**32
     random.seed(ws)
     np.random.seed(ws)
+    # Avoid CPU thread oversubscription with many DataLoader workers.
+    torch.set_num_threads(1)
 
 
 def split_indices_by_font(
@@ -199,7 +164,6 @@ def split_indices_by_font(
     val_ratio: float,
     seed: int,
 ) -> tuple[list[int], list[int], dict[str, int]]:
-    """Split sample indices by font so train/val fonts are disjoint."""
     total_samples = len(dataset.samples)
     if total_samples <= 0:
         return [], [], {"total_fonts": 0, "train_fonts": 0, "val_fonts": 0}
@@ -227,10 +191,8 @@ def split_indices_by_font(
             train_indices.append(i)
 
     if not train_indices:
-        # Safety fallback: keep at least one sample in train.
         train_indices = [val_indices.pop()]
     if not val_indices:
-        # Safety fallback: keep at least one sample in val.
         val_indices = [train_indices.pop()]
 
     return (
@@ -240,12 +202,75 @@ def split_indices_by_font(
     )
 
 
+class NoReplacementFontBatchSampler(Sampler[list[int]]):
+    """Batch sampler: each batch contains unique fonts (no replacement within batch)."""
+
+    def __init__(
+        self,
+        subset: Subset,
+        batch_size: int,
+        seed: int,
+        steps_per_epoch: int,
+        shuffle: bool = True,
+    ) -> None:
+        self.subset = subset
+        self.batch_size = int(batch_size)
+        self.seed = int(seed)
+        self.steps_per_epoch = max(1, int(steps_per_epoch))
+        self.shuffle = bool(shuffle)
+        self._epoch = 0
+
+        if self.batch_size <= 0:
+            raise ValueError("NoReplacementFontBatchSampler batch_size must be > 0")
+
+        base = subset.dataset
+        if not hasattr(base, "samples"):
+            raise ValueError("subset.dataset must expose .samples for font-aware batching")
+
+        font_to_local: dict[str, list[int]] = defaultdict(list)
+        for local_i, global_i in enumerate(subset.indices):
+            font_name = base.samples[int(global_i)][0]
+            font_to_local[str(font_name)].append(int(local_i))
+
+        self.font_to_local_indices = {
+            k: list(v) for k, v in sorted(font_to_local.items(), key=lambda x: x[0])
+        }
+        self.font_pool = list(self.font_to_local_indices.keys())
+        if len(self.font_pool) < self.batch_size:
+            raise ValueError(
+                f"batch_size={self.batch_size} exceeds train font count={len(self.font_pool)} "
+                "(cannot satisfy no-replacement font batch)."
+            )
+
+    def __len__(self) -> int:
+        return int(self.steps_per_epoch)
+
+    def __iter__(self):
+        rng = random.Random(self.seed + self._epoch * 100003)
+        self._epoch += 1
+
+        produced = 0
+        while produced < self.steps_per_epoch:
+            order = list(self.font_pool)
+            if self.shuffle:
+                rng.shuffle(order)
+            pos = 0
+            while (pos + self.batch_size) <= len(order) and produced < self.steps_per_epoch:
+                picked_fonts = order[pos : pos + self.batch_size]
+                batch_indices: list[int] = []
+                for f in picked_fonts:
+                    local_choices = self.font_to_local_indices[f]
+                    batch_indices.append(int(rng.choice(local_choices)))
+                yield batch_indices
+                pos += self.batch_size
+                produced += 1
+
+
 def build_mixed_visual_batch(
     train_batch: Dict[str, torch.Tensor],
     val_batch: Dict[str, torch.Tensor],
     total_batch_size: int,
 ) -> Dict[str, torch.Tensor]:
-    """Build a visualization batch by concatenating half train + half val."""
     train_bs = int(train_batch["content"].size(0))
     val_bs = int(val_batch["content"].size(0))
     target_bs = max(2, int(total_batch_size))
@@ -263,32 +288,6 @@ def build_mixed_visual_batch(
         v = val_cut[k]
         if not (torch.is_tensor(t) and torch.is_tensor(v)):
             continue
-
-        if k in {"parts", "parts_b"} and t.dim() == 5 and v.dim() == 5:
-            max_p = max(int(t.size(1)), int(v.size(1)))
-            if int(t.size(1)) < max_p:
-                pad = torch.zeros(
-                    (int(t.size(0)), max_p - int(t.size(1)), int(t.size(2)), int(t.size(3)), int(t.size(4))),
-                    dtype=t.dtype,
-                    device=t.device,
-                )
-                t = torch.cat([t, pad], dim=1)
-            if int(v.size(1)) < max_p:
-                pad = torch.zeros(
-                    (int(v.size(0)), max_p - int(v.size(1)), int(v.size(2)), int(v.size(3)), int(v.size(4))),
-                    dtype=v.dtype,
-                    device=v.device,
-                )
-                v = torch.cat([v, pad], dim=1)
-        elif k in {"part_mask", "part_mask_b"} and t.dim() == 2 and v.dim() == 2:
-            max_p = max(int(t.size(1)), int(v.size(1)))
-            if int(t.size(1)) < max_p:
-                pad = torch.zeros((int(t.size(0)), max_p - int(t.size(1))), dtype=t.dtype, device=t.device)
-                t = torch.cat([t, pad], dim=1)
-            if int(v.size(1)) < max_p:
-                pad = torch.zeros((int(v.size(0)), max_p - int(v.size(1))), dtype=v.dtype, device=v.device)
-                v = torch.cat([v, pad], dim=1)
-
         mixed[k] = torch.cat([t, v], dim=0)
 
     mixed["viz_split_flag"] = torch.cat(
@@ -310,20 +309,26 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch", type=int, default=32)
     parser.add_argument("--image-size", type=int, default=256)
-    parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--prefetch-factor", type=int, default=0)
+    parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument("--prefetch-factor", type=int, default=2)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--precision", type=str, default="fp32", choices=["fp32", "bf16", "fp16"])
+    parser.add_argument(
+        "--gradient-checkpointing",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable UNet gradient checkpointing (default: disabled).",
+    )
 
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--trainer", type=str, default="diffusion", choices=["diffusion", "flow_matching"])
     parser.add_argument("--lambda-fm", type=float, default=1.0)
     parser.add_argument("--lambda-diff", type=float, default=1.0)
-    parser.add_argument("--lambda-nce", type=float, default=0.05)
-    parser.add_argument(
-        "--nce-warmup-steps", type=int, default=5000,
-        help="Linearly ramp lambda_nce from 0 to its target over this many steps (0 = no warmup).",
-    )
+    parser.add_argument("--lambda-nce", type=float, default=0.0)
+    parser.add_argument("--lambda-cons", type=float, default=0.0)
+    parser.add_argument("--lambda-div", type=float, default=0.0)
+    parser.add_argument("--style-nce-temp", type=float, default=0.07)
+    parser.add_argument("--nce-warmup-steps", type=int, default=0)
     parser.add_argument("--diffusion-steps", type=int, default=1000)
     parser.add_argument(
         "--total-steps",
@@ -340,21 +345,19 @@ def main() -> None:
         help="Validation split ratio by font identity. 0 disables val split.",
     )
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--stage", type=str, default="teacher", choices=["teacher", "student"])
     parser.add_argument(
         "--teacher-line",
         type=str,
-        default="part_style",
-        choices=["baseline", "part_only", "style_only", "part_style"],
-        help="Stage-A line for teacher training.",
+        default="part_only",
+        choices=["baseline", "part_only", "style_only"],
+        help="Teacher line to train.",
     )
-
     parser.add_argument(
         "--conditioning-profile",
         type=str,
         default=None,
-        choices=["baseline", "parts_vector_only", "part_only", "style_only", "part_style"],
-        help="Legacy alias; if set it overrides --teacher-line in teacher stage.",
+        choices=["baseline", "parts_vector_only", "part_only", "style_only"],
+        help="Legacy alias; if set it overrides --teacher-line.",
     )
     parser.add_argument(
         "--attn-scales",
@@ -363,19 +366,52 @@ def main() -> None:
         help="Comma-separated resolutions where style attention is enabled, e.g. '32,64'. Empty means all scales.",
     )
 
-    parser.add_argument("--part-bank-manifest", type=str, default="DataPreparation/PartBank/manifest.json")
-    parser.add_argument("--part-bank-lmdb", type=str, default="DataPreparation/LMDB/PartBank.lmdb")
-    parser.add_argument("--part-set-min", type=int, default=None, help="Deprecated, ignored.")
-    parser.add_argument("--part-set-max", type=int, default=0, help="Deprecated, ignored.")
+    parser.add_argument("--style-ref-count", type=int, default=8)
     parser.add_argument(
-        "--part-pick-count",
-        type=int,
-        default=0,
-        help="Number of parts to sample per font+char. 0 means use all available parts.",
+        "--reference-cluster-json",
+        type=Path,
+        default=Path("CharacterData/reference_cluster.json"),
     )
-    parser.add_argument("--part-image-size", type=int, default=40)
-    parser.add_argument("--part-image-cache-size", type=int, default=4096)
-    parser.add_argument("--lmdb-decode-cache-size", type=int, default=1024)
+    parser.add_argument(
+        "--style-ref-drop-prob",
+        type=float,
+        default=0.15,
+        help="Reference dropout probability in main training (1.md suggests 0.1~0.2).",
+    )
+    parser.add_argument(
+        "--style-ref-drop-min-keep",
+        type=int,
+        default=4,
+        help="Minimum kept references after dropout when style refs are used.",
+    )
+    parser.add_argument(
+        "--style-token-drop-prob",
+        type=float,
+        default=0.10,
+        help="Style token dropout probability in main training (1.md suggests 0.1).",
+    )
+    parser.add_argument(
+        "--freeze-style-branch-steps",
+        type=int,
+        default=1,
+        help="Legacy switch: >0 keeps style encoder + token layer frozen for full training.",
+    )
+    parser.add_argument(
+        "--style-augment",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable style-image augmentation (crop+mask+affine) before resize to 128.",
+    )
+    parser.add_argument("--style-aug-canvas-size", type=int, default=256)
+    parser.add_argument("--style-aug-crop-min", type=float, default=0.6)
+    parser.add_argument("--style-aug-crop-max", type=float, default=0.9)
+    parser.add_argument("--style-aug-mask-prob", type=float, default=0.5)
+    parser.add_argument("--style-aug-mask-min", type=float, default=0.15)
+    parser.add_argument("--style-aug-mask-max", type=float, default=0.3)
+    parser.add_argument("--style-aug-affine-deg", type=float, default=5.0)
+    parser.add_argument("--style-aug-translate", type=float, default=0.05)
+    parser.add_argument("--style-aug-scale-min", type=float, default=1.0)
+    parser.add_argument("--style-aug-scale-max", type=float, default=1.0)
 
     parser.add_argument("--sample-every-steps", type=int, default=300)
     parser.add_argument("--sample-solver", type=str, default="dpm", choices=["dpm", "ddim"])
@@ -386,61 +422,25 @@ def main() -> None:
     parser.add_argument("--save-every-steps", type=int, default=5000)
     parser.add_argument("--save-dir", type=str, default="checkpoints")
     parser.add_argument("--split-save-components", action=argparse.BooleanOptionalAction, default=True)
+
     parser.add_argument("--style-start-channel", type=int, default=16)
     parser.add_argument("--style-token-dim", type=int, default=256)
-    parser.add_argument(
-        "--part-encode-chunk-size",
-        type=int,
-        default=128,
-        help="Chunk size for part encoder forward over B*P samples. 0 disables chunking.",
-    )
+    parser.add_argument("--style-token-count", type=int, default=8)
+    parser.add_argument("--pretrained-style-encoder", type=str, default=None)
+
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument(
-        "--grad-accum", type=int, default=1,
-        help="Gradient accumulation steps. Effective batch = batch * grad_accum.",
-    )
-    parser.add_argument(
-        "--pretrained-part-encoder", type=str, default=None,
-        help="Path to pretrained part encoder checkpoint from pretrain_part_style_encoder.py.",
-    )
-    parser.add_argument("--part-drop-prob", type=float, default=0.0)
-    parser.add_argument(
-        "--freeze-part-encoder-steps",
+        "--grad-accum",
         type=int,
-        default=5000,
-        help="Freeze part_patch_encoder/part_feat_to_token for first N global steps; then unfreeze.",
-    )
-    parser.add_argument("--lambda-kd", type=float, default=0.0)
-    parser.add_argument("--teacher-ckpt", type=str, default=None)
-    parser.add_argument(
-        "--teacher-distill-mode",
-        type=str,
-        default="part_style",
-        choices=["baseline", "part_only", "style_only", "part_style"],
-        help="Teacher conditioning mode used to generate KD targets in student stage.",
+        default=1,
+        help="Gradient accumulation steps. Effective batch = batch * grad_accum.",
     )
     args = parser.parse_args()
 
-    stage = str(args.stage).strip().lower()
-    if stage not in {"teacher", "student"}:
-        raise ValueError(f"Unsupported --stage: {stage}")
-
-    teacher_mode = normalize_conditioning_mode(
+    active_mode = normalize_conditioning_mode(
         args.conditioning_profile if args.conditioning_profile is not None else args.teacher_line
     )
-    student_mode = "style_only"
-    teacher_distill_mode = normalize_conditioning_mode(args.teacher_distill_mode)
-
-    if stage == "teacher":
-        active_mode = teacher_mode
-        use_part_bank = mode_uses_parts(active_mode)
-        use_style_image = mode_uses_style(active_mode)
-    else:
-        active_mode = student_mode
-        use_part_bank = mode_uses_parts(teacher_distill_mode)
-        use_style_image = True
-        if not args.teacher_ckpt:
-            raise ValueError("--teacher-ckpt is required when --stage student")
+    use_style_image = mode_uses_style(active_mode)
 
     attn_scales = _parse_int_csv(args.attn_scales)
 
@@ -451,37 +451,51 @@ def main() -> None:
     run_cfg: Dict[str, Any] = {k: _to_jsonable(v) for k, v in vars(args).items()}
     run_cfg.update(
         {
-            "stage": stage,
+            "stage": "teacher_only",
             "active_conditioning_mode": active_mode,
-            "teacher_mode": teacher_mode,
-            "student_mode": student_mode,
-            "teacher_distill_mode": teacher_distill_mode,
-            "use_part_bank": bool(use_part_bank),
             "use_style_image": bool(use_style_image),
+            "use_part_bank": False,
         }
     )
-    transform = T.Compose([
-        T.Resize((128, 128), interpolation=T.InterpolationMode.BILINEAR, antialias=True),
-        T.ToTensor(),
-        T.Normalize(0.5, 0.5),
-    ])
+
+    glyph_transform = build_base_glyph_transform(image_size=128)
+    style_aug_active = bool(use_style_image and args.style_augment)
+    style_transform = build_style_reference_transform(
+        image_size=128,
+        augment=style_aug_active,
+        pre_resize=int(args.style_aug_canvas_size),
+        crop_scale_min=float(args.style_aug_crop_min),
+        crop_scale_max=float(args.style_aug_crop_max),
+        mask_prob=float(args.style_aug_mask_prob),
+        mask_area_min=float(args.style_aug_mask_min),
+        mask_area_max=float(args.style_aug_mask_max),
+        affine_degrees=float(args.style_aug_affine_deg),
+        affine_translate=float(args.style_aug_translate),
+        affine_scale_min=float(args.style_aug_scale_min),
+        affine_scale_max=float(args.style_aug_scale_max),
+    )
 
     dataset = FontImageDataset(
         project_root=args.data_root,
         max_fonts=args.max_fonts,
         use_style_image=bool(use_style_image),
-        enforce_part_bank_font_match=True,
-        use_part_bank=bool(use_part_bank),
-        part_bank_manifest=args.part_bank_manifest,
-        part_bank_lmdb=args.part_bank_lmdb,
-        part_set_min=args.part_set_min,
-        part_set_max=args.part_set_max,
-        part_pick_count=args.part_pick_count,
-        part_image_size=args.part_image_size,
-        part_image_cache_size=args.part_image_cache_size,
-        lmdb_decode_cache_size=args.lmdb_decode_cache_size,
+        use_part_bank=False,
         random_seed=int(args.seed),
-        transform=transform,
+        transform=glyph_transform,
+        style_transform=style_transform,
+        cache_style_image=False,
+        style_ref_count=(int(args.style_ref_count) if use_style_image else 1),
+        reference_cluster_json=args.reference_cluster_json,
+    )
+    run_cfg.update(
+        {
+            "style_ref_count_active": int(args.style_ref_count) if use_style_image else 0,
+            "style_augment_active": bool(style_aug_active),
+            "cache_style_image": False,
+            "style_ref_drop_prob_active": float(args.style_ref_drop_prob) if use_style_image else 0.0,
+            "style_ref_drop_min_keep_active": int(args.style_ref_drop_min_keep) if use_style_image else 0,
+            "style_token_drop_prob_active": float(args.style_token_drop_prob) if use_style_image else 0.0,
+        }
     )
 
     train_indices, val_indices, split_stats = split_indices_by_font(
@@ -511,44 +525,64 @@ def main() -> None:
     loader_gen = torch.Generator()
     loader_gen.manual_seed(int(args.seed))
 
+    target_steps_per_epoch = max(1, len(train_indices) // max(1, int(args.batch)))
     loader_kwargs: Dict[str, Any] = {
         "dataset": train_subset,
-        "batch_size": args.batch,
-        "shuffle": True,
         "num_workers": int(args.num_workers),
         "pin_memory": True,
         "collate_fn": collate_fn,
-        "generator": loader_gen,
     }
+    if use_style_image:
+        train_batch_sampler = NoReplacementFontBatchSampler(
+            subset=train_subset,
+            batch_size=int(args.batch),
+            seed=int(args.seed) + 101,
+            steps_per_epoch=target_steps_per_epoch,
+            shuffle=True,
+        )
+        loader_kwargs["batch_sampler"] = train_batch_sampler
+    else:
+        loader_kwargs["batch_size"] = int(args.batch)
+        loader_kwargs["shuffle"] = True
+        loader_kwargs["generator"] = loader_gen
     if int(args.num_workers) > 0:
         loader_kwargs["worker_init_fn"] = _seed_worker
     if int(args.num_workers) > 0 and int(args.prefetch_factor) > 0:
         loader_kwargs["prefetch_factor"] = int(args.prefetch_factor)
     train_loader = DataLoader(**loader_kwargs)
+    run_cfg.update(
+        {
+            "train_batch_sampler": "no_replacement_font" if use_style_image else "random_sample_shuffle",
+            "train_steps_per_epoch_target": int(target_steps_per_epoch),
+        }
+    )
+
     val_loader = None
     if val_subset is not None and len(val_subset) > 0:
-        val_loader = DataLoader(
-            dataset=val_subset,
-            batch_size=min(int(args.batch), len(val_subset)),
-            shuffle=False,
-            num_workers=0,
-            pin_memory=True,
-            collate_fn=collate_fn,
-        )
+        val_loader_kwargs: Dict[str, Any] = {
+            "dataset": val_subset,
+            "batch_size": min(int(args.batch), len(val_subset)),
+            "shuffle": False,
+            "num_workers": int(args.num_workers),
+            "pin_memory": True,
+            "collate_fn": collate_fn,
+        }
+        if int(args.num_workers) > 0:
+            val_loader_kwargs["worker_init_fn"] = _seed_worker
+        if int(args.num_workers) > 0 and int(args.prefetch_factor) > 0:
+            val_loader_kwargs["prefetch_factor"] = int(args.prefetch_factor)
+        val_loader = DataLoader(**val_loader_kwargs)
 
     steps_per_epoch = len(train_loader)
     total_train_steps = steps_per_epoch * args.epochs
     if total_train_steps <= 0:
         raise ValueError(f"Invalid steps: steps_per_epoch={steps_per_epoch}, epochs={args.epochs}")
 
-    # OneCycleLR counts optimizer steps, not mini-batch steps.
-    # With gradient accumulation, optimizer steps = batches / grad_accum.
     effective_train_steps = total_train_steps // max(1, int(args.grad_accum))
     total_steps = args.total_steps if args.total_steps > 0 else effective_train_steps
     print(
         "[train] "
-        f"stage={stage} mode={active_mode} distill_teacher_mode={teacher_distill_mode} "
-        f"attn_scales={attn_scales} "
+        f"mode={active_mode} attn_scales={attn_scales} "
         f"steps_per_epoch={steps_per_epoch} total_steps={total_steps} grad_accum={args.grad_accum}"
     )
 
@@ -563,55 +597,38 @@ def main() -> None:
         conditioning_profile=active_mode,
         attn_scales=attn_scales,
         style_token_dim=int(args.style_token_dim),
-        part_encode_chunk_size=int(args.part_encode_chunk_size),
+        style_token_count=int(args.style_token_count),
     )
 
     _try_enable_xformers(model)
-    _try_enable_gradient_checkpointing(model)
+    if bool(args.gradient_checkpointing):
+        _try_enable_gradient_checkpointing(model)
+    else:
+        print("[train] gradient checkpointing disabled")
 
-    if args.pretrained_part_encoder:
-        ckpt = torch.load(args.pretrained_part_encoder, map_location="cpu", weights_only=True)
-        sd = ckpt.get("part_encoder", ckpt)
+    if args.pretrained_style_encoder:
+        ckpt = torch.load(args.pretrained_style_encoder, map_location="cpu")
+        if isinstance(ckpt, dict) and isinstance(ckpt.get("style_encoder"), dict):
+            sd = ckpt["style_encoder"]
+        elif isinstance(ckpt, dict) and isinstance(ckpt.get("model_state"), dict):
+            sd = ckpt["model_state"]
+        elif isinstance(ckpt, dict):
+            sd = ckpt
+        else:
+            raise RuntimeError(f"Unsupported style checkpoint format: {type(ckpt)}")
         missing, unexpected = model.load_state_dict(sd, strict=False)
-        loaded_keys = [k for k in sd if k not in unexpected]
-        print(f"[train] Loaded pretrained part encoder from {args.pretrained_part_encoder}")
-        print(f"  loaded={len(loaded_keys)} missing={len(missing)} unexpected={len(unexpected)}")
+        loaded = len(sd) - len(unexpected)
+        print(f"[train] Loaded pretrained style encoder from {args.pretrained_style_encoder}")
+        print(f"  loaded={loaded} missing={len(missing)} unexpected={len(unexpected)}")
 
     trainer_cls = DiffusionTrainer if args.trainer == "diffusion" else FlowMatchingTrainer
-    teacher_for_distill = None
-    if stage == "student":
-        teacher_model = SourcePartRefUNet(
-            in_channels=1,
-            image_size=args.image_size,
-            content_start_channel=64,
-            style_start_channel=int(args.style_start_channel),
-            unet_channels=(64, 128, 256, 512),
-            content_encoder_downsample_size=4,
-            channel_attn=True,
-            conditioning_profile=teacher_distill_mode,
-            attn_scales=attn_scales,
-            style_token_dim=int(args.style_token_dim),
-            part_encode_chunk_size=int(args.part_encode_chunk_size),
-        )
-        ckpt = torch.load(args.teacher_ckpt, map_location="cpu")
-        if isinstance(ckpt, dict):
-            if "model_state" in ckpt:
-                teacher_state = ckpt["model_state"]
-            elif "state_dict" in ckpt:
-                teacher_state = ckpt["state_dict"]
-            else:
-                teacher_state = ckpt
-        else:
-            teacher_state = ckpt
-        teacher_model.load_state_dict(teacher_state, strict=True)
-        print(f"[train] loaded teacher ckpt={args.teacher_ckpt} (strict=True)")
-        teacher_for_distill = teacher_model
-
-    eff_lambda_nce = float(args.lambda_nce if stage == "teacher" else 0.0)
     trainer_kwargs: Dict[str, Any] = {
         "lr": args.lr,
-        "lambda_nce": eff_lambda_nce,
-        "nce_warmup_steps": args.nce_warmup_steps,
+        "lambda_nce": float(args.lambda_nce),
+        "lambda_cons": float(args.lambda_cons),
+        "lambda_div": float(args.lambda_div),
+        "nce_temperature": float(args.style_nce_temp),
+        "nce_warmup_steps": int(args.nce_warmup_steps),
         "T": args.diffusion_steps,
         "total_steps": total_steps,
         "precision": args.precision,
@@ -620,22 +637,19 @@ def main() -> None:
         "detailed_log": args.detailed_log,
         "grad_accum_steps": max(1, int(args.grad_accum)),
         "conditioning_mode": active_mode,
-        "part_drop_prob": float(args.part_drop_prob),
-        "freeze_part_encoder_steps": int(args.freeze_part_encoder_steps),
-        "lambda_kd": float(args.lambda_kd if stage == "student" else 0.0),
-        "teacher_model": teacher_for_distill,
-        "teacher_conditioning_mode": teacher_distill_mode,
+        "part_drop_prob": 0.0,
+        "style_ref_drop_prob": float(args.style_ref_drop_prob) if use_style_image else 0.0,
+        "style_ref_drop_min_keep": int(args.style_ref_drop_min_keep) if use_style_image else 1,
+        "style_token_drop_prob": float(args.style_token_drop_prob) if use_style_image else 0.0,
+        "freeze_part_encoder_steps": 0,
+        "freeze_style_branch_steps": int(args.freeze_style_branch_steps) if use_style_image else 0,
     }
     if args.trainer == "flow_matching":
         trainer_kwargs["lambda_fm"] = args.lambda_fm
     else:
         trainer_kwargs["lambda_mse"] = args.lambda_diff
 
-    trainer = trainer_cls(
-        model,
-        device,
-        **trainer_kwargs,
-    )
+    trainer = trainer_cls(model, device, **trainer_kwargs)
     trainer.sample_solver = str(args.sample_solver).lower()
     trainer.sample_inference_steps = int(args.sample_inference_steps)
     trainer.save_split_components = bool(args.split_save_components)
@@ -665,14 +679,16 @@ def main() -> None:
             fallback_dataset,
             batch_size=min(int(args.batch), 8),
             shuffle=False,
-            num_workers=0,
+            num_workers=int(args.num_workers),
             pin_memory=True,
             collate_fn=collate_fn,
         )
         fixed_batch = next(iter(sample_loader))
+
     trainer.sample_every_steps = args.sample_every_steps
     trainer.sample_batch = fixed_batch
     trainer.sample_dir = Path(args.save_dir) / "samples"
+
     save_dir_path = Path(args.save_dir)
     save_dir_path.mkdir(parents=True, exist_ok=True)
     (save_dir_path / "train_run_config.json").write_text(

@@ -52,15 +52,6 @@ export OMP_NUM_THREADS=8
 export MKL_NUM_THREADS=8
 TARGET_STEPS=100000
 EPOCHS=39
-PART_SET_MIN="${PART_SET_MIN:-8}"
-PART_SET_MAX="${PART_SET_MAX:-8}"
-PART_SAMPLE_WITH_REPLACEMENT="${PART_SAMPLE_WITH_REPLACEMENT:-0}"
-PART_SAMPLE_ARGS=(--part-set-min "${PART_SET_MIN}" --part-set-max "${PART_SET_MAX}")
-if [[ "${PART_SAMPLE_WITH_REPLACEMENT}" == "1" ]]; then
-  PART_SAMPLE_ARGS+=(--part-sample-with-replacement)
-else
-  PART_SAMPLE_ARGS+=(--no-part-sample-with-replacement)
-fi
 
 RETRY=0
 while true; do
@@ -73,13 +64,17 @@ while true; do
     --lr 2e-4 \
     --epochs "${EPOCHS}" \
     --total-steps "${TARGET_STEPS}" \
+    --val-ratio 0.1 \
     --conditioning-profile parts_vector_only \
-    "${PART_SAMPLE_ARGS[@]}" \
-    --lambda-nce 0.05 \
-    --pretrained-part-encoder checkpoints/part_style_encoder_pretrain_best.pt \
-    --num-workers 0 \
-    --part-image-cache-size 2000 \
-    --lmdb-decode-cache-size 0 \
+    --lambda-nce 0.0 \
+    --lambda-cons 0.0 \
+    --lambda-div 0.0 \
+    --style-nce-temp 0.07 \
+    --freeze-style-branch-steps 5000 \
+    --style-ref-count 8 \
+    --style-token-count 8 \
+    --pretrained-style-encoder checkpoints/style_encoder_pretrain_best.pt \
+    --num-workers 8 \
     --sample-every-steps 300 \
     --sample-inference-steps 20 \
     --log-every-steps 100 \

@@ -2,14 +2,13 @@
 """Flexible inference script for DiffuFont.
 
 Features:
-- Supports conditioning modes: style_only / part_only (also baseline / part_style).
+- Supports conditioning modes: style_only / part_only (style-image branch), baseline.
 - Supports manual loading of weights:
   - full checkpoint (--checkpoint)
   - split component weights (--main-weight / --vector-weight)
 - Supports input from folders or LMDB:
   - content: folder or LMDB
   - style: folder or LMDB
-  - parts: folder or LMDB
 - Saves outputs under output directory:
   - content/
   - style/ or part/
@@ -38,18 +37,19 @@ def normalize_conditioning_mode(raw_mode: str) -> str:
     mode = str(raw_mode).strip().lower()
     if mode == "parts_vector_only":
         mode = "part_only"
-    valid = {"baseline", "part_only", "style_only", "part_style"}
+    valid = {"baseline", "part_only", "style_only"}
     if mode not in valid:
         raise ValueError(f"conditioning mode must be one of {sorted(valid)}, got '{raw_mode}'")
     return mode
 
 
 def mode_uses_style(mode: str) -> bool:
-    return normalize_conditioning_mode(mode) in {"style_only"}
+    return normalize_conditioning_mode(mode) in {"part_only", "style_only"}
 
 
 def mode_uses_parts(mode: str) -> bool:
-    return normalize_conditioning_mode(mode) in {"part_only", "part_style"}
+    _ = normalize_conditioning_mode(mode)
+    return False
 
 
 def parse_chars(raw: Optional[str]) -> List[str]:
@@ -515,7 +515,7 @@ def main() -> None:
         "--conditioning-profile",
         type=str,
         default="style_only",
-        choices=["baseline", "parts_vector_only", "part_only", "style_only", "part_style"],
+        choices=["baseline", "parts_vector_only", "part_only", "style_only"],
     )
     parser.add_argument("--image-size", type=int, default=256)
     parser.add_argument("--part-image-size", type=int, default=40)

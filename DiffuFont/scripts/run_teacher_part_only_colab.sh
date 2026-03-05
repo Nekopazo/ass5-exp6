@@ -72,20 +72,14 @@ export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
 TARGET_STEPS=30000
 
-PRETRAINED_ENC="${ROOT}/checkpoints/part_style_encoder_pretrain_best.pt"
 if [[ -n "${RESUME_CKPT}" ]]; then
   set -- --resume "${RESUME_CKPT}"
-  PRETRAINED_ARGS=()
-  echo "[teacher_part_only] resume enabled: skip --pretrained-part-encoder"
 else
   set --
-  PRETRAINED_ARGS=(--pretrained-part-encoder "${PRETRAINED_ENC}")
 fi
 
 python -u train.py \
-  --stage teacher \
   --teacher-line part_only \
-  "${PRETRAINED_ARGS[@]}" \
   --trainer diffusion \
   --device auto \
   --precision bf16 \
@@ -93,19 +87,20 @@ python -u train.py \
   --grad-accum 1 \
   --lr 4e-4 \
   --total-steps "${TARGET_STEPS}" \
+  --val-ratio 0.1 \
   --lambda-diff 1.0 \
-  --lambda-nce 0 \
+  --lambda-nce 0.0 \
+  --lambda-cons 0.0 \
+  --lambda-div 0.0 \
+  --style-nce-temp 0.07 \
   --nce-warmup-steps 5000 \
-  --part-drop-prob 0.0 \
-  --part-pick-count 1 \
-  --num-workers 4 \
+  --freeze-style-branch-steps 5000 \
+  --num-workers 8 \
   --sample-every-steps 200 \
   --log-every-steps 100 \
   --save-every-steps 500 \
   --save-dir "${SAVE_DIR}" \
   --attn-scales 16,32 \
-  --part-encode-chunk-size 0 \
-  --freeze-part-encoder-steps 5000 \
   "$@"
 
 echo "[teacher_part_only] done $(date '+%Y-%m-%d %H:%M:%S')"

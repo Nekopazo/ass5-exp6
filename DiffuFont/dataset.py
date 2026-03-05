@@ -3,8 +3,8 @@
 FontImageDataset
 ================
 Multi-font dataset.  Always operates in random-font mode.
-Returns content glyph, training target, and two random
-part-bank views (for InfoNCE contrastive learning).
+Returns content glyph and training target, with optional
+style image and optional dual part-bank views.
 
 Data sources
 ------------
@@ -24,6 +24,7 @@ from typing import List, Dict, Any, Optional, Union, Tuple
 
 import lmdb
 import numpy as np
+import cv2
 from PIL import Image
 
 try:
@@ -58,6 +59,10 @@ class FontImageDataset(Dataset):
         content_lmdb: Optional[Union[str, Path]] = None,
         train_lmdb: Optional[Union[str, Path]] = None,
         transform=None,
+        style_transform=None,
+        cache_style_image: bool = True,
+        style_ref_count: int = 1,
+        reference_cluster_json: Optional[Union[str, Path]] = None,
     ) -> None:
         self.root = Path(project_root).resolve()
         self.max_fonts = max(0, int(max_fonts))
@@ -116,6 +121,13 @@ class FontImageDataset(Dataset):
         self.content_env = lmdb.open(self._content_lmdb_path, readonly=True, lock=False, readahead=False)
         self.train_env = lmdb.open(self._train_lmdb_path, readonly=True, lock=False, readahead=False)
         self.transform = transform
+        self.style_transform = style_transform if style_transform is not None else transform
+        self.cache_style_image = bool(cache_style_image)
+        self.style_ref_count = max(1, int(style_ref_count))
+        self.reference_cluster_json = self._resolve_reference_cluster_path(reference_cluster_json)
+        self.char_to_bucket: Dict[str, int] = self._load_reference_cluster(self.reference_cluster_json)
+        self.font_bucket_to_indices: Dict[str, Dict[int, List[int]]] = {}
+        self.font_bucket_all_indices: Dict[str, List[int]] = {}
         self._worker_pid: Optional[int] = os.getpid()  # tracks which PID owns the current txns
 
         # Keep persistent read-only transactions (avoids per-getitem txn overhead).
@@ -135,6 +147,8 @@ class FontImageDataset(Dataset):
         self.samples: List[Tuple[str, int]] = []
         for name, idxs in entries:
             self.samples.extend((name, idx) for idx in idxs)
+
+        self._build_style_bucket_cache()
 
         # ---- PartBank (direct label-based) ----
         if self.use_part_bank:
@@ -239,6 +253,51 @@ class FontImageDataset(Dataset):
         if not p.is_absolute():
             p = (self.root / p).resolve()
         return p
+
+    def _resolve_reference_cluster_path(self, reference_cluster_json: Optional[Union[str, Path]]) -> Path:
+        if reference_cluster_json is None:
+            reference_cluster_json = self.root / "CharacterData" / "reference_cluster.json"
+        p = Path(reference_cluster_json)
+        if not p.is_absolute():
+            p = (self.root / p).resolve()
+        return p
+
+    @staticmethod
+    def _load_reference_cluster(path: Path) -> Dict[str, int]:
+        if not path.exists():
+            print(f"[FontImageDataset] WARNING: reference_cluster.json not found: {path}; fallback to uniform style sampling.")
+            return {}
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        out: Dict[str, int] = {}
+        for k, v in raw.items():
+            try:
+                out[str(k)] = int(v)
+            except (TypeError, ValueError):
+                continue
+        if not out:
+            print(f"[FontImageDataset] WARNING: empty/invalid reference cluster file: {path}; fallback to uniform style sampling.")
+        return out
+
+    def _build_style_bucket_cache(self) -> None:
+        bucket_cache: Dict[str, Dict[int, List[int]]] = {}
+        flat_cache: Dict[str, List[int]] = {}
+        for font_name, candidates in self.valid_indices_by_font.items():
+            bucket_to_indices: Dict[int, List[int]] = {}
+            for idx in candidates:
+                ch = self.char_list[int(idx)]
+                bucket = self.char_to_bucket.get(ch, None)
+                if bucket is None:
+                    continue
+                bucket_to_indices.setdefault(int(bucket), []).append(int(idx))
+            for b in bucket_to_indices:
+                bucket_to_indices[b].sort()
+            all_bucketed = sorted({i for arr in bucket_to_indices.values() for i in arr})
+            if not all_bucketed:
+                all_bucketed = sorted(int(i) for i in candidates)
+            bucket_cache[font_name] = bucket_to_indices
+            flat_cache[font_name] = all_bucketed
+        self.font_bucket_to_indices = bucket_cache
+        self.font_bucket_all_indices = flat_cache
 
     def _validate_part_bank_font_set(
         self,
@@ -378,12 +437,18 @@ class FontImageDataset(Dataset):
         return [out[i] for i in picked]
 
     def _part_array_from_bytes(self, b: bytes) -> np.ndarray:
-        img = Image.open(io.BytesIO(b)).convert("L")
+        enc = np.frombuffer(b, dtype=np.uint8)
+        arr_u8 = cv2.imdecode(enc, cv2.IMREAD_GRAYSCALE)
+        if arr_u8 is None:
+            img = Image.open(io.BytesIO(b)).convert("L")
+            arr_u8 = np.asarray(img, dtype=np.uint8)
         if self.part_image_size > 0:
-            img = img.resize((self.part_image_size, self.part_image_size), Image.BILINEAR)
-        # Normalize to [-1, 1]: equivalent to T.ToTensor() + T.Normalize(0.5, 0.5)
-        # ToTensor: /255 -> [0,1]; Normalize(0.5,0.5): (x-0.5)/0.5 = 2x-1 -> [-1,1]
-        arr = np.asarray(img, dtype=np.float32) / 255.0
+            arr_u8 = cv2.resize(
+                arr_u8,
+                (self.part_image_size, self.part_image_size),
+                interpolation=cv2.INTER_LINEAR,
+            )
+        arr = arr_u8.astype(np.float32) / 255.0
         arr = arr * 2.0 - 1.0
         return arr[None, :, :].astype(np.float32, copy=False)  # (1, H, W)
 
@@ -412,9 +477,13 @@ class FontImageDataset(Dataset):
     # ------------------------------------------------------------------ #
     #  Image decode helpers
     # ------------------------------------------------------------------ #
-    def _decode_img(self, b: bytes):
+    def _decode_u8(self, b: bytes) -> np.ndarray:
+        enc = np.frombuffer(b, dtype=np.uint8)
+        arr_u8 = cv2.imdecode(enc, cv2.IMREAD_GRAYSCALE)
+        if arr_u8 is not None:
+            return np.ascontiguousarray(arr_u8)
         img = Image.open(io.BytesIO(b)).convert("L")
-        return self.transform(img) if self.transform else img
+        return np.asarray(img, dtype=np.uint8)
 
     def _cache_get(self, key: str):
         if self.lmdb_decode_cache_size <= 0:
@@ -434,15 +503,21 @@ class FontImageDataset(Dataset):
             self._glyph_decode_cache.popitem(last=False)
         return value
 
-    def _bytes_to_img(self, b: bytes, cache_key: Optional[str] = None):
+    def _bytes_to_u8(self, b: bytes, cache_key: Optional[str] = None):
         if cache_key:
             hit = self._cache_get(cache_key)
             if hit is not None:
                 return hit
-        img = self._decode_img(b)
+        img = self._decode_u8(b)
         if cache_key:
             self._cache_put(cache_key, img)
         return img
+
+    def _u8_to_content_img(self, arr_u8: np.ndarray):
+        return self.transform(arr_u8) if self.transform else arr_u8
+
+    def _u8_to_style_img(self, arr_u8: np.ndarray):
+        return self.style_transform(arr_u8) if self.style_transform else arr_u8
 
     def _rng_for_index(self, sample_index: int, salt: int) -> random.Random:
         seed = (
@@ -470,6 +545,70 @@ class FontImageDataset(Dataset):
         if others:
             return int(rng.choice(others))
         return int(target_index)
+
+    def _sample_style_char_indices(
+        self,
+        font_name: str,
+        target_index: int,
+        rng: random.Random,
+        count: int,
+        avoid_indices: Optional[set[int]] = None,
+    ) -> List[int]:
+        target = max(1, int(count))
+        avoid = set() if avoid_indices is None else {int(x) for x in avoid_indices}
+        bucket_to_indices = self.font_bucket_to_indices.get(font_name, {})
+        all_indices = self.font_bucket_all_indices.get(font_name, [])
+        if not all_indices:
+            all_indices = [int(x) for x in self.valid_indices_by_font.get(font_name, [])]
+        if not all_indices:
+            return [int(target_index)] * target
+
+        buckets = [b for b, chars in bucket_to_indices.items() if chars]
+        rng.shuffle(buckets)
+
+        chosen: List[int] = []
+        chosen_set: set[int] = set()
+
+        for b in buckets:
+            if len(chosen) >= target:
+                break
+            chars = bucket_to_indices[b]
+            cand = [
+                int(i)
+                for i in chars
+                if int(i) not in chosen_set and int(i) not in avoid and int(i) != int(target_index)
+            ]
+            if not cand:
+                cand = [int(i) for i in chars if int(i) not in chosen_set and int(i) != int(target_index)]
+            if not cand:
+                cand = [int(i) for i in chars if int(i) not in chosen_set]
+            if not cand:
+                cand = [int(i) for i in chars]
+            pick = int(rng.choice(cand))
+            chosen.append(pick)
+            chosen_set.add(pick)
+
+        prefer = [
+            int(i)
+            for i in all_indices
+            if int(i) not in chosen_set and int(i) not in avoid and int(i) != int(target_index)
+        ]
+        rng.shuffle(prefer)
+        while len(chosen) < target and prefer:
+            pick = int(prefer.pop())
+            chosen.append(pick)
+            chosen_set.add(pick)
+
+        backup = [int(i) for i in all_indices if int(i) not in chosen_set and int(i) != int(target_index)]
+        rng.shuffle(backup)
+        while len(chosen) < target and backup:
+            pick = int(backup.pop())
+            chosen.append(pick)
+            chosen_set.add(pick)
+
+        while len(chosen) < target:
+            chosen.append(int(rng.choice(all_indices)))
+        return chosen
 
     # ------------------------------------------------------------------ #
     #  Multi-worker LMDB safety
@@ -523,8 +662,10 @@ class FontImageDataset(Dataset):
             raise KeyError(f"Missing required glyph images for {font_name}@{ch}")
 
         # buffers=True returns memoryview; copy before txn reuse
-        content_img = self._bytes_to_img(bytes(content_bytes), cache_key=f"C@{content_key}")
-        input_img = self._bytes_to_img(bytes(input_bytes), cache_key=f"T@{input_key}")
+        content_u8 = self._bytes_to_u8(bytes(content_bytes), cache_key=f"C@{content_key}")
+        input_u8 = self._bytes_to_u8(bytes(input_bytes), cache_key=f"T@{input_key}")
+        content_img = self._u8_to_content_img(content_u8)
+        input_img = self._u8_to_content_img(input_u8)
 
         sample: Dict[str, Any] = {
             "font": font_name,
@@ -536,20 +677,60 @@ class FontImageDataset(Dataset):
 
         ref_char = ch
         if self.use_style_image or self.use_part_bank:
-            style_rng = self._rng_for_index(index, salt=17)
-            style_idx = self._sample_style_char_index(font_name, real_idx, rng=style_rng)
-            style_ch = self.char_list[style_idx]
-            ref_char = style_ch
+            style_rng = self.rng
+            style_indices_v1 = self._sample_style_char_indices(
+                font_name=font_name,
+                target_index=real_idx,
+                rng=style_rng,
+                count=self.style_ref_count,
+            )
+            style_indices_v2 = self._sample_style_char_indices(
+                font_name=font_name,
+                target_index=real_idx,
+                rng=style_rng,
+                count=self.style_ref_count,
+                avoid_indices=set(style_indices_v1),
+            )
+            style_chars_v1 = [self.char_list[i] for i in style_indices_v1]
+            style_chars_v2 = [self.char_list[i] for i in style_indices_v2]
+            ref_char = style_chars_v1[0] if style_chars_v1 else ch
         if self.use_style_image:
-            style_key = f"{font_name}@{style_ch}"
-            style_bytes = self._t_txn.get(style_key.encode("utf-8"))
-            # Fallback to target glyph if style glyph is missing unexpectedly.
-            if style_bytes is None:
-                style_ch = ch
-                style_key = input_key
-                style_bytes = input_bytes
-            sample["style_img"] = self._bytes_to_img(bytes(style_bytes), cache_key=f"S@{style_key}")
-            sample["style_char"] = style_ch
+            style_imgs_v1: List[Any] = []
+            style_imgs_v2: List[Any] = []
+            resolved_chars_v1: List[str] = []
+            resolved_chars_v2: List[str] = []
+
+            for style_ch in style_chars_v1:
+                style_key = f"{font_name}@{style_ch}"
+                style_bytes = self._t_txn.get(style_key.encode("utf-8"))
+                if style_bytes is None:
+                    style_ch = ch
+                    style_key = input_key
+                    style_bytes = input_bytes
+                style_u8 = self._bytes_to_u8(bytes(style_bytes), cache_key=f"T@{style_key}")
+                style_imgs_v1.append(self._u8_to_style_img(style_u8))
+                resolved_chars_v1.append(style_ch)
+
+            for style_ch in style_chars_v2:
+                style_key = f"{font_name}@{style_ch}"
+                style_bytes = self._t_txn.get(style_key.encode("utf-8"))
+                if style_bytes is None:
+                    style_ch = ch
+                    style_key = input_key
+                    style_bytes = input_bytes
+                style_u8 = self._bytes_to_u8(bytes(style_bytes), cache_key=f"T@{style_key}")
+                style_imgs_v2.append(self._u8_to_style_img(style_u8))
+                resolved_chars_v2.append(style_ch)
+
+            sample["style_img"] = torch.stack(style_imgs_v1, dim=0)
+            sample["style_ref_mask"] = torch.ones((len(style_imgs_v1),), dtype=torch.float32)
+            sample["style_chars"] = resolved_chars_v1
+            sample["style_char"] = resolved_chars_v1[0] if resolved_chars_v1 else ch
+
+            sample["style_img_view2"] = torch.stack(style_imgs_v2, dim=0)
+            sample["style_ref_mask_view2"] = torch.ones((len(style_imgs_v2),), dtype=torch.float32)
+            sample["style_chars_view2"] = resolved_chars_v2
+            sample["style_char_view2"] = resolved_chars_v2[0] if resolved_chars_v2 else ch
 
         if self.use_part_bank:
             if self._p_txn is None:

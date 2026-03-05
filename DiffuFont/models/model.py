@@ -109,6 +109,37 @@ def info_nce_loss(
     return loss.mean()
 
 
+def token_diversity_loss(tokens: torch.Tensor) -> torch.Tensor:
+    """Off-diagonal token cosine^2; lower means better token specialization."""
+    t = F.normalize(tokens, dim=-1)
+    sim = torch.matmul(t, t.transpose(1, 2))
+    eye = torch.eye(int(sim.size(-1)), device=sim.device, dtype=torch.bool).unsqueeze(0)
+    off_diag = sim.masked_fill(eye, 0.0)
+    denom = max(1, int(sim.size(-1) * (sim.size(-1) - 1)))
+    return (off_diag.pow(2).sum(dim=(1, 2)) / float(denom)).mean()
+
+
+def token_collapse_score(tokens: torch.Tensor) -> torch.Tensor:
+    """Mean off-diagonal token cosine; high means token collapse."""
+    t = F.normalize(tokens, dim=-1)
+    sim = torch.matmul(t, t.transpose(1, 2))
+    eye = torch.eye(int(sim.size(-1)), device=sim.device, dtype=torch.bool).unsqueeze(0)
+    off_diag = sim.masked_select(~eye).view(int(sim.size(0)), -1)
+    return off_diag.mean()
+
+
+def cosine_same_diff(z1: torch.Tensor, z2: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    same = F.cosine_similarity(z1, z2, dim=-1).mean()
+    sim = z1 @ z2.t()
+    b = int(sim.size(0))
+    if b <= 1:
+        diff = torch.zeros((), device=sim.device, dtype=sim.dtype)
+    else:
+        eye = torch.eye(b, device=sim.device, dtype=torch.bool)
+        diff = sim.masked_select(~eye).mean()
+    return same, diff
+
+
 # ====================================================================== #
 #  DiffusionTrainer
 # ====================================================================== #
@@ -121,7 +152,10 @@ class DiffusionTrainer:
         device: torch.device,
         lr: float = 2e-4,
         lambda_mse: float = 1.0,
-        lambda_nce: float = 0.05,
+        lambda_nce: float = 0.0,
+        lambda_cons: float = 0.0,
+        lambda_div: float = 0.0,
+        nce_temperature: float = 0.07,
         nce_warmup_steps: int = 0,
         T: int = 1000,
         total_steps: int = 100_000,
@@ -133,28 +167,27 @@ class DiffusionTrainer:
         grad_accum_steps: int = 1,
         conditioning_mode: str = "part_only",
         part_drop_prob: float = 0.0,
-        lambda_kd: float = 0.0,
-        teacher_model: nn.Module | None = None,
-        teacher_conditioning_mode: str = "part_style",
+        style_ref_drop_prob: float = 0.0,
+        style_ref_drop_min_keep: int = 1,
+        style_token_drop_prob: float = 0.0,
         freeze_part_encoder_steps: int = 0,
+        freeze_style_branch_steps: int = 0,
         cfg_drop_prob: float = 0.0,  # deprecated, kept for backward compat (ignored)
     ):
         self.device = device
         self.model = model.to(device)
         self.conditioning_mode = str(conditioning_mode).strip().lower()
         self.part_drop_prob = float(max(0.0, min(1.0, part_drop_prob)))
-        self.lambda_kd = float(max(0.0, lambda_kd))
-        self.teacher_conditioning_mode = str(teacher_conditioning_mode).strip().lower()
-        self.teacher_model = teacher_model.to(device) if teacher_model is not None else None
-        if self.teacher_model is not None:
-            self.teacher_model.eval()
-            for p in self.teacher_model.parameters():
-                p.requires_grad_(False)
+        self.style_ref_drop_prob = float(max(0.0, min(1.0, style_ref_drop_prob)))
+        self.style_ref_drop_min_keep = max(1, int(style_ref_drop_min_keep))
+        self.style_token_drop_prob = float(max(0.0, min(1.0, style_token_drop_prob)))
 
         self.grad_accum_steps = max(1, int(grad_accum_steps))
         self._accum_step = 0
         self.freeze_part_encoder_steps = max(0, int(freeze_part_encoder_steps))
         self._part_encoder_is_frozen = False
+        self.freeze_style_branch_steps = max(0, int(freeze_style_branch_steps))
+        self._style_branch_is_frozen = False
 
         self.opt = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-4)
         if int(T) <= 0:
@@ -176,6 +209,9 @@ class DiffusionTrainer:
         self.scheduler = NoiseScheduler(self.diffusion_steps).to(device)
         self.lambda_mse = float(lambda_mse)
         self.lambda_nce = float(lambda_nce)
+        self.lambda_cons = float(lambda_cons)
+        self.lambda_div = float(lambda_div)
+        self.nce_temperature = float(nce_temperature)
         self.nce_warmup_steps = max(0, int(nce_warmup_steps))
         self.global_step = 0
         self.local_step = 0
@@ -245,6 +281,15 @@ class DiffusionTrainer:
                     f"until global_step>={self.freeze_part_encoder_steps}",
                     flush=True,
                 )
+        if self.freeze_style_branch_steps > 0:
+            frozen_style_params = self._set_style_branch_requires_grad(False)
+            if frozen_style_params > 0:
+                self._style_branch_is_frozen = True
+                print(
+                    f"[trainer] froze style branch params={frozen_style_params} "
+                    "(kept frozen for full training)",
+                    flush=True,
+                )
 
     def _set_part_encoder_requires_grad(self, requires_grad: bool) -> int:
         """Set requires_grad for part encoder submodules if present."""
@@ -271,6 +316,50 @@ class DiffusionTrainer:
             f"(params={unfrozen_params})",
             flush=True,
         )
+
+    def _set_style_branch_requires_grad(self, requires_grad: bool) -> int:
+        """Set requires_grad for style encoder/token-layer submodules if present."""
+        module_names = (
+            "style_img_encoder",
+            "style_feat_to_token",
+            "style_token_attn",
+            "style_token_norm",
+            "style_token_ffn",
+            "style_token_out_norm",
+        )
+        changed = 0
+        for name in module_names:
+            module = getattr(self.model, name, None)
+            if module is None:
+                continue
+            for p in module.parameters():
+                p.requires_grad_(requires_grad)
+                changed += 1
+
+        style_queries = getattr(self.model, "style_queries", None)
+        if style_queries is not None and isinstance(style_queries, torch.Tensor):
+            style_queries.requires_grad_(requires_grad)
+            changed += 1
+        return changed
+
+    def _set_style_branch_train_mode(self, training: bool) -> None:
+        module_names = (
+            "style_img_encoder",
+            "style_feat_to_token",
+            "style_token_attn",
+            "style_token_norm",
+            "style_token_ffn",
+            "style_token_out_norm",
+        )
+        for name in module_names:
+            module = getattr(self.model, name, None)
+            if module is not None and isinstance(module, nn.Module):
+                module.train(training)
+
+    def _maybe_unfreeze_style_branch(self) -> None:
+        if self._style_branch_is_frozen:
+            self._set_style_branch_train_mode(False)
+        return
 
     # ------------------------------------------------------------------ #
     #  Gradient accumulation helpers
@@ -395,13 +484,13 @@ class DiffusionTrainer:
 
     @staticmethod
     def _mode_uses_parts(mode: str) -> bool:
-        m = str(mode).strip().lower()
-        return m in {"part_only", "part_style", "parts_vector_only"}
+        _ = str(mode).strip().lower()
+        return False
 
     @staticmethod
     def _mode_uses_style(mode: str) -> bool:
         m = str(mode).strip().lower()
-        return m in {"style_only"}
+        return m in {"part_only", "style_only", "parts_vector_only"}
 
     def _ensure_required_conditions(
         self,
@@ -414,32 +503,114 @@ class DiffusionTrainer:
                 f"{stage}: conditioning_mode='{mode}' requires style_img, but style_img is missing."
             )
 
-    # ------------------------------------------------------------------ #
-    #  InfoNCE on dual part-set views
-    # ------------------------------------------------------------------ #
-    def _compute_nce(
+    def _select_style_view(
         self,
         batch: Dict[str, torch.Tensor],
-    ) -> torch.Tensor:
-        """Compute InfoNCE if parts_b present and model supports contrastive head."""
-        if self.lambda_nce <= 0.0:
-            return torch.tensor(0.0, device=self.device)
-        if not self._mode_uses_parts(self.conditioning_mode):
-            return torch.tensor(0.0, device=self.device)
-        if "parts_b" not in batch or "font_ids" not in batch:
-            return torch.tensor(0.0, device=self.device)
-        if not hasattr(self.model, "encode_contrastive_z"):
-            return torch.tensor(0.0, device=self.device)
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        style_img_v1 = batch["style_img"].to(self.device) if "style_img" in batch else None
+        style_ref_mask_v1 = (
+            batch["style_ref_mask"].to(self.device) if "style_ref_mask" in batch else None
+        )
+        style_img_v2 = batch["style_img_view2"].to(self.device) if "style_img_view2" in batch else None
+        style_ref_mask_v2 = (
+            batch["style_ref_mask_view2"].to(self.device) if "style_ref_mask_view2" in batch else None
+        )
+        if style_img_v1 is None and style_img_v2 is None:
+            return None, None
+        if style_img_v1 is not None:
+            return style_img_v1, style_ref_mask_v1
+        return style_img_v2, style_ref_mask_v2
 
-        parts_a = batch["parts"].to(self.device)
-        mask_a = batch["part_mask"].to(self.device)
-        parts_b = batch["parts_b"].to(self.device)
-        mask_b = batch["part_mask_b"].to(self.device)
-        font_ids = batch["font_ids"].to(self.device)
+    def _apply_style_ref_dropout(self, style_ref_mask: torch.Tensor | None) -> torch.Tensor | None:
+        if style_ref_mask is None:
+            return None
+        if self.style_ref_drop_prob <= 0.0:
+            return style_ref_mask
+        if style_ref_mask.dim() != 2:
+            return style_ref_mask
 
-        z_a = self.model.encode_contrastive_z(parts_a, mask_a)
-        z_b = self.model.encode_contrastive_z(parts_b, mask_b)
-        return info_nce_loss(z_a, z_b, font_ids, temperature=0.07)
+        valid = style_ref_mask > 0
+        if not bool(valid.any().item()):
+            return style_ref_mask
+
+        keep = valid & (torch.rand_like(style_ref_mask) >= self.style_ref_drop_prob)
+        valid_count = valid.sum(dim=1)
+        keep_count = keep.sum(dim=1)
+        min_keep = torch.full_like(valid_count, self.style_ref_drop_min_keep)
+        target_keep = torch.minimum(valid_count, min_keep).clamp_min(1)
+
+        rows_need = torch.nonzero(keep_count < target_keep, as_tuple=False).flatten()
+        for row in rows_need.tolist():
+            need = int(target_keep[row].item() - keep_count[row].item())
+            if need <= 0:
+                continue
+            cand = torch.nonzero(valid[row] & ~keep[row], as_tuple=False).flatten()
+            if cand.numel() <= 0:
+                continue
+            perm = torch.randperm(cand.numel(), device=style_ref_mask.device)
+            picked = cand.index_select(0, perm[:need])
+            keep[row, picked] = True
+
+        return keep.to(dtype=style_ref_mask.dtype)
+
+    # ------------------------------------------------------------------ #
+    #  Style regularizers on dual reference views
+    # ------------------------------------------------------------------ #
+    def _compute_style_losses(
+        self,
+        batch: Dict[str, torch.Tensor],
+    ) -> Dict[str, torch.Tensor]:
+        zero = torch.zeros((), device=self.device, dtype=torch.float32)
+        out: Dict[str, torch.Tensor] = {
+            "loss_nce": zero,
+            "loss_cons": zero,
+            "loss_div": zero,
+            "cos_same": zero,
+            "cos_diff": zero,
+            "token_collapse": zero,
+        }
+        if not self._mode_uses_style(self.conditioning_mode):
+            return out
+        if "style_img" not in batch:
+            return out
+
+        style_img_v1 = batch["style_img"].to(self.device)
+        style_ref_mask_v1 = batch.get("style_ref_mask", None)
+        if style_ref_mask_v1 is not None:
+            style_ref_mask_v1 = style_ref_mask_v1.to(self.device)
+
+        style_img_v2 = batch.get("style_img_view2", None)
+        style_ref_mask_v2 = batch.get("style_ref_mask_view2", None)
+        if style_img_v2 is None:
+            style_img_v2 = style_img_v1
+        else:
+            style_img_v2 = style_img_v2.to(self.device)
+        if style_ref_mask_v2 is None:
+            style_ref_mask_v2 = style_ref_mask_v1
+        elif style_ref_mask_v2 is not None:
+            style_ref_mask_v2 = style_ref_mask_v2.to(self.device)
+
+        style_ref_mask_v1 = self._apply_style_ref_dropout(style_ref_mask_v1)
+        style_ref_mask_v2 = self._apply_style_ref_dropout(style_ref_mask_v2)
+
+        tok1 = self.model.encode_style_tokens(style_img_v1, style_ref_mask=style_ref_mask_v1)
+        tok2 = self.model.encode_style_tokens(style_img_v2, style_ref_mask=style_ref_mask_v2)
+        z1 = F.normalize(tok1.mean(dim=1), dim=-1)
+        z2 = F.normalize(tok2.mean(dim=1), dim=-1)
+
+        font_ids = batch.get("font_ids", None)
+        if font_ids is None:
+            b = int(z1.size(0))
+            font_ids = torch.arange(b, device=self.device, dtype=torch.long)
+        else:
+            font_ids = font_ids.to(self.device, dtype=torch.long)
+
+        out["loss_nce"] = info_nce_loss(z1, z2, font_ids=font_ids, temperature=self.nce_temperature)
+        out["cos_same"], out["cos_diff"] = cosine_same_diff(z1, z2)
+        out["loss_cons"] = 1.0 - out["cos_same"]
+        out["loss_div"] = 0.5 * (token_diversity_loss(tok1) + token_diversity_loss(tok2))
+        out["token_collapse"] = 0.5 * (token_collapse_score(tok1) + token_collapse_score(tok2))
+        return out
 
     # ------------------------------------------------------------------ #
     #  train_step
@@ -448,19 +619,21 @@ class DiffusionTrainer:
         _train_t0 = time.perf_counter()
         self.model.train()
         self._maybe_unfreeze_part_encoder()
+        self._maybe_unfreeze_style_branch()
         attn_log_enabled = self._prepare_attention_logging()
         x0 = batch["target"].to(self.device)
         content = batch["content"].to(self.device)
-        style_img = batch["style_img"].to(self.device) if "style_img" in batch else None
+        style_img, style_ref_mask = self._select_style_view(batch)
         part_imgs = batch["parts"].to(self.device) if "parts" in batch else None
         part_mask = batch["part_mask"].to(self.device) if "part_mask" in batch else None
         self._ensure_required_conditions(self.conditioning_mode, style_img, stage="train_step")
-        if self.teacher_model is not None:
-            self._ensure_required_conditions(self.teacher_conditioning_mode, style_img, stage="teacher_kd")
+        if self._mode_uses_style(self.conditioning_mode):
+            style_ref_mask = self._apply_style_ref_dropout(style_ref_mask)
+        style_token_drop_prob = self.style_token_drop_prob if self._mode_uses_style(self.conditioning_mode) else 0.0
         B = x0.size(0)
         t = torch.randint(0, self.scheduler.T, (B,), device=self.device)
 
-        # Optional part drop for part_style robustness.
+        # Optional part drop path (inactive when part branch is disabled).
         part_drop_mask = None
         if (
             self.part_drop_prob > 0.0
@@ -491,34 +664,23 @@ class DiffusionTrainer:
                 part_imgs=part_imgs,
                 part_mask=part_mask,
                 condition_mode=self.conditioning_mode,
+                style_ref_mask=style_ref_mask,
+                style_token_drop_prob=style_token_drop_prob,
             )
             loss_mse = F.mse_loss(eps_hat_latent, eps_latent)
-            loss_nce = self._compute_nce(batch)
+            style_losses = self._compute_style_losses(batch)
+            loss_nce = style_losses["loss_nce"]
+            loss_cons = style_losses["loss_cons"]
+            loss_div = style_losses["loss_div"]
+            cos_same = style_losses["cos_same"]
+            cos_diff = style_losses["cos_diff"]
+            token_collapse = style_losses["token_collapse"]
             eff_lnce = self.effective_lambda_nce
-
-            loss_kd = torch.tensor(0.0, device=self.device)
-            if self.lambda_kd > 0.0 and self.teacher_model is not None:
-                teacher_style = style_img if self._mode_uses_style(self.teacher_conditioning_mode) else None
-                teacher_parts = batch["parts"].to(self.device) if (
-                    self._mode_uses_parts(self.teacher_conditioning_mode) and "parts" in batch
-                ) else None
-                teacher_part_mask = batch["part_mask"].to(self.device) if (
-                    self._mode_uses_parts(self.teacher_conditioning_mode) and "part_mask" in batch
-                ) else None
-                with torch.no_grad():
-                    eps_teacher = self.teacher_model(
-                        x_t_latent, t, content,
-                        style_img=teacher_style,
-                        part_imgs=teacher_parts,
-                        part_mask=teacher_part_mask,
-                        condition_mode=self.teacher_conditioning_mode,
-                    )
-                loss_kd = F.mse_loss(eps_hat_latent, eps_teacher)
-
             loss = (
                 self.lambda_mse * loss_mse
                 + eff_lnce * loss_nce
-                + self.lambda_kd * loss_kd
+                + self.lambda_cons * loss_cons
+                + self.lambda_div * loss_div
             )
 
         counterfactual_stats: Dict[str, float] = {}
@@ -547,6 +709,8 @@ class DiffusionTrainer:
                     part_imgs=None,
                     part_mask=None,
                     condition_mode="style_only",
+                    style_ref_mask=style_ref_mask,
+                    style_token_drop_prob=style_token_drop_prob,
                 )
                 cf_loss_part_only = F.mse_loss(eps_hat_part_only, eps_latent)
                 cf_loss_style_only = F.mse_loss(eps_hat_style_only, eps_latent)
@@ -572,8 +736,12 @@ class DiffusionTrainer:
                 "loss": loss.item(),
                 "loss_mse": loss_mse.item(),
                 "loss_nce": loss_nce.item(),
-                "loss_kd": loss_kd.item(),
-                "part_dropped": int(part_drop_mask.sum().item()) if part_drop_mask is not None else 0,
+                "loss_cons": loss_cons.item(),
+                "loss_div": loss_div.item(),
+                "cos_same": cos_same.item(),
+                "cos_diff": cos_diff.item(),
+                "token_collapse": token_collapse.item(),
+                "token_drop": float(style_token_drop_prob),
                 "lr": float(self.lr_schedule.get_last_lr()[0]),
                 "data_time": float(self._step_data_time),
                 "train_time": float(time.perf_counter() - _train_t0),
@@ -627,8 +795,12 @@ class DiffusionTrainer:
                 "loss": float(loss.item()),
                 "loss_mse": float(loss_mse.item()),
                 "loss_nce": float(loss_nce.item()),
-                "loss_kd": float(loss_kd.item()),
-                "part_dropped": int(part_drop_mask.sum().item()) if part_drop_mask is not None else 0,
+                "loss_cons": float(loss_cons.item()),
+                "loss_div": float(loss_div.item()),
+                "cos_same": float(cos_same.item()),
+                "cos_diff": float(cos_diff.item()),
+                "token_collapse": float(token_collapse.item()),
+                "token_drop": float(style_token_drop_prob),
                 "lr": float(self.lr_schedule.get_last_lr()[0]),
                 "data_time": float(self._step_data_time),
                 "train_time": float(self._step_train_time),
@@ -644,13 +816,14 @@ class DiffusionTrainer:
             msg = (
                 f"[step] gstep={self.global_step} ep={self.current_epoch} estep={self.local_step} "
                 f"loss={loss.item():.4f} mse={loss_mse.item():.4f} "
-                f"nce={loss_nce.item():.4f} λnce={eff_lnce:.4f} "
-                f"kd={loss_kd.item():.4f} "
+                f"nce={loss_nce.item():.4f} cons={loss_cons.item():.4f} "
+                f"div={loss_div.item():.4f} cos_same={cos_same.item():.4f} "
+                f"cos_diff={cos_diff.item():.4f} tok_coll={token_collapse.item():.4f} "
+                f"λnce={eff_lnce:.4f} "
                 f"lr={self.lr_schedule.get_last_lr()[0]:.6e} "
-                f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s"
+                f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s "
+                f"token_drop={style_token_drop_prob:.2f}"
             )
-            if part_drop_mask is not None:
-                msg += f" part_drop={int(part_drop_mask.sum().item())}/{int(B)}"
             if grad_norm is not None:
                 msg += f" gnorm={grad_norm:.4f}"
             if "attn_part" in attn_stats and "attn_style" in attn_stats:
@@ -669,8 +842,12 @@ class DiffusionTrainer:
             "loss": loss.item(),
             "loss_mse": loss_mse.item(),
             "loss_nce": loss_nce.item(),
-            "loss_kd": loss_kd.item(),
-            "part_dropped": int(part_drop_mask.sum().item()) if part_drop_mask is not None else 0,
+            "loss_cons": loss_cons.item(),
+            "loss_div": loss_div.item(),
+            "cos_same": cos_same.item(),
+            "cos_diff": cos_diff.item(),
+            "token_collapse": token_collapse.item(),
+            "token_drop": float(style_token_drop_prob),
             "lr": self.lr_schedule.get_last_lr()[0],
             "data_time": float(self._step_data_time),
             "train_time": float(self._step_train_time),
@@ -687,6 +864,7 @@ class DiffusionTrainer:
         self,
         content_img: torch.Tensor,
         style_img: torch.Tensor | None = None,
+        style_ref_mask: torch.Tensor | None = None,
         num_inference_steps: int = 20,
         part_imgs: torch.Tensor | None = None,
         part_mask: torch.Tensor | None = None,
@@ -700,6 +878,8 @@ class DiffusionTrainer:
         content_img = content_img.to(device)
         if style_img is not None:
             style_img = style_img.to(device)
+        if style_ref_mask is not None:
+            style_ref_mask = style_ref_mask.to(device)
         if part_imgs is not None:
             part_imgs = part_imgs.to(device)
         if part_mask is not None:
@@ -737,6 +917,7 @@ class DiffusionTrainer:
                     style_img=style_img,
                     part_imgs=part_imgs, part_mask=part_mask,
                     condition_mode=mode,
+                    style_ref_mask=style_ref_mask,
                 )
             x_t = dpm.step(eps_hat, t, x_t).prev_sample
 
@@ -908,6 +1089,10 @@ class DiffusionTrainer:
             batch["style_img"].index_select(0, idx_t).to(self.device)
             if "style_img" in batch else None
         )
+        style_ref_mask = (
+            batch["style_ref_mask"].index_select(0, idx_t).to(self.device)
+            if "style_ref_mask" in batch else None
+        )
         part_imgs = (
             batch["parts"].index_select(0, idx_t).to(self.device)
             if "parts" in batch else None
@@ -919,7 +1104,7 @@ class DiffusionTrainer:
 
         sample = self._generate_vis_samples(
             content, style_img=style_img, part_imgs=part_imgs,
-            part_mask=part_mask,
+            part_mask=part_mask, style_ref_mask=style_ref_mask,
         )
         # Save comparison grid: row0=content, row1=GT, row2=generated
         vis = torch.cat([(content + 1) / 2, (target + 1) / 2, (sample + 1) / 2], dim=0)
@@ -957,12 +1142,13 @@ class DiffusionTrainer:
             torch.cuda.empty_cache()
 
     def _generate_vis_samples(
-        self, content, *, style_img, part_imgs, part_mask,
+        self, content, *, style_img, part_imgs, part_mask, style_ref_mask,
     ) -> torch.Tensor:
         """Generate samples for visualization. Subclasses override this."""
         return self.dpm_solver_sample(
             content,
             style_img=style_img,
+            style_ref_mask=style_ref_mask,
             num_inference_steps=int(self.sample_inference_steps),
             part_imgs=part_imgs,
             part_mask=part_mask,
@@ -984,7 +1170,10 @@ class FlowMatchingTrainer(DiffusionTrainer):
         device: torch.device,
         lr: float = 2e-4,
         lambda_fm: float = 1.0,
-        lambda_nce: float = 0.05,
+        lambda_nce: float = 0.0,
+        lambda_cons: float = 0.0,
+        lambda_div: float = 0.0,
+        nce_temperature: float = 0.07,
         nce_warmup_steps: int = 0,
         T: int = 1000,
         total_steps: int = 100_000,
@@ -996,15 +1185,17 @@ class FlowMatchingTrainer(DiffusionTrainer):
         grad_accum_steps: int = 1,
         conditioning_mode: str = "part_only",
         part_drop_prob: float = 0.0,
-        lambda_kd: float = 0.0,
-        teacher_model: nn.Module | None = None,
-        teacher_conditioning_mode: str = "part_style",
+        style_ref_drop_prob: float = 0.0,
+        style_ref_drop_min_keep: int = 1,
+        style_token_drop_prob: float = 0.0,
         freeze_part_encoder_steps: int = 0,
+        freeze_style_branch_steps: int = 0,
         cfg_drop_prob: float = 0.0,  # deprecated, kept for backward compat (ignored)
     ):
         super().__init__(
             model=model, device=device, lr=lr,
-            lambda_mse=1.0, lambda_nce=lambda_nce, nce_warmup_steps=nce_warmup_steps,
+            lambda_mse=1.0, lambda_nce=lambda_nce, lambda_cons=lambda_cons, lambda_div=lambda_div,
+            nce_temperature=nce_temperature, nce_warmup_steps=nce_warmup_steps,
             T=T, total_steps=total_steps,
             sample_every_steps=sample_every_steps, precision=precision,
             save_every_steps=save_every_steps, log_every_steps=log_every_steps,
@@ -1012,10 +1203,11 @@ class FlowMatchingTrainer(DiffusionTrainer):
             grad_accum_steps=grad_accum_steps,
             conditioning_mode=conditioning_mode,
             part_drop_prob=part_drop_prob,
-            lambda_kd=lambda_kd,
-            teacher_model=teacher_model,
-            teacher_conditioning_mode=teacher_conditioning_mode,
+            style_ref_drop_prob=style_ref_drop_prob,
+            style_ref_drop_min_keep=style_ref_drop_min_keep,
+            style_token_drop_prob=style_token_drop_prob,
             freeze_part_encoder_steps=freeze_part_encoder_steps,
+            freeze_style_branch_steps=freeze_style_branch_steps,
         )
         self.lambda_fm = float(lambda_fm)
 
@@ -1037,15 +1229,17 @@ class FlowMatchingTrainer(DiffusionTrainer):
         _train_t0 = time.perf_counter()
         self.model.train()
         self._maybe_unfreeze_part_encoder()
+        self._maybe_unfreeze_style_branch()
         attn_log_enabled = self._prepare_attention_logging()
         x0 = batch["target"].to(self.device)
         content = batch["content"].to(self.device)
-        style_img = batch["style_img"].to(self.device) if "style_img" in batch else None
+        style_img, style_ref_mask = self._select_style_view(batch)
         part_imgs = batch["parts"].to(self.device) if "parts" in batch else None
         part_mask = batch["part_mask"].to(self.device) if "part_mask" in batch else None
         self._ensure_required_conditions(self.conditioning_mode, style_img, stage="flow_train_step")
-        if self.teacher_model is not None:
-            self._ensure_required_conditions(self.teacher_conditioning_mode, style_img, stage="flow_teacher_kd")
+        if self._mode_uses_style(self.conditioning_mode):
+            style_ref_mask = self._apply_style_ref_dropout(style_ref_mask)
+        style_token_drop_prob = self.style_token_drop_prob if self._mode_uses_style(self.conditioning_mode) else 0.0
         b = x0.size(0)
 
         # Convert pixel → latent
@@ -1059,7 +1253,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
         v_target = x1_latent - x0_latent
         t_idx = (t * float(self.diffusion_steps - 1)).round().long()
 
-        # Optional part drop for part_style robustness.
+        # Optional part drop path (inactive when part branch is disabled).
         part_drop_mask = None
         if (
             self.part_drop_prob > 0.0
@@ -1084,34 +1278,23 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 style_img=style_img,
                 part_imgs=part_imgs, part_mask=part_mask,
                 condition_mode=self.conditioning_mode,
+                style_ref_mask=style_ref_mask,
+                style_token_drop_prob=style_token_drop_prob,
             )
             loss_fm = F.mse_loss(v_hat, v_target)
-            loss_nce = self._compute_nce(batch)
+            style_losses = self._compute_style_losses(batch)
+            loss_nce = style_losses["loss_nce"]
+            loss_cons = style_losses["loss_cons"]
+            loss_div = style_losses["loss_div"]
+            cos_same = style_losses["cos_same"]
+            cos_diff = style_losses["cos_diff"]
+            token_collapse = style_losses["token_collapse"]
             eff_lnce = self.effective_lambda_nce
-
-            loss_kd = torch.tensor(0.0, device=self.device)
-            if self.lambda_kd > 0.0 and self.teacher_model is not None:
-                teacher_style = style_img if self._mode_uses_style(self.teacher_conditioning_mode) else None
-                teacher_parts = batch["parts"].to(self.device) if (
-                    self._mode_uses_parts(self.teacher_conditioning_mode) and "parts" in batch
-                ) else None
-                teacher_part_mask = batch["part_mask"].to(self.device) if (
-                    self._mode_uses_parts(self.teacher_conditioning_mode) and "part_mask" in batch
-                ) else None
-                with torch.no_grad():
-                    v_teacher = self.teacher_model(
-                        x_t_latent, t_idx, content,
-                        style_img=teacher_style,
-                        part_imgs=teacher_parts,
-                        part_mask=teacher_part_mask,
-                        condition_mode=self.teacher_conditioning_mode,
-                    )
-                loss_kd = F.mse_loss(v_hat, v_teacher)
-
             loss = (
                 self.lambda_fm * loss_fm
                 + eff_lnce * loss_nce
-                + self.lambda_kd * loss_kd
+                + self.lambda_cons * loss_cons
+                + self.lambda_div * loss_div
             )
 
         counterfactual_stats: Dict[str, float] = {}
@@ -1140,6 +1323,8 @@ class FlowMatchingTrainer(DiffusionTrainer):
                     part_imgs=None,
                     part_mask=None,
                     condition_mode="style_only",
+                    style_ref_mask=style_ref_mask,
+                    style_token_drop_prob=style_token_drop_prob,
                 )
                 cf_loss_part_only = F.mse_loss(v_hat_part_only, v_target)
                 cf_loss_style_only = F.mse_loss(v_hat_style_only, v_target)
@@ -1162,8 +1347,12 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 "loss": loss.item(),
                 "loss_fm": loss_fm.item(),
                 "loss_nce": loss_nce.item(),
-                "loss_kd": loss_kd.item(),
-                "part_dropped": int(part_drop_mask.sum().item()) if part_drop_mask is not None else 0,
+                "loss_cons": loss_cons.item(),
+                "loss_div": loss_div.item(),
+                "cos_same": cos_same.item(),
+                "cos_diff": cos_diff.item(),
+                "token_collapse": token_collapse.item(),
+                "token_drop": float(style_token_drop_prob),
                 "lr": float(self.lr_schedule.get_last_lr()[0]),
                 "data_time": float(self._step_data_time),
                 "train_time": float(time.perf_counter() - _train_t0),
@@ -1213,8 +1402,12 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 "loss": float(loss.item()),
                 "loss_fm": float(loss_fm.item()),
                 "loss_nce": float(loss_nce.item()),
-                "loss_kd": float(loss_kd.item()),
-                "part_dropped": int(part_drop_mask.sum().item()) if part_drop_mask is not None else 0,
+                "loss_cons": float(loss_cons.item()),
+                "loss_div": float(loss_div.item()),
+                "cos_same": float(cos_same.item()),
+                "cos_diff": float(cos_diff.item()),
+                "token_collapse": float(token_collapse.item()),
+                "token_drop": float(style_token_drop_prob),
                 "lr": float(self.lr_schedule.get_last_lr()[0]),
                 "data_time": float(self._step_data_time),
                 "train_time": float(self._step_train_time),
@@ -1228,13 +1421,14 @@ class FlowMatchingTrainer(DiffusionTrainer):
             msg = (
                 f"[fm-step] gstep={self.global_step} ep={self.current_epoch} estep={self.local_step} "
                 f"loss={loss.item():.4f} fm={loss_fm.item():.4f} "
-                f"nce={loss_nce.item():.4f} λnce={eff_lnce:.4f} "
-                f"kd={loss_kd.item():.4f} "
+                f"nce={loss_nce.item():.4f} cons={loss_cons.item():.4f} "
+                f"div={loss_div.item():.4f} cos_same={cos_same.item():.4f} "
+                f"cos_diff={cos_diff.item():.4f} tok_coll={token_collapse.item():.4f} "
+                f"λnce={eff_lnce:.4f} "
                 f"lr={self.lr_schedule.get_last_lr()[0]:.6e} "
-                f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s"
+                f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s "
+                f"token_drop={style_token_drop_prob:.2f}"
             )
-            if part_drop_mask is not None:
-                msg += f" part_drop={int(part_drop_mask.sum().item())}/{int(b)}"
             if grad_norm is not None:
                 msg += f" gnorm={grad_norm:.4f}"
             if "attn_part" in attn_stats and "attn_style" in attn_stats:
@@ -1253,8 +1447,12 @@ class FlowMatchingTrainer(DiffusionTrainer):
             "loss": loss.item(),
             "loss_fm": loss_fm.item(),
             "loss_nce": loss_nce.item(),
-            "loss_kd": loss_kd.item(),
-            "part_dropped": int(part_drop_mask.sum().item()) if part_drop_mask is not None else 0,
+            "loss_cons": loss_cons.item(),
+            "loss_div": loss_div.item(),
+            "cos_same": cos_same.item(),
+            "cos_diff": cos_diff.item(),
+            "token_collapse": token_collapse.item(),
+            "token_drop": float(style_token_drop_prob),
             "lr": self.lr_schedule.get_last_lr()[0],
             "data_time": float(self._step_data_time),
             "train_time": float(self._step_train_time),
@@ -1270,6 +1468,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
         content_img: torch.Tensor,
         c: int = 50,
         style_img: torch.Tensor | None = None,
+        style_ref_mask: torch.Tensor | None = None,
         part_imgs: torch.Tensor | None = None,
         part_mask: torch.Tensor | None = None,
         condition_mode: str | None = None,
@@ -1282,6 +1481,8 @@ class FlowMatchingTrainer(DiffusionTrainer):
         content_img = content_img.to(device)
         if style_img is not None:
             style_img = style_img.to(device)
+        if style_ref_mask is not None:
+            style_ref_mask = style_ref_mask.to(device)
         if part_imgs is not None:
             part_imgs = part_imgs.to(device)
         if part_mask is not None:
@@ -1307,18 +1508,20 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 style_img=style_img,
                 part_imgs=part_imgs, part_mask=part_mask,
                 condition_mode=mode,
+                style_ref_mask=style_ref_mask,
             )
             x_t = x_t - dt * v_hat
         return x_t.clamp(-1, 1)
 
     def _generate_vis_samples(
-        self, content, *, style_img, part_imgs, part_mask,
+        self, content, *, style_img, part_imgs, part_mask, style_ref_mask,
     ) -> torch.Tensor:
         """Override: use flow_sample instead of dpm_solver_sample."""
         flow_steps = int(self.sample_inference_steps) if int(self.sample_inference_steps) > 1 else 50
         return self.flow_sample(
             content, c=flow_steps,
             style_img=style_img,
+            style_ref_mask=style_ref_mask,
             part_imgs=part_imgs, part_mask=part_mask,
             condition_mode=self.conditioning_mode,
         )

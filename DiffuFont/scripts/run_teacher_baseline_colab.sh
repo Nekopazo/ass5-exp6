@@ -79,7 +79,6 @@ else
 fi
 
 python -u train.py \
-  --stage teacher \
   --teacher-line baseline \
   --trainer diffusion \
   --device auto \
@@ -90,7 +89,6 @@ python -u train.py \
   --total-steps "${TARGET_STEPS}" \
   --lambda-diff 1.0 \
   --lambda-nce 0.0 \
-  --part-drop-prob 0.0 \
   --num-workers 4 \
   --sample-every-steps 200 \
   --log-every-steps 50 \

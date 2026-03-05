@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/content/drive/MyDrive/ass5/ass5-exp6/DiffuFont"
+ROOT="/scratch/yangximing/code/ass5-exp6/DiffuFont"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
-RUN_MODE="foreground"
+RUN_MODE="daemon"
 LOG_FILE=""
 PID_FILE=""
-RESUME_CKPT="/content/drive/MyDrive/ass5/ass5-exp6/DiffuFont/checkpoints/teacher_style_only_20260303_043849/ckpt_step_24000.pt"
+RESUME_CKPT=""
 SAVE_DIR_OVERRIDE=""
+PRETRAIN_STYLE_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/style_encoder_pretrain_20260305_154850.pt"
+DEVICE_ARG="cuda:1"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -17,8 +19,10 @@ while [[ $# -gt 0 ]]; do
     --pid-file)   PID_FILE="${2:?--pid-file requires a value}"; shift 2 ;;
     --resume)     RESUME_CKPT="${2:?--resume requires a value}"; shift 2 ;;
     --save-dir)   SAVE_DIR_OVERRIDE="${2:?--save-dir requires a value}"; shift 2 ;;
+    --pretrained-style-encoder) PRETRAIN_STYLE_CKPT="${2:?--pretrained-style-encoder requires a value}"; shift 2 ;;
+    --device)     DEVICE_ARG="${2:?--device requires a value}"; shift 2 ;;
     -h|--help)
-      echo "Usage: $0 [--foreground|--daemon] [--log-file PATH] [--pid-file PATH] [--resume CKPT] [--save-dir DIR]"
+      echo "Usage: $0 [--foreground|--daemon] [--log-file PATH] [--pid-file PATH] [--resume CKPT] [--save-dir DIR] [--pretrained-style-encoder CKPT] [--device DEV]"
       exit 0 ;;
     *) echo "[teacher_style_only] unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -48,6 +52,12 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
   if [[ -n "${SAVE_DIR_OVERRIDE}" ]]; then
     _daemon_args+=(--save-dir "${SAVE_DIR_OVERRIDE}")
   fi
+  if [[ -n "${PRETRAIN_STYLE_CKPT}" ]]; then
+    _daemon_args+=(--pretrained-style-encoder "${PRETRAIN_STYLE_CKPT}")
+  fi
+  if [[ -n "${DEVICE_ARG}" ]]; then
+    _daemon_args+=(--device "${DEVICE_ARG}")
+  fi
   nohup bash "${SCRIPT_PATH}" "${_daemon_args[@]}" \
     >> "${LOG_FILE}" 2>&1 < /dev/null &
   DAEMON_PID=$!
@@ -62,15 +72,26 @@ exec > >(tee -a "${LOG_FILE}") 2>&1
 echo "$$" > "${PID_FILE}"
 
 echo "[teacher_style_only] start $(date '+%Y-%m-%d %H:%M:%S')"
-echo "[teacher_style_only] root=${ROOT} pid=$$ device=auto save_dir=${SAVE_DIR}"
+echo "[teacher_style_only] root=${ROOT} pid=$$ device=${DEVICE_ARG} save_dir=${SAVE_DIR}"
 if [[ -n "${RESUME_CKPT}" ]]; then
   echo "[teacher_style_only] resume_ckpt=${RESUME_CKPT} (will continue from checkpoint step)"
 fi
 
-export PYTHONUNBUFFERED=1
-export OMP_NUM_THREADS=4
-export MKL_NUM_THREADS=4
-TARGET_STEPS=30000
+if [[ -z "${PRETRAIN_STYLE_CKPT}" ]]; then
+  if [[ -f "checkpoints/style_encoder_pretrain_best.pt" ]]; then
+    PRETRAIN_STYLE_CKPT="checkpoints/style_encoder_pretrain_best.pt"
+  else
+    PRETRAIN_STYLE_CKPT="$(ls -1t checkpoints/style_encoder_pretrain_*.pt 2>/dev/null | head -n 1 || true)"
+  fi
+fi
+if [[ -z "${PRETRAIN_STYLE_CKPT}" || ! -f "${PRETRAIN_STYLE_CKPT}" ]]; then
+  echo "[teacher_style_only] pretrained style checkpoint not found. pass --pretrained-style-encoder CKPT" >&2
+  exit 2
+fi
+echo "[teacher_style_only] pretrained_style_ckpt=${PRETRAIN_STYLE_CKPT}"
+
+
+TARGET_STEPS=60000
 if [[ -n "${RESUME_CKPT}" ]]; then
   set -- --resume "${RESUME_CKPT}"
 else
@@ -78,22 +99,22 @@ else
 fi
 
 python -u train.py \
-  --stage teacher \
   --teacher-line style_only \
   --trainer diffusion \
-  --device auto \
+  --device "${DEVICE_ARG}" \
   --precision bf16 \
-  --batch 64 \
+  --batch 32 \
   --grad-accum 1 \
-  --lr 4e-4 \
+  --lr 2e-4 \
   --total-steps "${TARGET_STEPS}" \
+  --val-ratio 0.1 \
   --lambda-diff 1.0 \
-  --lambda-nce 0.0 \
-  --part-drop-prob 0.0 \
-  --num-workers 4 \
-  --sample-every-steps 200 \
+  --style-ref-count 12 \
+  --pretrained-style-encoder "${PRETRAIN_STYLE_CKPT}" \
+  --num-workers 8 \
+  --sample-every-steps 300 \
   --log-every-steps 100 \
-  --save-every-steps 500 \
+  --save-every-steps 2000 \
   --save-dir "${SAVE_DIR}" \
   --attn-scales 16,32 \
   "$@"

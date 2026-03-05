@@ -221,7 +221,15 @@ class UNet(ModelMixin, ConfigMixin):
             ):
                 block.set_attention_slice(slice_size)
 
-    def _set_gradient_checkpointing(self, enable: bool = True, gradient_checkpointing_func=None):
+    def _set_gradient_checkpointing(
+        self,
+        enable: bool = True,
+        gradient_checkpointing_func=None,
+        value: Optional[bool] = None,
+    ):
+        # diffusers versions call this hook with either `enable=` or `value=`.
+        if value is not None:
+            enable = bool(value)
         for module in self.modules():
             if isinstance(module, (DownBlock2D, UpBlock2D, MCADownBlock2D, StyleUpBlock2D)):
                 module.gradient_checkpointing = enable
