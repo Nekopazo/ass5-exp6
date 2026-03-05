@@ -97,6 +97,7 @@ python -u train.py \
   --lambda-nce 0 \
   --nce-warmup-steps 5000 \
   --part-drop-prob 0.0 \
+  --part-pick-count 1 \
   --num-workers 4 \
   --sample-every-steps 200 \
   --log-every-steps 100 \

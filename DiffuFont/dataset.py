@@ -50,6 +50,7 @@ class FontImageDataset(Dataset):
         part_bank_lmdb: Optional[Union[str, Path]] = None,
         part_set_min: Optional[int] = None,
         part_set_max: int = 8,
+        part_pick_count: int = 0,
         part_image_size: int = 40,
         part_image_cache_size: int = 50_000,
         lmdb_decode_cache_size: int = 20_000,
@@ -70,6 +71,8 @@ class FontImageDataset(Dataset):
         # Deprecated: part count is now determined by actual part files per font+char.
         self.part_set_max = max(1, int(part_set_max))
         self.part_set_min = self.part_set_max if part_set_min is None else max(1, int(part_set_min))
+        # 0 means keep all available parts for the selected font+char.
+        self.part_pick_count = max(0, int(part_pick_count))
         self.part_image_size = max(8, int(part_image_size))
         self.part_image_cache_size = max(0, int(part_image_cache_size))
         self.lmdb_decode_cache_size = max(0, int(lmdb_decode_cache_size))
@@ -135,7 +138,13 @@ class FontImageDataset(Dataset):
 
         # ---- PartBank (direct label-based) ----
         if self.use_part_bank:
-            print("[FontImageDataset] Part sampling mode: use-all-parts-per-font-char (part_set_min/max ignored).")
+            if self.part_pick_count > 0:
+                print(
+                    "[FontImageDataset] Part sampling mode: pick-"
+                    f"{self.part_pick_count}-parts-per-font-char (part_set_min/max ignored)."
+                )
+            else:
+                print("[FontImageDataset] Part sampling mode: use-all-parts-per-font-char (part_set_min/max ignored).")
             if part_bank_manifest is None:
                 part_bank_manifest = self.root / "DataPreparation" / "PartBank" / "manifest.json"
             if part_bank_lmdb is None:
@@ -356,13 +365,17 @@ class FontImageDataset(Dataset):
         rng: random.Random,
     ) -> List[Dict[str, Any]]:
         """Return all parts for one font+char only (no font-level fallback)."""
-        _ = rng  # kept for backward API compatibility
         char_map = self.part_bank_by_font_char.get(font_name, {})
         rows = char_map.get(ref_char, [])
         if not rows:
             return []
         # Deterministic order is already ensured at LMDB scan stage.
-        return list(rows)
+        out = list(rows)
+        if self.part_pick_count <= 0 or self.part_pick_count >= len(out):
+            return out
+        # Deterministic per-sample RNG is passed in by caller.
+        picked = sorted(rng.sample(range(len(out)), k=self.part_pick_count))
+        return [out[i] for i in picked]
 
     def _part_array_from_bytes(self, b: bytes) -> np.ndarray:
         img = Image.open(io.BytesIO(b)).convert("L")
