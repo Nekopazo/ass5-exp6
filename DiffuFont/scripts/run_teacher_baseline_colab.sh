@@ -49,7 +49,7 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     _daemon_args+=(--save-dir "${SAVE_DIR_OVERRIDE}")
   fi
   nohup bash "${SCRIPT_PATH}" "${_daemon_args[@]}" \
-    >> "${LOG_FILE}" 2>&1 < /dev/null &
+    > /dev/null 2>&1 < /dev/null &
   DAEMON_PID=$!
   echo "${DAEMON_PID}" > "${PID_FILE}"
   echo "[teacher_baseline] started in background pid=${DAEMON_PID}"
@@ -94,7 +94,6 @@ python -u train.py \
   --log-every-steps 50 \
   --save-every-steps 500 \
   --save-dir "${SAVE_DIR}" \
-  --attn-scales 16,32,64 \
   "$@"
 
 echo "[teacher_baseline] done $(date '+%Y-%m-%d %H:%M:%S')"

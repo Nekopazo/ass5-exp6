@@ -1,8 +1,13 @@
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 from torch import nn
 import torch.nn.functional as F
+
+try:
+    import xformers.ops as xops
+except Exception:
+    xops = None
 
 
 class SpatialTransformer(nn.Module):
@@ -29,6 +34,8 @@ class SpatialTransformer(nn.Module):
         num_groups: int = 32,
         context_dim: Optional[int] = None,
         use_self_attn: bool = True,
+        use_ffn: bool = True,
+        ff_mult: int = 4,
     ):
         super().__init__()
         self.n_heads = n_heads
@@ -48,6 +55,8 @@ class SpatialTransformer(nn.Module):
                     dropout=dropout,
                     context_dim=context_dim,
                     use_self_attn=use_self_attn,
+                    use_ffn=use_ffn,
+                    ff_mult=ff_mult,
                 )
                 for d in range(depth)
             ]
@@ -98,21 +107,24 @@ class BasicTransformerBlock(nn.Module):
         gated_ff: bool = True,
         checkpoint: bool = True,
         use_self_attn: bool = True,
+        use_ffn: bool = True,
+        ff_mult: int = 4,
     ):
         super().__init__()
         self.use_self_attn = bool(use_self_attn)
+        self.use_ffn = bool(use_ffn)
         self.attn1 = (
             CrossAttention(query_dim=dim, heads=n_heads, dim_head=d_head, dropout=dropout)
             if self.use_self_attn
             else None
         )  # self-attention (optional)
-        self.ff = FeedForward(dim, dropout=dropout, glu=gated_ff)
+        self.ff = FeedForward(dim, mult=ff_mult, dropout=dropout, glu=gated_ff) if self.use_ffn else None
         self.attn2 = CrossAttention(
             query_dim=dim, context_dim=context_dim, heads=n_heads, dim_head=d_head, dropout=dropout
         )  # is self-attn if context is none
         self.norm1 = nn.LayerNorm(dim)
         self.norm2 = nn.LayerNorm(dim)
-        self.norm3 = nn.LayerNorm(dim)
+        self.norm3 = nn.LayerNorm(dim) if self.use_ffn else None
         self.checkpoint = checkpoint
 
     def _set_attention_slice(self, slice_size):
@@ -125,7 +137,8 @@ class BasicTransformerBlock(nn.Module):
         if self.attn1 is not None:
             hidden_states = self.attn1(self.norm1(hidden_states)) + hidden_states
         hidden_states = self.attn2(self.norm2(hidden_states), context=context) + hidden_states
-        hidden_states = self.ff(self.norm3(hidden_states)) + hidden_states
+        if self.ff is not None and self.norm3 is not None:
+            hidden_states = self.ff(self.norm3(hidden_states)) + hidden_states
         return hidden_states
 
 
@@ -174,6 +187,8 @@ class GEGLU(nn.Module):
 
 
 class CrossAttention(nn.Module):
+    _MAX_EXPLICIT_LOG_SCORE_ELEMENTS = 4_194_304
+
     r"""
     A cross attention layer.
 
@@ -208,9 +223,25 @@ class CrossAttention(nn.Module):
         self._log_attention_enabled = False
         self._attn_mass_sum_by_klen: dict[int, torch.Tensor] = {}
         self._attn_mass_count_by_klen: dict[int, int] = {}
+        self._use_memory_efficient_attention_xformers = False
+        self._attention_op: Optional[Callable] = None
 
     def set_attention_logging(self, enabled: bool) -> None:
         self._log_attention_enabled = bool(enabled)
+
+    def set_use_memory_efficient_attention_xformers(
+        self,
+        valid: bool,
+        attention_op: Optional[Callable] = None,
+    ) -> None:
+        if not valid:
+            self._use_memory_efficient_attention_xformers = False
+            self._attention_op = None
+            return
+        if xops is None:
+            raise ImportError("xformers is not installed; cannot enable memory efficient attention.")
+        self._use_memory_efficient_attention_xformers = True
+        self._attention_op = attention_op
 
     def reset_attention_logging(self) -> None:
         self._attn_mass_sum_by_klen.clear()
@@ -267,7 +298,11 @@ class CrossAttention(nn.Module):
 
         if self._log_attention_enabled:
             hidden_states = self._attention(query, key, value)
-        elif self._slice_size is None or query.shape[0] // self._slice_size == 1:
+        elif (
+            self._use_memory_efficient_attention_xformers
+            or self._slice_size is None
+            or query.shape[0] // self._slice_size == 1
+        ):
             hidden_states = self._attention(query, key, value)
         else:
             hidden_states = self._sliced_attention(query, key, value, sequence_length, dim)
@@ -276,13 +311,42 @@ class CrossAttention(nn.Module):
 
     def _attention(self, query, key, value):
         # Use explicit attention path when logging is enabled so probabilities are available.
-        if self._log_attention_enabled:
+        can_log_explicit = (
+            self._log_attention_enabled
+            and (int(query.shape[1]) * int(key.shape[1])) <= self._MAX_EXPLICIT_LOG_SCORE_ELEMENTS
+        )
+        if can_log_explicit:
             attention_scores = torch.matmul(query, key.transpose(-1, -2)) * self.scale
             attention_probs = attention_scores.softmax(dim=-1)
             self._record_attention_probs(attention_probs)
             hidden_states = torch.matmul(attention_probs, value)
             hidden_states = self.reshape_batch_dim_to_heads(hidden_states)
             return hidden_states
+
+        if self._use_memory_efficient_attention_xformers and xops is not None and query.device.type == "cuda":
+            try:
+                batch_heads, sequence_length, head_dim = query.shape
+                if batch_heads % self.heads != 0:
+                    raise ValueError(f"Invalid attention shape: batch_heads={batch_heads}, heads={self.heads}")
+                batch_size = batch_heads // self.heads
+
+                q = query.view(batch_size, self.heads, sequence_length, head_dim).permute(0, 2, 1, 3).contiguous()
+                k = key.view(batch_size, self.heads, key.shape[1], head_dim).permute(0, 2, 1, 3).contiguous()
+                v = value.view(batch_size, self.heads, value.shape[1], head_dim).permute(0, 2, 1, 3).contiguous()
+
+                hidden_states = xops.memory_efficient_attention(
+                    q,
+                    k,
+                    v,
+                    attn_bias=None,
+                    p=0.0,
+                    op=self._attention_op,
+                )
+                hidden_states = hidden_states.permute(0, 2, 1, 3).reshape(batch_heads, sequence_length, head_dim)
+                hidden_states = self.reshape_batch_dim_to_heads(hidden_states)
+                return hidden_states
+            except Exception:
+                pass
 
         # Use PyTorch SDPA to avoid explicitly materializing large attention score tensors.
         try:

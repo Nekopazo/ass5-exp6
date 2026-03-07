@@ -53,6 +53,10 @@ python scripts/pretrain_style_encoder.py \
     --batch-size 64 \
     --ref-per-style 8 \
     --style-token-count 3 \
+    --lambda-div 0.02 \
+    --lambda-slot-nce 0.5 \
+    --lambda-attn-sep 0.05 \
+    --lambda-attn-order 0.02 \
     --device auto \
     --log-every 50
 

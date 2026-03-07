@@ -28,6 +28,16 @@ if str(PROJECT_ROOT_FALLBACK) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT_FALLBACK))
 
 from models.hierarchical_style_encoder import HierarchicalStyleEncoderMixin
+from models.source_part_ref_unet import (
+    FIXED_STYLE_SITE_ARCH,
+    FIXED_STYLE_TOKEN_CONSUMER_MAP,
+)
+from models.style_role_losses import (
+    attention_entropy_order_loss,
+    attention_mean_overlap,
+    attention_overlap_margin_loss,
+    attention_role_alignment_loss,
+)
 from style_augment import build_style_reference_transform
 
 
@@ -131,6 +141,36 @@ class StyleEncoderModule(nn.Module, HierarchicalStyleEncoderMixin):
             style_token_count=int(style_token_count),
             local_token_count=int(local_token_count),
         )
+        self.inject_mid = self._build_inject_head()
+        self.inject_up16 = self._build_inject_head()
+        self.inject_up32 = self._build_inject_head()
+        self.inject_up64 = self._build_inject_head()
+
+    def _build_inject_head(self) -> nn.Module:
+        return nn.Sequential(
+            nn.LayerNorm(self.style_token_dim),
+            nn.Linear(self.style_token_dim, self.style_token_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(self.style_token_dim, self.style_token_dim),
+        )
+
+    def project_style_sites(self, style_tokens: torch.Tensor) -> Dict[str, torch.Tensor]:
+        if style_tokens.dim() != 3 or int(style_tokens.size(1)) != 3:
+            raise ValueError(f"style_tokens must be (B,3,D), got {tuple(style_tokens.shape)}")
+        t_low = style_tokens[:, 0]
+        t_mid = style_tokens[:, 1]
+        t_high = style_tokens[:, 2]
+        return {
+            "mid": self.inject_mid(t_low),
+            "up_16": self.inject_up16(t_low),
+            "up_32": self.inject_up32(t_mid),
+            "up_64": self.inject_up64(t_high),
+        }
+
+    def stack_style_site_contexts(self, style_tokens: torch.Tensor) -> torch.Tensor:
+        site_contexts = self.project_style_sites(style_tokens)
+        ordered_sites = ("mid", "up_16", "up_32", "up_64")
+        return torch.stack([site_contexts[name] for name in ordered_sites], dim=1)
 
     def _normalize_style_inputs(
         self,
@@ -153,6 +193,23 @@ def info_nce_loss(z1: torch.Tensor, z2: torch.Tensor, temperature: float = 0.07)
     logits = (z1 @ z2.t()) / float(temperature)
     labels = torch.arange(logits.size(0), device=logits.device)
     return 0.5 * (F.cross_entropy(logits, labels) + F.cross_entropy(logits.t(), labels))
+
+
+def slotwise_info_nce_loss(
+    tok1: torch.Tensor,
+    tok2: torch.Tensor,
+    temperature: float = 0.07,
+) -> torch.Tensor:
+    if tok1.shape != tok2.shape:
+        raise ValueError(f"slotwise_info_nce shape mismatch: {tuple(tok1.shape)} vs {tuple(tok2.shape)}")
+    if tok1.dim() != 3:
+        raise ValueError(f"slotwise_info_nce expects 3D tokens, got {tuple(tok1.shape)}")
+    losses = []
+    for idx in range(int(tok1.size(1))):
+        z1 = F.normalize(tok1[:, idx], dim=-1)
+        z2 = F.normalize(tok2[:, idx], dim=-1)
+        losses.append(info_nce_loss(z1, z2, temperature=float(temperature)))
+    return torch.stack(losses).mean()
 
 
 def token_diversity_loss(tokens: torch.Tensor) -> torch.Tensor:
@@ -530,6 +587,16 @@ def summarize_metrics(metrics_list: List[Dict[str, float]]) -> Dict[str, float]:
     return {k: float(np.mean([row[k] for row in metrics_list if k in row])) for k in keys}
 
 
+def role_monitor_value(metrics: Dict[str, float]) -> float:
+    overlap = float(metrics.get("val_attn_overlap", metrics.get("attn_overlap", 0.0)))
+    low = float(metrics.get("val_attn_entropy_low", metrics.get("attn_entropy_low", 1.0)))
+    mid = float(metrics.get("val_attn_entropy_mid", metrics.get("attn_entropy_mid", 1.0)))
+    high = float(metrics.get("val_attn_entropy_high", metrics.get("attn_entropy_high", 1.0)))
+    order_gap = max(0.0, mid - low) + max(0.0, high - mid)
+    entropy_span = max(0.0, low - high)
+    return overlap + order_gap - 0.25 * entropy_span
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project-root", type=Path, default=Path("."))
@@ -560,11 +627,17 @@ def main() -> None:
     parser.add_argument("--p-ref-drop", type=float, default=0.25)
     parser.add_argument("--min-keep", type=int, default=4)
     parser.add_argument("--tau", type=float, default=0.07)
+    parser.add_argument("--lambda-slot-nce", type=float, default=0.50)
     parser.add_argument("--lambda-cons", type=float, default=0.15)
     parser.add_argument("--lambda-div", type=float, default=0.0)
     parser.add_argument("--lambda-proxy-low", type=float, default=0.20)
     parser.add_argument("--lambda-proxy-mid", type=float, default=0.20)
     parser.add_argument("--lambda-proxy-high", type=float, default=0.20)
+    parser.add_argument("--lambda-attn-sep", type=float, default=0.05)
+    parser.add_argument("--lambda-attn-order", type=float, default=0.02)
+    parser.add_argument("--lambda-attn-role", type=float, default=0.0)
+    parser.add_argument("--attn-overlap-margin", type=float, default=0.80)
+    parser.add_argument("--attn-entropy-gap", type=float, default=0.03)
     parser.add_argument("--image-size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
@@ -647,10 +720,45 @@ def main() -> None:
         if not isinstance(init_state, dict):
             raise RuntimeError(f"unexpected style_encoder checkpoint format: {type(init_state)!r}")
         missing, unexpected = encoder.load_state_dict(init_state, strict=False)
-        if missing or unexpected:
+        allowed_missing = {
+            "inject_mid.0.weight",
+            "inject_mid.0.bias",
+            "inject_mid.1.weight",
+            "inject_mid.1.bias",
+            "inject_mid.3.weight",
+            "inject_mid.3.bias",
+            "inject_up16.0.weight",
+            "inject_up16.0.bias",
+            "inject_up16.1.weight",
+            "inject_up16.1.bias",
+            "inject_up16.3.weight",
+            "inject_up16.3.bias",
+            "inject_up32.0.weight",
+            "inject_up32.0.bias",
+            "inject_up32.1.weight",
+            "inject_up32.1.bias",
+            "inject_up32.3.weight",
+            "inject_up32.3.bias",
+            "inject_up64.0.weight",
+            "inject_up64.0.bias",
+            "inject_up64.1.weight",
+            "inject_up64.1.bias",
+            "inject_up64.3.weight",
+            "inject_up64.3.bias",
+        }
+        missing = sorted(missing)
+        unexpected = sorted(unexpected)
+        disallowed_missing = [name for name in missing if name not in allowed_missing]
+        if disallowed_missing or unexpected:
             raise RuntimeError(
                 "init checkpoint mismatch: "
-                f"missing={sorted(missing)} unexpected={sorted(unexpected)}"
+                f"missing={disallowed_missing} unexpected={unexpected}"
+            )
+        if missing:
+            print(
+                "[style_pretrain] init checkpoint has no inject-head weights; "
+                "they will be initialized from scratch for the current routing.",
+                flush=True,
             )
 
     opt = torch.optim.AdamW(encoder.parameters(), lr=float(args.lr), weight_decay=float(args.weight_decay))
@@ -708,14 +816,16 @@ def main() -> None:
     log(
         f"device={device} train_fonts={len(train_fonts)} val_fonts={len(val_fonts)} "
         f"steps={int(args.steps)} batch={int(args.batch_size)} ref={int(args.ref_per_style)} "
+        f"lambda_slot_nce={float(args.lambda_slot_nce):g} "
         f"lambda_cons={float(args.lambda_cons):g} lambda_div={float(args.lambda_div):g} "
         f"lambda_proxy_low={float(args.lambda_proxy_low):g} "
         f"lambda_proxy_mid={float(args.lambda_proxy_mid):g} "
-        f"lambda_proxy_high={float(args.lambda_proxy_high):g}"
+        f"lambda_proxy_high={float(args.lambda_proxy_high):g} "
+        f"lambda_attn_sep={float(args.lambda_attn_sep):g} "
+        f"lambda_attn_order={float(args.lambda_attn_order):g} "
+        f"lambda_attn_role={float(args.lambda_attn_role):g}"
     )
 
-    best_val_loss: float | None = None
-    best_step = 0
     last_step = 0
 
     try:
@@ -727,15 +837,52 @@ def main() -> None:
             v2 = v2.to(device, non_blocking=True)
             m2 = m2.to(device, non_blocking=True)
 
-            tok1, proxy1 = encoder.encode_style_tokens_with_proxy(v1, m1)
-            tok2, proxy2 = encoder.encode_style_tokens_with_proxy(v2, m2)
+            tok1, proxy1, attn1 = encoder.encode_style_tokens_full(v1, m1)
+            tok2, proxy2, attn2 = encoder.encode_style_tokens_full(v2, m2)
+            site_tok1 = encoder.stack_style_site_contexts(tok1)
+            site_tok2 = encoder.stack_style_site_contexts(tok2)
             z1 = F.normalize(tok1.mean(dim=1), dim=-1)
             z2 = F.normalize(tok2.mean(dim=1), dim=-1)
 
             loss_nce = info_nce_loss(z1, z2, temperature=float(args.tau))
-            loss_cons = slot_consistency_loss(tok1, tok2)
+            loss_slot_nce = slotwise_info_nce_loss(tok1, tok2, temperature=float(args.tau))
+            loss_cons_token = slot_consistency_loss(tok1, tok2)
+            loss_cons_site = slot_consistency_loss(site_tok1, site_tok2)
+            loss_cons = 0.5 * (loss_cons_token + loss_cons_site)
             loss_div = 0.5 * (token_diversity_loss(tok1) + token_diversity_loss(tok2))
             loss_collapse = 0.5 * (token_collapse_score(tok1) + token_collapse_score(tok2))
+            loss_attn_sep = 0.5 * (
+                attention_overlap_margin_loss(attn1, style_ref_mask=m1, margin=float(args.attn_overlap_margin))
+                + attention_overlap_margin_loss(attn2, style_ref_mask=m2, margin=float(args.attn_overlap_margin))
+            )
+            loss_attn_order_1, ent1 = attention_entropy_order_loss(
+                attn1,
+                style_ref_mask=m1,
+                gap=float(args.attn_entropy_gap),
+            )
+            loss_attn_order_2, ent2 = attention_entropy_order_loss(
+                attn2,
+                style_ref_mask=m2,
+                gap=float(args.attn_entropy_gap),
+            )
+            loss_attn_order = 0.5 * (loss_attn_order_1 + loss_attn_order_2)
+            loss_attn_role_1, role_vec_1, _ = attention_role_alignment_loss(
+                attn1,
+                v1,
+                style_ref_mask=m1,
+            )
+            loss_attn_role_2, role_vec_2, _ = attention_role_alignment_loss(
+                attn2,
+                v2,
+                style_ref_mask=m2,
+            )
+            loss_attn_role = 0.5 * (loss_attn_role_1 + loss_attn_role_2)
+            role_vec = 0.5 * (role_vec_1 + role_vec_2)
+            attn_overlap = 0.5 * (
+                attention_mean_overlap(attn1, style_ref_mask=m1)
+                + attention_mean_overlap(attn2, style_ref_mask=m2)
+            )
+            attn_entropy = 0.5 * (ent1 + ent2)
             proxy_loss1 = compute_proxy_losses(proxy1)
             proxy_loss2 = compute_proxy_losses(proxy2)
             loss_proxy_low = 0.5 * (proxy_loss1["loss_proxy_low"] + proxy_loss2["loss_proxy_low"])
@@ -743,11 +890,15 @@ def main() -> None:
             loss_proxy_high = 0.5 * (proxy_loss1["loss_proxy_high"] + proxy_loss2["loss_proxy_high"])
             loss = (
                 loss_nce
+                + float(args.lambda_slot_nce) * loss_slot_nce
                 + float(args.lambda_cons) * loss_cons
                 + float(args.lambda_div) * loss_div
                 + float(args.lambda_proxy_low) * loss_proxy_low
                 + float(args.lambda_proxy_mid) * loss_proxy_mid
                 + float(args.lambda_proxy_high) * loss_proxy_high
+                + float(args.lambda_attn_sep) * loss_attn_sep
+                + float(args.lambda_attn_order) * loss_attn_order
+                + float(args.lambda_attn_role) * loss_attn_role
             )
             train_cos_same, train_cos_diff = cosine_same_diff(z1, z2)
             train_retr_top1, train_retr_top5 = retrieval_topk(z1, z2, k=5)
@@ -773,15 +924,60 @@ def main() -> None:
                         ev2 = ev2.to(device, non_blocking=True)
                         em2 = em2.to(device, non_blocking=True)
 
-                        et1, eproxy1 = encoder.encode_style_tokens_with_proxy(ev1, em1)
-                        et2, eproxy2 = encoder.encode_style_tokens_with_proxy(ev2, em2)
+                        et1, eproxy1, eattn1 = encoder.encode_style_tokens_full(ev1, em1)
+                        et2, eproxy2, eattn2 = encoder.encode_style_tokens_full(ev2, em2)
+                        esite1 = encoder.stack_style_site_contexts(et1)
+                        esite2 = encoder.stack_style_site_contexts(et2)
                         ez1 = F.normalize(et1.mean(dim=1), dim=-1)
                         ez2 = F.normalize(et2.mean(dim=1), dim=-1)
 
                         el_nce = info_nce_loss(ez1, ez2, temperature=float(args.tau))
-                        el_cons = slot_consistency_loss(et1, et2)
+                        el_slot_nce = slotwise_info_nce_loss(et1, et2, temperature=float(args.tau))
+                        el_cons_token = slot_consistency_loss(et1, et2)
+                        el_cons_site = slot_consistency_loss(esite1, esite2)
+                        el_cons = 0.5 * (el_cons_token + el_cons_site)
                         el_div = 0.5 * (token_diversity_loss(et1) + token_diversity_loss(et2))
                         el_collapse = 0.5 * (token_collapse_score(et1) + token_collapse_score(et2))
+                        el_attn_sep = 0.5 * (
+                            attention_overlap_margin_loss(
+                                eattn1,
+                                style_ref_mask=em1,
+                                margin=float(args.attn_overlap_margin),
+                            )
+                            + attention_overlap_margin_loss(
+                                eattn2,
+                                style_ref_mask=em2,
+                                margin=float(args.attn_overlap_margin),
+                            )
+                        )
+                        el_attn_order_1, eent1 = attention_entropy_order_loss(
+                            eattn1,
+                            style_ref_mask=em1,
+                            gap=float(args.attn_entropy_gap),
+                        )
+                        el_attn_order_2, eent2 = attention_entropy_order_loss(
+                            eattn2,
+                            style_ref_mask=em2,
+                            gap=float(args.attn_entropy_gap),
+                        )
+                        el_attn_order = 0.5 * (el_attn_order_1 + el_attn_order_2)
+                        el_attn_role_1, erole_vec_1, _ = attention_role_alignment_loss(
+                            eattn1,
+                            ev1,
+                            style_ref_mask=em1,
+                        )
+                        el_attn_role_2, erole_vec_2, _ = attention_role_alignment_loss(
+                            eattn2,
+                            ev2,
+                            style_ref_mask=em2,
+                        )
+                        el_attn_role = 0.5 * (el_attn_role_1 + el_attn_role_2)
+                        erole_vec = 0.5 * (erole_vec_1 + erole_vec_2)
+                        eattn_overlap = 0.5 * (
+                            attention_mean_overlap(eattn1, style_ref_mask=em1)
+                            + attention_mean_overlap(eattn2, style_ref_mask=em2)
+                        )
+                        eattn_entropy = 0.5 * (eent1 + eent2)
                         eproxy_loss1 = compute_proxy_losses(eproxy1)
                         eproxy_loss2 = compute_proxy_losses(eproxy2)
                         el_proxy_low = 0.5 * (eproxy_loss1["loss_proxy_low"] + eproxy_loss2["loss_proxy_low"])
@@ -789,11 +985,15 @@ def main() -> None:
                         el_proxy_high = 0.5 * (eproxy_loss1["loss_proxy_high"] + eproxy_loss2["loss_proxy_high"])
                         el_total = (
                             el_nce
+                            + float(args.lambda_slot_nce) * el_slot_nce
                             + float(args.lambda_cons) * el_cons
                             + float(args.lambda_div) * el_div
                             + float(args.lambda_proxy_low) * el_proxy_low
                             + float(args.lambda_proxy_mid) * el_proxy_mid
                             + float(args.lambda_proxy_high) * el_proxy_high
+                            + float(args.lambda_attn_sep) * el_attn_sep
+                            + float(args.lambda_attn_order) * el_attn_order
+                            + float(args.lambda_attn_role) * el_attn_role
                         )
                         ecos_same, ecos_diff = cosine_same_diff(ez1, ez2)
                         etop1, etop5 = retrieval_topk(ez1, ez2, k=5)
@@ -801,11 +1001,24 @@ def main() -> None:
                             {
                                 "val_loss": float(el_total.item()),
                                 "val_loss_nce": float(el_nce.item()),
+                                "val_loss_slot_nce": float(el_slot_nce.item()),
                                 "val_loss_cons": float(el_cons.item()),
+                                "val_loss_cons_token": float(el_cons_token.item()),
+                                "val_loss_cons_site": float(el_cons_site.item()),
                                 "val_loss_div": float(el_div.item()),
                                 "val_loss_proxy_low": float(el_proxy_low.item()),
                                 "val_loss_proxy_mid": float(el_proxy_mid.item()),
                                 "val_loss_proxy_high": float(el_proxy_high.item()),
+                                "val_loss_attn_sep": float(el_attn_sep.item()),
+                                "val_loss_attn_order": float(el_attn_order.item()),
+                                "val_loss_attn_role": float(el_attn_role.item()),
+                                "val_loss_attn_role_low": float(erole_vec[0].item()),
+                                "val_loss_attn_role_mid": float(erole_vec[1].item()),
+                                "val_loss_attn_role_high": float(erole_vec[2].item()),
+                                "val_attn_overlap": float(eattn_overlap.item()),
+                                "val_attn_entropy_low": float(eattn_entropy[0].item()),
+                                "val_attn_entropy_mid": float(eattn_entropy[1].item()),
+                                "val_attn_entropy_high": float(eattn_entropy[2].item()),
                                 "val_retr_top1": float(etop1.item()),
                                 "val_retr_top5": float(etop5.item()),
                                 "val_cos_same": float(ecos_same.item()),
@@ -815,27 +1028,33 @@ def main() -> None:
                         )
                 val_metrics = summarize_metrics(rows)
                 val_loss = float(val_metrics.get("val_loss", 0.0))
-                if best_val_loss is None or val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    best_step = step
-                    torch.save(
-                        {
-                            "style_encoder": make_style_encoder_state_dict(encoder),
-                            "config": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
-                            "extra": {"step": int(step), "best_val_loss": float(val_loss)},
-                        },
-                        out_path.with_name("style_encoder_pretrain_best.pt"),
-                    )
+                val_role = role_monitor_value(val_metrics)
+                val_composite = val_loss + 0.5 * val_role
+                val_metrics["val_role_monitor"] = float(val_role)
+                val_metrics["val_composite_monitor"] = float(val_composite)
 
             metrics_row: Dict[str, float | int] = {
                 "step": int(step),
                 "loss": float(loss.item()),
                 "loss_nce": float(loss_nce.item()),
+                "loss_slot_nce": float(loss_slot_nce.item()),
                 "loss_cons": float(loss_cons.item()),
+                "loss_cons_token": float(loss_cons_token.item()),
+                "loss_cons_site": float(loss_cons_site.item()),
                 "loss_div": float(loss_div.item()),
                 "loss_proxy_low": float(loss_proxy_low.item()),
                 "loss_proxy_mid": float(loss_proxy_mid.item()),
                 "loss_proxy_high": float(loss_proxy_high.item()),
+                "loss_attn_sep": float(loss_attn_sep.item()),
+                "loss_attn_order": float(loss_attn_order.item()),
+                "loss_attn_role": float(loss_attn_role.item()),
+                "loss_attn_role_low": float(role_vec[0].item()),
+                "loss_attn_role_mid": float(role_vec[1].item()),
+                "loss_attn_role_high": float(role_vec[2].item()),
+                "attn_overlap": float(attn_overlap.item()),
+                "attn_entropy_low": float(attn_entropy[0].item()),
+                "attn_entropy_mid": float(attn_entropy[1].item()),
+                "attn_entropy_high": float(attn_entropy[2].item()),
                 "retr_top1": float(train_retr_top1.item()),
                 "retr_top5": float(train_retr_top5.item()),
                 "cos_same": float(train_cos_same.item()),
@@ -848,8 +1067,15 @@ def main() -> None:
 
             msg = (
                 f"step={step}/{int(args.steps)} loss={loss.item():.4f} "
-                f"nce={loss_nce.item():.4f} cons={loss_cons.item():.4f} div={loss_div.item():.4f} "
+                f"nce={loss_nce.item():.4f} slot_nce={loss_slot_nce.item():.4f} "
+                f"cons={loss_cons.item():.4f} "
+                f"(tok={loss_cons_token.item():.4f},site={loss_cons_site.item():.4f}) "
+                f"div={loss_div.item():.4f} "
                 f"proxy_low={loss_proxy_low.item():.4f} proxy_mid={loss_proxy_mid.item():.4f} proxy_high={loss_proxy_high.item():.4f} "
+                f"attn_sep={loss_attn_sep.item():.4f} attn_ord={loss_attn_order.item():.4f} "
+                f"attn_role={loss_attn_role.item():.4f} "
+                f"attn_ov={attn_overlap.item():.4f} "
+                f"H=({attn_entropy[0].item():.3f},{attn_entropy[1].item():.3f},{attn_entropy[2].item():.3f}) "
                 f"retr1={train_retr_top1.item():.4f} retr5={train_retr_top5.item():.4f} "
                 f"cos_same={train_cos_same.item():.4f} cos_diff={train_cos_diff.item():.4f} "
                 f"tok_coll={loss_collapse.item():.4f}"
@@ -857,11 +1083,10 @@ def main() -> None:
             if val_metrics:
                 msg += (
                     f" val_loss={val_metrics['val_loss']:.4f} "
+                    f"val_role={val_metrics['val_role_monitor']:.4f} "
                     f"val_retr1={val_metrics['val_retr_top1']:.4f} "
                     f"val_retr5={val_metrics['val_retr_top5']:.4f}"
                 )
-            if best_val_loss is not None:
-                msg += f" best_val={best_val_loss:.4f}@{best_step}"
             log(msg)
     finally:
         final_ckpt = {
@@ -869,9 +1094,9 @@ def main() -> None:
             "config": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
             "extra": {
                 "step": int(last_step),
-                "best_step": int(best_step),
-                "best_val_loss": float(best_val_loss) if best_val_loss is not None else None,
                 "ran_full_steps": bool(last_step == int(args.steps)),
+                "token_consumer_map": {k: list(v) for k, v in FIXED_STYLE_TOKEN_CONSUMER_MAP.items()},
+                "style_site_arch": dict(FIXED_STYLE_SITE_ARCH),
             },
         }
         torch.save(final_ckpt, out_path)

@@ -24,6 +24,13 @@ import torch.nn.functional as F
 from torchvision.utils import save_image
 from diffusers import DPMSolverMultistepScheduler
 
+from .style_role_losses import (
+    attention_entropy_order_loss,
+    attention_mean_overlap,
+    attention_overlap_margin_loss,
+    attention_role_alignment_loss,
+)
+
 
 # ====================================================================== #
 #  Noise schedule (DDPM forward process)
@@ -109,6 +116,24 @@ def info_nce_loss(
     return loss.mean()
 
 
+def slotwise_info_nce_loss(
+    tok_a: torch.Tensor,
+    tok_b: torch.Tensor,
+    font_ids: torch.Tensor,
+    temperature: float = 0.07,
+) -> torch.Tensor:
+    if tok_a.shape != tok_b.shape:
+        raise ValueError(f"slotwise_info_nce shape mismatch: {tuple(tok_a.shape)} vs {tuple(tok_b.shape)}")
+    if tok_a.dim() != 3:
+        raise ValueError(f"slotwise_info_nce expects 3D tokens, got {tuple(tok_a.shape)}")
+    losses = []
+    for idx in range(int(tok_a.size(1))):
+        z_a = F.normalize(tok_a[:, idx], dim=-1)
+        z_b = F.normalize(tok_b[:, idx], dim=-1)
+        losses.append(info_nce_loss(z_a, z_b, font_ids=font_ids, temperature=float(temperature)))
+    return torch.stack(losses).mean()
+
+
 def token_diversity_loss(tokens: torch.Tensor) -> torch.Tensor:
     """Off-diagonal token cosine^2; lower means better token specialization."""
     t = F.normalize(tokens, dim=-1)
@@ -123,6 +148,14 @@ def proxy_band_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     pred_n = F.normalize(pred, dim=-1)
     target_n = F.normalize(target, dim=-1)
     return (1.0 - (pred_n * target_n).sum(dim=-1)).mean()
+
+
+def slot_consistency_loss(tok1: torch.Tensor, tok2: torch.Tensor) -> torch.Tensor:
+    if tok1.shape != tok2.shape:
+        raise ValueError(f"slot consistency shape mismatch: {tuple(tok1.shape)} vs {tuple(tok2.shape)}")
+    t1 = F.normalize(tok1, dim=-1)
+    t2 = F.normalize(tok2, dim=-1)
+    return (1.0 - (t1 * t2).sum(dim=-1)).mean()
 
 
 def token_collapse_score(tokens: torch.Tensor) -> torch.Tensor:
@@ -159,13 +192,19 @@ class DiffusionTrainer:
         lr: float = 2e-4,
         lambda_mse: float = 1.0,
         lambda_nce: float = 0.0,
+        lambda_slot_nce: float = 0.0,
         lambda_cons: float = 0.0,
         lambda_div: float = 0.0,
         lambda_proxy_low: float = 0.0,
         lambda_proxy_mid: float = 0.0,
         lambda_proxy_high: float = 0.0,
+        lambda_attn_sep: float = 0.0,
+        lambda_attn_order: float = 0.0,
+        lambda_attn_role: float = 0.0,
         nce_temperature: float = 0.07,
         nce_warmup_steps: int = 0,
+        attn_overlap_margin: float = 0.80,
+        attn_entropy_gap: float = 0.03,
         T: int = 1000,
         total_steps: int = 100_000,
         sample_every_steps: int | None = None,
@@ -178,7 +217,6 @@ class DiffusionTrainer:
         part_drop_prob: float = 0.0,
         style_ref_drop_prob: float = 0.0,
         style_ref_drop_min_keep: int = 1,
-        style_token_drop_prob: float = 0.0,
         freeze_part_encoder_steps: int = 0,
         freeze_style_backbone_steps: int = 0,
         style_backbone_lr_scale: float = 0.1,
@@ -190,7 +228,6 @@ class DiffusionTrainer:
         self.part_drop_prob = float(max(0.0, min(1.0, part_drop_prob)))
         self.style_ref_drop_prob = float(max(0.0, min(1.0, style_ref_drop_prob)))
         self.style_ref_drop_min_keep = max(1, int(style_ref_drop_min_keep))
-        self.style_token_drop_prob = float(max(0.0, min(1.0, style_token_drop_prob)))
 
         self.grad_accum_steps = max(1, int(grad_accum_steps))
         self._accum_step = 0
@@ -233,13 +270,19 @@ class DiffusionTrainer:
         self.scheduler = NoiseScheduler(self.diffusion_steps).to(device)
         self.lambda_mse = float(lambda_mse)
         self.lambda_nce = float(lambda_nce)
+        self.lambda_slot_nce = float(lambda_slot_nce)
         self.lambda_cons = float(lambda_cons)
         self.lambda_div = float(lambda_div)
         self.lambda_proxy_low = float(lambda_proxy_low)
         self.lambda_proxy_mid = float(lambda_proxy_mid)
         self.lambda_proxy_high = float(lambda_proxy_high)
+        self.lambda_attn_sep = float(lambda_attn_sep)
+        self.lambda_attn_order = float(lambda_attn_order)
+        self.lambda_attn_role = float(lambda_attn_role)
         self.nce_temperature = float(nce_temperature)
         self.nce_warmup_steps = max(0, int(nce_warmup_steps))
+        self.attn_overlap_margin = float(attn_overlap_margin)
+        self.attn_entropy_gap = float(attn_entropy_gap)
         self.global_step = 0
         self.local_step = 0
         self.current_epoch = 0
@@ -392,6 +435,19 @@ class DiffusionTrainer:
                 flush=True,
             )
 
+    def _style_backbone_status(self) -> Dict[str, float]:
+        return {
+            "style_bb_low_frozen": float(self._style_backbone_low_is_frozen),
+            "style_bb_high_frozen": float(self._style_backbone_high_is_frozen),
+        }
+
+    def _style_backbone_phase(self) -> str:
+        if self._style_backbone_high_is_frozen:
+            return "freeze_all"
+        if self._style_backbone_low_is_frozen:
+            return "low_frozen_high_tune"
+        return "fully_trainable"
+
     # ------------------------------------------------------------------ #
     #  Gradient accumulation helpers
     # ------------------------------------------------------------------ #
@@ -473,21 +529,11 @@ class DiffusionTrainer:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def _prepare_attention_logging(self) -> bool:
-        if not (
-            hasattr(self.model, "set_attention_logging")
-            and hasattr(self.model, "reset_attention_logging")
-        ):
-            return False
-        # Enable only on steps that are expected to emit log lines to limit overhead.
-        should_log_step = bool(
-            self.log_every_steps
-            and self._accum_step == (self.grad_accum_steps - 1)
-            and ((self.global_step + 1) % self.log_every_steps == 0)
-        )
-        self.model.set_attention_logging(should_log_step)
-        if should_log_step:
-            self.model.reset_attention_logging()
-        return should_log_step
+        # Attention logging is disabled globally to avoid training-step OOMs
+        # from explicit attention-probability materialization on large maps.
+        if hasattr(self.model, "set_attention_logging"):
+            self.model.set_attention_logging(False)
+        return False
 
     def _finalize_attention_logging(self, enabled: bool) -> Dict[str, float]:
         out: Dict[str, float] = {}
@@ -594,11 +640,22 @@ class DiffusionTrainer:
         zero = torch.zeros((), device=self.device, dtype=torch.float32)
         out: Dict[str, torch.Tensor] = {
             "loss_nce": zero,
+            "loss_slot_nce": zero,
             "loss_cons": zero,
             "loss_div": zero,
             "loss_proxy_low": zero,
             "loss_proxy_mid": zero,
             "loss_proxy_high": zero,
+            "loss_attn_sep": zero,
+            "loss_attn_order": zero,
+            "loss_attn_role": zero,
+            "loss_attn_role_low": zero,
+            "loss_attn_role_mid": zero,
+            "loss_attn_role_high": zero,
+            "attn_overlap": zero,
+            "attn_entropy_low": zero,
+            "attn_entropy_mid": zero,
+            "attn_entropy_high": zero,
             "cos_same": zero,
             "cos_diff": zero,
             "token_collapse": zero,
@@ -627,7 +684,18 @@ class DiffusionTrainer:
         style_ref_mask_v1 = self._apply_style_ref_dropout(style_ref_mask_v1)
         style_ref_mask_v2 = self._apply_style_ref_dropout(style_ref_mask_v2)
 
-        if hasattr(self.model, "encode_style_tokens_with_proxy"):
+        attn1 = None
+        attn2 = None
+        if hasattr(self.model, "encode_style_tokens_full"):
+            tok1, proxy1, attn1 = self.model.encode_style_tokens_full(
+                style_img_v1,
+                style_ref_mask=style_ref_mask_v1,
+            )
+            tok2, proxy2, attn2 = self.model.encode_style_tokens_full(
+                style_img_v2,
+                style_ref_mask=style_ref_mask_v2,
+            )
+        elif hasattr(self.model, "encode_style_tokens_with_proxy"):
             tok1, proxy1 = self.model.encode_style_tokens_with_proxy(
                 style_img_v1,
                 style_ref_mask=style_ref_mask_v1,
@@ -636,6 +704,16 @@ class DiffusionTrainer:
                 style_img_v2,
                 style_ref_mask=style_ref_mask_v2,
             )
+        else:
+            tok1 = self.model.encode_style_tokens(
+                style_img_v1,
+                style_ref_mask=style_ref_mask_v1,
+            )
+            tok2 = self.model.encode_style_tokens(
+                style_img_v2,
+                style_ref_mask=style_ref_mask_v2,
+            )
+        if "proxy1" in locals() and "proxy2" in locals():
             out["loss_proxy_low"] = 0.5 * (
                 proxy_band_loss(proxy1["pred_low"], proxy1["target_low"])
                 + proxy_band_loss(proxy2["pred_low"], proxy2["target_low"])
@@ -648,15 +726,6 @@ class DiffusionTrainer:
                 proxy_band_loss(proxy1["pred_high"], proxy1["target_high"])
                 + proxy_band_loss(proxy2["pred_high"], proxy2["target_high"])
             )
-        else:
-            tok1 = self.model.encode_style_tokens(
-                style_img_v1,
-                style_ref_mask=style_ref_mask_v1,
-            )
-            tok2 = self.model.encode_style_tokens(
-                style_img_v2,
-                style_ref_mask=style_ref_mask_v2,
-            )
         z1 = F.normalize(tok1.mean(dim=1), dim=-1)
         z2 = F.normalize(tok2.mean(dim=1), dim=-1)
 
@@ -668,10 +737,58 @@ class DiffusionTrainer:
             font_ids = font_ids.to(self.device, dtype=torch.long)
 
         out["loss_nce"] = info_nce_loss(z1, z2, font_ids=font_ids, temperature=self.nce_temperature)
+        out["loss_slot_nce"] = slotwise_info_nce_loss(tok1, tok2, font_ids=font_ids, temperature=self.nce_temperature)
         out["cos_same"], out["cos_diff"] = cosine_same_diff(z1, z2)
-        out["loss_cons"] = 1.0 - out["cos_same"]
+        out["loss_cons"] = slot_consistency_loss(tok1, tok2)
         out["loss_div"] = 0.5 * (token_diversity_loss(tok1) + token_diversity_loss(tok2))
         out["token_collapse"] = 0.5 * (token_collapse_score(tok1) + token_collapse_score(tok2))
+        if attn1 is not None and attn2 is not None:
+            out["loss_attn_sep"] = 0.5 * (
+                attention_overlap_margin_loss(
+                    attn1,
+                    style_ref_mask=style_ref_mask_v1,
+                    margin=self.attn_overlap_margin,
+                )
+                + attention_overlap_margin_loss(
+                    attn2,
+                    style_ref_mask=style_ref_mask_v2,
+                    margin=self.attn_overlap_margin,
+                )
+            )
+            loss_attn_order_1, ent1 = attention_entropy_order_loss(
+                attn1,
+                style_ref_mask=style_ref_mask_v1,
+                gap=self.attn_entropy_gap,
+            )
+            loss_attn_order_2, ent2 = attention_entropy_order_loss(
+                attn2,
+                style_ref_mask=style_ref_mask_v2,
+                gap=self.attn_entropy_gap,
+            )
+            out["loss_attn_order"] = 0.5 * (loss_attn_order_1 + loss_attn_order_2)
+            loss_attn_role_1, role_vec_1, _ = attention_role_alignment_loss(
+                attn1,
+                style_img_v1,
+                style_ref_mask=style_ref_mask_v1,
+            )
+            loss_attn_role_2, role_vec_2, _ = attention_role_alignment_loss(
+                attn2,
+                style_img_v2,
+                style_ref_mask=style_ref_mask_v2,
+            )
+            role_vec = 0.5 * (role_vec_1 + role_vec_2)
+            out["loss_attn_role"] = 0.5 * (loss_attn_role_1 + loss_attn_role_2)
+            out["loss_attn_role_low"] = role_vec[0]
+            out["loss_attn_role_mid"] = role_vec[1]
+            out["loss_attn_role_high"] = role_vec[2]
+            out["attn_overlap"] = 0.5 * (
+                attention_mean_overlap(attn1, style_ref_mask=style_ref_mask_v1)
+                + attention_mean_overlap(attn2, style_ref_mask=style_ref_mask_v2)
+            )
+            ent = 0.5 * (ent1 + ent2)
+            out["attn_entropy_low"] = ent[0]
+            out["attn_entropy_mid"] = ent[1]
+            out["attn_entropy_high"] = ent[2]
         return out
 
     # ------------------------------------------------------------------ #
@@ -691,7 +808,6 @@ class DiffusionTrainer:
         self._ensure_required_conditions(self.conditioning_mode, style_img, stage="train_step")
         if self._mode_uses_style(self.conditioning_mode):
             style_ref_mask = self._apply_style_ref_dropout(style_ref_mask)
-        style_token_drop_prob = self.style_token_drop_prob if self._mode_uses_style(self.conditioning_mode) else 0.0
         B = x0.size(0)
         t = torch.randint(0, self.scheduler.T, (B,), device=self.device)
 
@@ -727,16 +843,26 @@ class DiffusionTrainer:
                 part_mask=part_mask,
                 condition_mode=self.conditioning_mode,
                 style_ref_mask=style_ref_mask,
-                style_token_drop_prob=style_token_drop_prob,
             )
             loss_mse = F.mse_loss(eps_hat_latent, eps_latent)
             style_losses = self._compute_style_losses(batch)
             loss_nce = style_losses["loss_nce"]
+            loss_slot_nce = style_losses["loss_slot_nce"]
             loss_cons = style_losses["loss_cons"]
             loss_div = style_losses["loss_div"]
             loss_proxy_low = style_losses["loss_proxy_low"]
             loss_proxy_mid = style_losses["loss_proxy_mid"]
             loss_proxy_high = style_losses["loss_proxy_high"]
+            loss_attn_sep = style_losses["loss_attn_sep"]
+            loss_attn_order = style_losses["loss_attn_order"]
+            loss_attn_role = style_losses["loss_attn_role"]
+            loss_attn_role_low = style_losses["loss_attn_role_low"]
+            loss_attn_role_mid = style_losses["loss_attn_role_mid"]
+            loss_attn_role_high = style_losses["loss_attn_role_high"]
+            attn_overlap = style_losses["attn_overlap"]
+            attn_entropy_low = style_losses["attn_entropy_low"]
+            attn_entropy_mid = style_losses["attn_entropy_mid"]
+            attn_entropy_high = style_losses["attn_entropy_high"]
             cos_same = style_losses["cos_same"]
             cos_diff = style_losses["cos_diff"]
             token_collapse = style_losses["token_collapse"]
@@ -744,11 +870,15 @@ class DiffusionTrainer:
             loss = (
                 self.lambda_mse * loss_mse
                 + eff_lnce * loss_nce
+                + self.lambda_slot_nce * loss_slot_nce
                 + self.lambda_cons * loss_cons
                 + self.lambda_div * loss_div
                 + self.lambda_proxy_low * loss_proxy_low
                 + self.lambda_proxy_mid * loss_proxy_mid
                 + self.lambda_proxy_high * loss_proxy_high
+                + self.lambda_attn_sep * loss_attn_sep
+                + self.lambda_attn_order * loss_attn_order
+                + self.lambda_attn_role * loss_attn_role
             )
 
         counterfactual_stats: Dict[str, float] = {}
@@ -778,7 +908,6 @@ class DiffusionTrainer:
                     part_mask=None,
                     condition_mode="style_only",
                     style_ref_mask=style_ref_mask,
-                    style_token_drop_prob=style_token_drop_prob,
                 )
                 cf_loss_part_only = F.mse_loss(eps_hat_part_only, eps_latent)
                 cf_loss_style_only = F.mse_loss(eps_hat_style_only, eps_latent)
@@ -804,19 +933,30 @@ class DiffusionTrainer:
                 "loss": loss.item(),
                 "loss_mse": loss_mse.item(),
                 "loss_nce": loss_nce.item(),
+                "loss_slot_nce": loss_slot_nce.item(),
                 "loss_cons": loss_cons.item(),
                 "loss_div": loss_div.item(),
                 "loss_proxy_low": loss_proxy_low.item(),
                 "loss_proxy_mid": loss_proxy_mid.item(),
                 "loss_proxy_high": loss_proxy_high.item(),
+                "loss_attn_sep": loss_attn_sep.item(),
+                "loss_attn_order": loss_attn_order.item(),
+                "loss_attn_role": loss_attn_role.item(),
+                "loss_attn_role_low": loss_attn_role_low.item(),
+                "loss_attn_role_mid": loss_attn_role_mid.item(),
+                "loss_attn_role_high": loss_attn_role_high.item(),
+                "attn_overlap": attn_overlap.item(),
+                "attn_entropy_low": attn_entropy_low.item(),
+                "attn_entropy_mid": attn_entropy_mid.item(),
+                "attn_entropy_high": attn_entropy_high.item(),
                 "cos_same": cos_same.item(),
                 "cos_diff": cos_diff.item(),
                 "token_collapse": token_collapse.item(),
-                "token_drop": float(style_token_drop_prob),
                 "lr": float(self.lr_schedule.get_last_lr()[0]),
                 "data_time": float(self._step_data_time),
                 "train_time": float(time.perf_counter() - _train_t0),
             }
+            out.update(self._style_backbone_status())
             out.update(attn_stats)
             out.update(counterfactual_stats)
             return out
@@ -866,21 +1006,32 @@ class DiffusionTrainer:
                 "loss": float(loss.item()),
                 "loss_mse": float(loss_mse.item()),
                 "loss_nce": float(loss_nce.item()),
+                "loss_slot_nce": float(loss_slot_nce.item()),
                 "loss_cons": float(loss_cons.item()),
                 "loss_div": float(loss_div.item()),
                 "loss_proxy_low": float(loss_proxy_low.item()),
                 "loss_proxy_mid": float(loss_proxy_mid.item()),
                 "loss_proxy_high": float(loss_proxy_high.item()),
+                "loss_attn_sep": float(loss_attn_sep.item()),
+                "loss_attn_order": float(loss_attn_order.item()),
+                "loss_attn_role": float(loss_attn_role.item()),
+                "loss_attn_role_low": float(loss_attn_role_low.item()),
+                "loss_attn_role_mid": float(loss_attn_role_mid.item()),
+                "loss_attn_role_high": float(loss_attn_role_high.item()),
+                "attn_overlap": float(attn_overlap.item()),
+                "attn_entropy_low": float(attn_entropy_low.item()),
+                "attn_entropy_mid": float(attn_entropy_mid.item()),
+                "attn_entropy_high": float(attn_entropy_high.item()),
                 "cos_same": float(cos_same.item()),
                 "cos_diff": float(cos_diff.item()),
                 "token_collapse": float(token_collapse.item()),
-                "token_drop": float(style_token_drop_prob),
                 "lr": float(self.lr_schedule.get_last_lr()[0]),
                 "data_time": float(self._step_data_time),
                 "train_time": float(self._step_train_time),
                 "data_time_ema": float(self._step_data_time_ema),
                 "train_time_ema": float(self._step_train_time_ema),
             }
+            log_row.update(self._style_backbone_status())
             if grad_norm is not None:
                 log_row["grad_norm"] = float(grad_norm)
             log_row.update(attn_stats)
@@ -890,22 +1041,31 @@ class DiffusionTrainer:
             msg = (
                 f"[step] gstep={self.global_step} ep={self.current_epoch} estep={self.local_step} "
                 f"loss={loss.item():.4f} mse={loss_mse.item():.4f} "
-                f"nce={loss_nce.item():.4f} cons={loss_cons.item():.4f} "
+                f"nce={loss_nce.item():.4f} slot_nce={loss_slot_nce.item():.4f} cons={loss_cons.item():.4f} "
                 f"div={loss_div.item():.4f} "
                 f"proxy=({loss_proxy_low.item():.4f},{loss_proxy_mid.item():.4f},{loss_proxy_high.item():.4f}) "
+                f"attn_sep={loss_attn_sep.item():.4f} attn_ord={loss_attn_order.item():.4f} "
+                f"attn_role={loss_attn_role.item():.4f} "
+                f"attn_ov={attn_overlap.item():.4f} "
+                f"H=({attn_entropy_low.item():.3f},{attn_entropy_mid.item():.3f},{attn_entropy_high.item():.3f}) "
                 f"cos_same={cos_same.item():.4f} "
                 f"cos_diff={cos_diff.item():.4f} tok_coll={token_collapse.item():.4f} "
-                f"λnce={eff_lnce:.4f} "
+                f"λnce={eff_lnce:.4f} λslot={self.lambda_slot_nce:.4f} "
                 f"lr={self.lr_schedule.get_last_lr()[0]:.6e} "
                 f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s "
-                f"token_drop={style_token_drop_prob:.2f}"
+                f"style_bb={self._style_backbone_phase()}"
             )
             if grad_norm is not None:
                 msg += f" gnorm={grad_norm:.4f}"
-            if "attn_part" in attn_stats and "attn_style" in attn_stats:
+            if (
+                "tok_imp_low" in attn_stats
+                and "tok_imp_mid" in attn_stats
+                and "tok_imp_high" in attn_stats
+            ):
                 msg += (
-                    f" attn_part={attn_stats['attn_part']:.4f}"
-                    f" attn_style={attn_stats['attn_style']:.4f}"
+                    f" tok_imp=({attn_stats['tok_imp_low']:.3f},"
+                    f"{attn_stats['tok_imp_mid']:.3f},"
+                    f"{attn_stats['tok_imp_high']:.3f})"
                 )
             if counterfactual_stats:
                 msg += (
@@ -918,19 +1078,30 @@ class DiffusionTrainer:
             "loss": loss.item(),
             "loss_mse": loss_mse.item(),
             "loss_nce": loss_nce.item(),
+            "loss_slot_nce": loss_slot_nce.item(),
             "loss_cons": loss_cons.item(),
             "loss_div": loss_div.item(),
             "loss_proxy_low": loss_proxy_low.item(),
             "loss_proxy_mid": loss_proxy_mid.item(),
             "loss_proxy_high": loss_proxy_high.item(),
+            "loss_attn_sep": loss_attn_sep.item(),
+            "loss_attn_order": loss_attn_order.item(),
+            "loss_attn_role": loss_attn_role.item(),
+            "loss_attn_role_low": loss_attn_role_low.item(),
+            "loss_attn_role_mid": loss_attn_role_mid.item(),
+            "loss_attn_role_high": loss_attn_role_high.item(),
+            "attn_overlap": attn_overlap.item(),
+            "attn_entropy_low": attn_entropy_low.item(),
+            "attn_entropy_mid": attn_entropy_mid.item(),
+            "attn_entropy_high": attn_entropy_high.item(),
             "cos_same": cos_same.item(),
             "cos_diff": cos_diff.item(),
             "token_collapse": token_collapse.item(),
-            "token_drop": float(style_token_drop_prob),
             "lr": self.lr_schedule.get_last_lr()[0],
             "data_time": float(self._step_data_time),
             "train_time": float(self._step_train_time),
         }
+        out.update(self._style_backbone_status())
         out.update(attn_stats)
         out.update(counterfactual_stats)
         return out
@@ -1115,6 +1286,8 @@ class DiffusionTrainer:
                     "log_every_steps": int(self.log_every_steps or 0),
                     "save_every_steps": int(self.save_every_steps or 0),
                     "sample_every_steps": int(self.sample_every_steps or 0),
+                    "freeze_style_backbone_steps": int(self.freeze_style_backbone_steps),
+                    "style_backbone_lr_scale": float(self.style_backbone_lr_scale),
                 })
         # On resume, skip already-completed epochs.
         start_epoch = max(1, self.current_epoch + 1) if self.global_step > 0 else 1
@@ -1250,13 +1423,19 @@ class FlowMatchingTrainer(DiffusionTrainer):
         lr: float = 2e-4,
         lambda_fm: float = 1.0,
         lambda_nce: float = 0.0,
+        lambda_slot_nce: float = 0.0,
         lambda_cons: float = 0.0,
         lambda_div: float = 0.0,
         lambda_proxy_low: float = 0.0,
         lambda_proxy_mid: float = 0.0,
         lambda_proxy_high: float = 0.0,
+        lambda_attn_sep: float = 0.0,
+        lambda_attn_order: float = 0.0,
+        lambda_attn_role: float = 0.0,
         nce_temperature: float = 0.07,
         nce_warmup_steps: int = 0,
+        attn_overlap_margin: float = 0.80,
+        attn_entropy_gap: float = 0.03,
         T: int = 1000,
         total_steps: int = 100_000,
         sample_every_steps: int | None = None,
@@ -1269,7 +1448,6 @@ class FlowMatchingTrainer(DiffusionTrainer):
         part_drop_prob: float = 0.0,
         style_ref_drop_prob: float = 0.0,
         style_ref_drop_min_keep: int = 1,
-        style_token_drop_prob: float = 0.0,
         freeze_part_encoder_steps: int = 0,
         freeze_style_backbone_steps: int = 0,
         style_backbone_lr_scale: float = 0.1,
@@ -1279,12 +1457,18 @@ class FlowMatchingTrainer(DiffusionTrainer):
             model=model, device=device, lr=lr,
             lambda_mse=1.0,
             lambda_nce=lambda_nce,
+            lambda_slot_nce=lambda_slot_nce,
             lambda_cons=lambda_cons,
             lambda_div=lambda_div,
             lambda_proxy_low=lambda_proxy_low,
             lambda_proxy_mid=lambda_proxy_mid,
             lambda_proxy_high=lambda_proxy_high,
+            lambda_attn_sep=lambda_attn_sep,
+            lambda_attn_order=lambda_attn_order,
+            lambda_attn_role=lambda_attn_role,
             nce_temperature=nce_temperature, nce_warmup_steps=nce_warmup_steps,
+            attn_overlap_margin=attn_overlap_margin,
+            attn_entropy_gap=attn_entropy_gap,
             T=T, total_steps=total_steps,
             sample_every_steps=sample_every_steps, precision=precision,
             save_every_steps=save_every_steps, log_every_steps=log_every_steps,
@@ -1294,7 +1478,6 @@ class FlowMatchingTrainer(DiffusionTrainer):
             part_drop_prob=part_drop_prob,
             style_ref_drop_prob=style_ref_drop_prob,
             style_ref_drop_min_keep=style_ref_drop_min_keep,
-            style_token_drop_prob=style_token_drop_prob,
             freeze_part_encoder_steps=freeze_part_encoder_steps,
             freeze_style_backbone_steps=freeze_style_backbone_steps,
             style_backbone_lr_scale=style_backbone_lr_scale,
@@ -1329,7 +1512,6 @@ class FlowMatchingTrainer(DiffusionTrainer):
         self._ensure_required_conditions(self.conditioning_mode, style_img, stage="flow_train_step")
         if self._mode_uses_style(self.conditioning_mode):
             style_ref_mask = self._apply_style_ref_dropout(style_ref_mask)
-        style_token_drop_prob = self.style_token_drop_prob if self._mode_uses_style(self.conditioning_mode) else 0.0
         b = x0.size(0)
 
         # Convert pixel → latent
@@ -1369,16 +1551,26 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 part_imgs=part_imgs, part_mask=part_mask,
                 condition_mode=self.conditioning_mode,
                 style_ref_mask=style_ref_mask,
-                style_token_drop_prob=style_token_drop_prob,
             )
             loss_fm = F.mse_loss(v_hat, v_target)
             style_losses = self._compute_style_losses(batch)
             loss_nce = style_losses["loss_nce"]
+            loss_slot_nce = style_losses["loss_slot_nce"]
             loss_cons = style_losses["loss_cons"]
             loss_div = style_losses["loss_div"]
             loss_proxy_low = style_losses["loss_proxy_low"]
             loss_proxy_mid = style_losses["loss_proxy_mid"]
             loss_proxy_high = style_losses["loss_proxy_high"]
+            loss_attn_sep = style_losses["loss_attn_sep"]
+            loss_attn_order = style_losses["loss_attn_order"]
+            loss_attn_role = style_losses["loss_attn_role"]
+            loss_attn_role_low = style_losses["loss_attn_role_low"]
+            loss_attn_role_mid = style_losses["loss_attn_role_mid"]
+            loss_attn_role_high = style_losses["loss_attn_role_high"]
+            attn_overlap = style_losses["attn_overlap"]
+            attn_entropy_low = style_losses["attn_entropy_low"]
+            attn_entropy_mid = style_losses["attn_entropy_mid"]
+            attn_entropy_high = style_losses["attn_entropy_high"]
             cos_same = style_losses["cos_same"]
             cos_diff = style_losses["cos_diff"]
             token_collapse = style_losses["token_collapse"]
@@ -1386,11 +1578,15 @@ class FlowMatchingTrainer(DiffusionTrainer):
             loss = (
                 self.lambda_fm * loss_fm
                 + eff_lnce * loss_nce
+                + self.lambda_slot_nce * loss_slot_nce
                 + self.lambda_cons * loss_cons
                 + self.lambda_div * loss_div
                 + self.lambda_proxy_low * loss_proxy_low
                 + self.lambda_proxy_mid * loss_proxy_mid
                 + self.lambda_proxy_high * loss_proxy_high
+                + self.lambda_attn_sep * loss_attn_sep
+                + self.lambda_attn_order * loss_attn_order
+                + self.lambda_attn_role * loss_attn_role
             )
 
         counterfactual_stats: Dict[str, float] = {}
@@ -1420,7 +1616,6 @@ class FlowMatchingTrainer(DiffusionTrainer):
                     part_mask=None,
                     condition_mode="style_only",
                     style_ref_mask=style_ref_mask,
-                    style_token_drop_prob=style_token_drop_prob,
                 )
                 cf_loss_part_only = F.mse_loss(v_hat_part_only, v_target)
                 cf_loss_style_only = F.mse_loss(v_hat_style_only, v_target)
@@ -1443,19 +1638,30 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 "loss": loss.item(),
                 "loss_fm": loss_fm.item(),
                 "loss_nce": loss_nce.item(),
+                "loss_slot_nce": loss_slot_nce.item(),
                 "loss_cons": loss_cons.item(),
                 "loss_div": loss_div.item(),
                 "loss_proxy_low": loss_proxy_low.item(),
                 "loss_proxy_mid": loss_proxy_mid.item(),
                 "loss_proxy_high": loss_proxy_high.item(),
+                "loss_attn_sep": loss_attn_sep.item(),
+                "loss_attn_order": loss_attn_order.item(),
+                "loss_attn_role": loss_attn_role.item(),
+                "loss_attn_role_low": loss_attn_role_low.item(),
+                "loss_attn_role_mid": loss_attn_role_mid.item(),
+                "loss_attn_role_high": loss_attn_role_high.item(),
+                "attn_overlap": attn_overlap.item(),
+                "attn_entropy_low": attn_entropy_low.item(),
+                "attn_entropy_mid": attn_entropy_mid.item(),
+                "attn_entropy_high": attn_entropy_high.item(),
                 "cos_same": cos_same.item(),
                 "cos_diff": cos_diff.item(),
                 "token_collapse": token_collapse.item(),
-                "token_drop": float(style_token_drop_prob),
                 "lr": float(self.lr_schedule.get_last_lr()[0]),
                 "data_time": float(self._step_data_time),
                 "train_time": float(time.perf_counter() - _train_t0),
             }
+            out.update(self._style_backbone_status())
             out.update(attn_stats)
             out.update(counterfactual_stats)
             return out
@@ -1501,19 +1707,30 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 "loss": float(loss.item()),
                 "loss_fm": float(loss_fm.item()),
                 "loss_nce": float(loss_nce.item()),
+                "loss_slot_nce": float(loss_slot_nce.item()),
                 "loss_cons": float(loss_cons.item()),
                 "loss_div": float(loss_div.item()),
                 "loss_proxy_low": float(loss_proxy_low.item()),
                 "loss_proxy_mid": float(loss_proxy_mid.item()),
                 "loss_proxy_high": float(loss_proxy_high.item()),
+                "loss_attn_sep": float(loss_attn_sep.item()),
+                "loss_attn_order": float(loss_attn_order.item()),
+                "loss_attn_role": float(loss_attn_role.item()),
+                "loss_attn_role_low": float(loss_attn_role_low.item()),
+                "loss_attn_role_mid": float(loss_attn_role_mid.item()),
+                "loss_attn_role_high": float(loss_attn_role_high.item()),
+                "attn_overlap": float(attn_overlap.item()),
+                "attn_entropy_low": float(attn_entropy_low.item()),
+                "attn_entropy_mid": float(attn_entropy_mid.item()),
+                "attn_entropy_high": float(attn_entropy_high.item()),
                 "cos_same": float(cos_same.item()),
                 "cos_diff": float(cos_diff.item()),
                 "token_collapse": float(token_collapse.item()),
-                "token_drop": float(style_token_drop_prob),
                 "lr": float(self.lr_schedule.get_last_lr()[0]),
                 "data_time": float(self._step_data_time),
                 "train_time": float(self._step_train_time),
             }
+            log_row.update(self._style_backbone_status())
             if grad_norm is not None:
                 log_row["grad_norm"] = float(grad_norm)
             log_row.update(attn_stats)
@@ -1523,22 +1740,31 @@ class FlowMatchingTrainer(DiffusionTrainer):
             msg = (
                 f"[fm-step] gstep={self.global_step} ep={self.current_epoch} estep={self.local_step} "
                 f"loss={loss.item():.4f} fm={loss_fm.item():.4f} "
-                f"nce={loss_nce.item():.4f} cons={loss_cons.item():.4f} "
+                f"nce={loss_nce.item():.4f} slot_nce={loss_slot_nce.item():.4f} cons={loss_cons.item():.4f} "
                 f"div={loss_div.item():.4f} "
                 f"proxy=({loss_proxy_low.item():.4f},{loss_proxy_mid.item():.4f},{loss_proxy_high.item():.4f}) "
+                f"attn_sep={loss_attn_sep.item():.4f} attn_ord={loss_attn_order.item():.4f} "
+                f"attn_role={loss_attn_role.item():.4f} "
+                f"attn_ov={attn_overlap.item():.4f} "
+                f"H=({attn_entropy_low.item():.3f},{attn_entropy_mid.item():.3f},{attn_entropy_high.item():.3f}) "
                 f"cos_same={cos_same.item():.4f} "
                 f"cos_diff={cos_diff.item():.4f} tok_coll={token_collapse.item():.4f} "
-                f"λnce={eff_lnce:.4f} "
+                f"λnce={eff_lnce:.4f} λslot={self.lambda_slot_nce:.4f} "
                 f"lr={self.lr_schedule.get_last_lr()[0]:.6e} "
                 f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s "
-                f"token_drop={style_token_drop_prob:.2f}"
+                f"style_bb={self._style_backbone_phase()}"
             )
             if grad_norm is not None:
                 msg += f" gnorm={grad_norm:.4f}"
-            if "attn_part" in attn_stats and "attn_style" in attn_stats:
+            if (
+                "tok_imp_low" in attn_stats
+                and "tok_imp_mid" in attn_stats
+                and "tok_imp_high" in attn_stats
+            ):
                 msg += (
-                    f" attn_part={attn_stats['attn_part']:.4f}"
-                    f" attn_style={attn_stats['attn_style']:.4f}"
+                    f" tok_imp=({attn_stats['tok_imp_low']:.3f},"
+                    f"{attn_stats['tok_imp_mid']:.3f},"
+                    f"{attn_stats['tok_imp_high']:.3f})"
                 )
             if counterfactual_stats:
                 msg += (
@@ -1551,19 +1777,30 @@ class FlowMatchingTrainer(DiffusionTrainer):
             "loss": loss.item(),
             "loss_fm": loss_fm.item(),
             "loss_nce": loss_nce.item(),
+            "loss_slot_nce": loss_slot_nce.item(),
             "loss_cons": loss_cons.item(),
             "loss_div": loss_div.item(),
             "loss_proxy_low": loss_proxy_low.item(),
             "loss_proxy_mid": loss_proxy_mid.item(),
             "loss_proxy_high": loss_proxy_high.item(),
+            "loss_attn_sep": loss_attn_sep.item(),
+            "loss_attn_order": loss_attn_order.item(),
+            "loss_attn_role": loss_attn_role.item(),
+            "loss_attn_role_low": loss_attn_role_low.item(),
+            "loss_attn_role_mid": loss_attn_role_mid.item(),
+            "loss_attn_role_high": loss_attn_role_high.item(),
+            "attn_overlap": attn_overlap.item(),
+            "attn_entropy_low": attn_entropy_low.item(),
+            "attn_entropy_mid": attn_entropy_mid.item(),
+            "attn_entropy_high": attn_entropy_high.item(),
             "cos_same": cos_same.item(),
             "cos_diff": cos_diff.item(),
             "token_collapse": token_collapse.item(),
-            "token_drop": float(style_token_drop_prob),
             "lr": self.lr_schedule.get_last_lr()[0],
             "data_time": float(self._step_data_time),
             "train_time": float(self._step_train_time),
         }
+        out.update(self._style_backbone_status())
         out.update(attn_stats)
         out.update(counterfactual_stats)
         return out

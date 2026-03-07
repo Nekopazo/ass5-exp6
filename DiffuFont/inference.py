@@ -49,7 +49,6 @@ def load_model_and_trainer(
     device: torch.device,
     trainer_type: str = "diffusion",
     conditioning_profile: str = "part_only",
-    attn_scales: Optional[tuple[int, ...]] = None,
     image_size: int = 256,
     style_start_channel: int = 16,
     style_token_dim: int = 256,
@@ -66,7 +65,6 @@ def load_model_and_trainer(
         content_encoder_downsample_size=4,
         channel_attn=True,
         conditioning_profile=mode,
-        attn_scales=attn_scales,
         style_token_dim=style_token_dim,
     )
     trainer_cls = DiffusionTrainer if trainer_type == "diffusion" else FlowMatchingTrainer
@@ -83,16 +81,6 @@ def load_model_and_trainer(
     trainer.model.eval()
     print(f"[inference] loaded checkpoint from {ckpt_path} (step={trainer.global_step})")
     return trainer
-
-
-def _parse_int_csv(raw: str | None) -> tuple[int, ...] | None:
-    if raw is None:
-        return None
-    text = str(raw).strip()
-    if not text:
-        return None
-    return tuple(int(t.strip()) for t in text.split(",") if t.strip())
-
 
 def _tensor_to_pil(t: torch.Tensor) -> Image.Image:
     """Convert [-1,1] tensor (C,H,W) to PIL Image."""
@@ -225,7 +213,6 @@ def main():
     parser.add_argument("--trainer", type=str, default="diffusion", choices=["diffusion", "flow_matching"])
     parser.add_argument("--conditioning-profile", type=str, default="part_only",
                         choices=["baseline", "parts_vector_only", "part_only", "style_only"])
-    parser.add_argument("--attn-scales", type=str, default="16,32,64")
     parser.add_argument("--image-size", type=int, default=256)
     parser.add_argument("--diffusion-steps", type=int, default=1000)
     parser.add_argument("--inference-steps", type=int, default=20, help="Sampling steps")
@@ -251,8 +238,6 @@ def main():
     torch.manual_seed(args.seed)
 
     device = torch.device(args.device)
-    attn_scales = _parse_int_csv(args.attn_scales)
-
     profile = normalize_conditioning_mode(args.conditioning_profile)
     use_part_bank = mode_uses_parts(profile)
     use_style_image = mode_uses_style(profile)
@@ -297,7 +282,6 @@ def main():
         device=device,
         trainer_type=args.trainer,
         conditioning_profile=args.conditioning_profile,
-        attn_scales=attn_scales,
         image_size=args.image_size,
         style_start_channel=int(args.style_start_channel),
         style_token_dim=args.style_token_dim,

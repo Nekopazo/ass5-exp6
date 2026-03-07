@@ -521,7 +521,6 @@ def main() -> None:
     parser.add_argument("--part-image-size", type=int, default=40)
     parser.add_argument("--style-start-channel", type=int, default=16)
     parser.add_argument("--style-token-dim", type=int, default=256)
-    parser.add_argument("--attn-scales", type=str, default="16,32,64")
     parser.add_argument("--inference-steps", type=int, default=20)
     parser.add_argument("--diffusion-steps", type=int, default=1000)
     parser.add_argument("--max-samples", type=int, default=32)
@@ -565,8 +564,6 @@ def main() -> None:
     mode = normalize_conditioning_mode(args.conditioning_profile)
     use_style = mode_uses_style(mode)
     use_parts = mode_uses_parts(mode)
-    attn_scales = parse_int_csv(args.attn_scales)
-
     project_root = args.data_root.resolve()
     content_lmdb = args.content_lmdb or (project_root / "DataPreparation" / "LMDB" / "ContentFont.lmdb")
     style_lmdb = args.style_lmdb or (project_root / "DataPreparation" / "LMDB" / "TrainFont.lmdb")
@@ -585,7 +582,6 @@ def main() -> None:
         content_encoder_downsample_size=4,
         channel_attn=True,
         conditioning_profile=mode,
-        attn_scales=attn_scales,
         style_token_dim=int(args.style_token_dim),
     )
     load_model_weights(

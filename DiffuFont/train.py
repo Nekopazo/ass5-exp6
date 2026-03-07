@@ -19,14 +19,50 @@ from torch.utils.data import DataLoader, Sampler, Subset
 
 from dataset import FontImageDataset
 from models.model import DiffusionTrainer, FlowMatchingTrainer
-from models.source_part_ref_unet import SourcePartRefUNet
+from models.source_part_ref_unet import (
+    FIXED_STYLE_LOCAL_MOD_SCALES,
+    FIXED_STYLE_SITE_ARCH,
+    FIXED_STYLE_TOKEN_CONSUMER_MAP,
+    FIXED_STYLE_TRANSFORMER_SCALES,
+    SourcePartRefUNet,
+)
+from models.source_fontdiffuser.attention import CrossAttention as SourceCrossAttention
 from style_augment import build_base_glyph_transform, build_style_reference_transform
+
+
+STYLE_ONLY_MAIN_DEFAULTS: Dict[str, float | int] = {
+    "lambda_nce": 0.0,
+    "lambda_slot_nce": 0.02,
+    "lambda_cons": 0.0,
+    "lambda_div": 0.0,
+    "lambda_proxy_low": 0.05,
+    "lambda_proxy_mid": 0.05,
+    "lambda_proxy_high": 0.05,
+    "lambda_attn_sep": 0.02,
+    "lambda_attn_order": 0.0,
+    "lambda_attn_role": 0.0,
+    "attn_overlap_margin": 0.80,
+    "attn_entropy_gap": 0.03,
+    "style_ref_drop_prob": 0.15,
+    "style_ref_drop_min_keep": 4,
+    "freeze_style_backbone_steps": 5000,
+    "style_backbone_lr_scale": 0.1,
+}
 
 
 def _try_enable_xformers(model: SourcePartRefUNet) -> bool:
     try:
         model.unet.enable_xformers_memory_efficient_attention()
-        print("[train] xformers memory-efficient attention enabled")
+        enabled_count = sum(
+            1
+            for module in model.unet.modules()
+            if isinstance(module, SourceCrossAttention)
+            and bool(getattr(module, "_use_memory_efficient_attention_xformers", False))
+        )
+        print(
+            f"[train] xformers memory-efficient attention enabled "
+            f"(custom_cross_attn_modules={enabled_count})"
+        )
         return True
     except Exception as e:
         print(f"[train] xformers not available, using default attention: {e}")
@@ -129,16 +165,6 @@ def _to_jsonable(v: Any) -> Any:
     if isinstance(v, torch.device):
         return str(v)
     return v
-
-
-def _parse_int_csv(raw: str | None) -> tuple[int, ...] | None:
-    if raw is None:
-        return None
-    text = str(raw).strip()
-    if not text:
-        return None
-    vals = [int(t.strip()) for t in text.split(",") if t.strip()]
-    return tuple(vals) if vals else None
 
 
 def set_global_seed(seed: int) -> None:
@@ -324,14 +350,20 @@ def main() -> None:
     parser.add_argument("--trainer", type=str, default="diffusion", choices=["diffusion", "flow_matching"])
     parser.add_argument("--lambda-fm", type=float, default=1.0)
     parser.add_argument("--lambda-diff", type=float, default=1.0)
-    parser.add_argument("--lambda-nce", type=float, default=0.0)
-    parser.add_argument("--lambda-cons", type=float, default=0.0)
-    parser.add_argument("--lambda-div", type=float, default=0.0)
-    parser.add_argument("--lambda-proxy-low", type=float, default=0.05)
-    parser.add_argument("--lambda-proxy-mid", type=float, default=0.05)
-    parser.add_argument("--lambda-proxy-high", type=float, default=0.05)
+    parser.add_argument("--lambda-nce", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_nce"]))
+    parser.add_argument("--lambda-slot-nce", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_slot_nce"]))
+    parser.add_argument("--lambda-cons", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_cons"]))
+    parser.add_argument("--lambda-div", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_div"]))
+    parser.add_argument("--lambda-proxy-low", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_proxy_low"]))
+    parser.add_argument("--lambda-proxy-mid", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_proxy_mid"]))
+    parser.add_argument("--lambda-proxy-high", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_proxy_high"]))
+    parser.add_argument("--lambda-attn-sep", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_attn_sep"]))
+    parser.add_argument("--lambda-attn-order", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_attn_order"]))
+    parser.add_argument("--lambda-attn-role", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_attn_role"]))
     parser.add_argument("--style-nce-temp", type=float, default=0.07)
     parser.add_argument("--nce-warmup-steps", type=int, default=0)
+    parser.add_argument("--attn-overlap-margin", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["attn_overlap_margin"]))
+    parser.add_argument("--attn-entropy-gap", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["attn_entropy_gap"]))
     parser.add_argument("--diffusion-steps", type=int, default=1000)
     parser.add_argument(
         "--total-steps",
@@ -362,13 +394,6 @@ def main() -> None:
         choices=["baseline", "parts_vector_only", "part_only", "style_only"],
         help="Legacy alias; if set it overrides --teacher-line.",
     )
-    parser.add_argument(
-        "--attn-scales",
-        type=str,
-        default="16,32,64",
-        help="Comma-separated resolutions where style attention is enabled on mid/up blocks.",
-    )
-
     parser.add_argument("--style-ref-count", type=int, default=8)
     parser.add_argument(
         "--reference-cluster-json",
@@ -378,31 +403,28 @@ def main() -> None:
     parser.add_argument(
         "--style-ref-drop-prob",
         type=float,
-        default=0.15,
+        default=float(STYLE_ONLY_MAIN_DEFAULTS["style_ref_drop_prob"]),
         help="Reference dropout probability in main training (1.md suggests 0.1~0.2).",
     )
     parser.add_argument(
         "--style-ref-drop-min-keep",
         type=int,
-        default=4,
+        default=int(STYLE_ONLY_MAIN_DEFAULTS["style_ref_drop_min_keep"]),
         help="Minimum kept references after dropout when style refs are used.",
-    )
-    parser.add_argument(
-        "--style-token-drop-prob",
-        type=float,
-        default=0.10,
-        help="Per-sample probability of randomly dropping exactly one style token; keeps at least 2 tokens.",
     )
     parser.add_argument(
         "--freeze-style-backbone-steps",
         type=int,
-        default=5000,
-        help="Freeze the style CNN backbone until this step, then unfreeze only high layers.",
+        default=int(STYLE_ONLY_MAIN_DEFAULTS["freeze_style_backbone_steps"]),
+        help=(
+            "Freeze the entire style backbone until this step, then unfreeze only layer2/layer3. "
+            "conv1/bn1/layer1 stay frozen throughout training."
+        ),
     )
     parser.add_argument(
         "--style-backbone-lr-scale",
         type=float,
-        default=0.1,
+        default=float(STYLE_ONLY_MAIN_DEFAULTS["style_backbone_lr_scale"]),
         help="LR scale applied to unfrozen style backbone high layers.",
     )
 
@@ -418,7 +440,7 @@ def main() -> None:
 
     parser.add_argument("--style-start-channel", type=int, default=16)
     parser.add_argument("--style-token-dim", type=int, default=256)
-    parser.add_argument("--style-token-count", type=int, default=3)
+    parser.add_argument("--style-token-count", type=int, default=3, help="Fixed at 3 (low/mid/high).")
     parser.add_argument("--pretrained-style-encoder", type=str, default=None)
 
     parser.add_argument("--resume", type=str, default=None)
@@ -435,8 +457,6 @@ def main() -> None:
     )
     use_style_image = mode_uses_style(active_mode)
 
-    attn_scales = _parse_int_csv(args.attn_scales)
-
     set_global_seed(int(args.seed))
     device = resolve_device(args.device)
     print(f"[train] device={device} precision={args.precision} seed={int(args.seed)}")
@@ -448,6 +468,12 @@ def main() -> None:
             "active_conditioning_mode": active_mode,
             "use_style_image": bool(use_style_image),
             "use_part_bank": False,
+            "fixed_style_transformer_scales": list(FIXED_STYLE_TRANSFORMER_SCALES),
+            "fixed_style_local_mod_scales": list(FIXED_STYLE_LOCAL_MOD_SCALES),
+            "fixed_style_token_consumers": {
+                k: list(v) for k, v in FIXED_STYLE_TOKEN_CONSUMER_MAP.items()
+            },
+            "fixed_style_site_arch": dict(FIXED_STYLE_SITE_ARCH),
         }
     )
 
@@ -473,7 +499,6 @@ def main() -> None:
             "cache_style_image": False,
             "style_ref_drop_prob_active": float(args.style_ref_drop_prob) if use_style_image else 0.0,
             "style_ref_drop_min_keep_active": int(args.style_ref_drop_min_keep) if use_style_image else 0,
-            "style_token_drop_prob_active": float(args.style_token_drop_prob) if use_style_image else 0.0,
         }
     )
 
@@ -561,7 +586,8 @@ def main() -> None:
     total_steps = args.total_steps if args.total_steps > 0 else effective_train_steps
     print(
         "[train] "
-        f"mode={active_mode} attn_scales={attn_scales} "
+        f"mode={active_mode} style_attn={FIXED_STYLE_TRANSFORMER_SCALES} "
+        f"style_local_mod={FIXED_STYLE_LOCAL_MOD_SCALES} "
         f"steps_per_epoch={steps_per_epoch} total_steps={total_steps} grad_accum={args.grad_accum}"
     )
 
@@ -574,7 +600,6 @@ def main() -> None:
         content_encoder_downsample_size=4,
         channel_attn=True,
         conditioning_profile=active_mode,
-        attn_scales=attn_scales,
         style_token_dim=int(args.style_token_dim),
         style_token_count=int(args.style_token_count),
     )
@@ -587,6 +612,25 @@ def main() -> None:
 
     if args.pretrained_style_encoder:
         ckpt = torch.load(args.pretrained_style_encoder, map_location="cpu")
+        route_meta = {}
+        consumer_arch_meta = {}
+        if isinstance(ckpt, dict) and isinstance(ckpt.get("extra"), dict):
+            route_meta = ckpt["extra"].get("token_consumer_map", {}) or {}
+            consumer_arch_meta = ckpt["extra"].get("style_site_arch", {}) or {}
+        expected_route = {k: list(v) for k, v in FIXED_STYLE_TOKEN_CONSUMER_MAP.items()}
+        expected_consumer_arch = dict(FIXED_STYLE_SITE_ARCH)
+        if route_meta != expected_route:
+            raise RuntimeError(
+                "[train] pretrained style encoder routing metadata mismatch: "
+                f"ckpt={route_meta or '<missing>'} current={expected_route}. "
+                "Please rerun style encoder pretraining for the current fixed routing."
+            )
+        if consumer_arch_meta != expected_consumer_arch:
+            raise RuntimeError(
+                "[train] pretrained style encoder consumer metadata mismatch: "
+                f"ckpt={consumer_arch_meta or '<missing>'} current={expected_consumer_arch}. "
+                "Please rerun style encoder pretraining for the current fixed architecture."
+            )
         if isinstance(ckpt, dict) and isinstance(ckpt.get("style_encoder"), dict):
             sd = ckpt["style_encoder"]
         elif isinstance(ckpt, dict) and isinstance(ckpt.get("model_state"), dict):
@@ -604,13 +648,19 @@ def main() -> None:
     trainer_kwargs: Dict[str, Any] = {
         "lr": args.lr,
         "lambda_nce": float(args.lambda_nce),
+        "lambda_slot_nce": float(args.lambda_slot_nce),
         "lambda_cons": float(args.lambda_cons),
         "lambda_div": float(args.lambda_div),
         "lambda_proxy_low": float(args.lambda_proxy_low),
         "lambda_proxy_mid": float(args.lambda_proxy_mid),
         "lambda_proxy_high": float(args.lambda_proxy_high),
+        "lambda_attn_sep": float(args.lambda_attn_sep),
+        "lambda_attn_order": float(args.lambda_attn_order),
+        "lambda_attn_role": float(args.lambda_attn_role),
         "nce_temperature": float(args.style_nce_temp),
         "nce_warmup_steps": int(args.nce_warmup_steps),
+        "attn_overlap_margin": float(args.attn_overlap_margin),
+        "attn_entropy_gap": float(args.attn_entropy_gap),
         "T": args.diffusion_steps,
         "total_steps": total_steps,
         "precision": args.precision,
@@ -622,7 +672,6 @@ def main() -> None:
         "part_drop_prob": 0.0,
         "style_ref_drop_prob": float(args.style_ref_drop_prob) if use_style_image else 0.0,
         "style_ref_drop_min_keep": int(args.style_ref_drop_min_keep) if use_style_image else 1,
-        "style_token_drop_prob": float(args.style_token_drop_prob) if use_style_image else 0.0,
         "freeze_part_encoder_steps": 0,
         "freeze_style_backbone_steps": int(args.freeze_style_backbone_steps) if use_style_image else 0,
         "style_backbone_lr_scale": float(args.style_backbone_lr_scale),

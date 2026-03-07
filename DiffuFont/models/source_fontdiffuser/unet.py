@@ -4,7 +4,6 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint
-
 from diffusers import ModelMixin
 from diffusers.configuration_utils import (ConfigMixin, 
                                            register_to_config)
@@ -22,6 +21,11 @@ from .unet_blocks import (DownBlock2D,
 
 
 logger = logging.get_logger(__name__)
+
+FIXED_STYLE_TRANSFORMER_SCALES = (16, 32, 64)
+FIXED_STYLE_LOCAL_MOD_SCALES = ()
+FIXED_DISABLED_DOWN_SELF_ATTN_SCALES = (128,)
+FIXED_DISABLED_UP_SELF_ATTN_SCALES = (128,)
 
 
 @dataclass
@@ -55,7 +59,6 @@ class UNet(ModelMixin, ConfigMixin):
         content_encoder_downsample_size: int = 4,
         content_start_channel: int = 16,
         reduction: int = 32,
-        attn_scales: Optional[Tuple[int, ...]] = None,
         mid_enable_content_attn: bool = True,
     ):
         super().__init__()
@@ -63,7 +66,10 @@ class UNet(ModelMixin, ConfigMixin):
         self.content_encoder_downsample_size = content_encoder_downsample_size
 
         self.sample_size = sample_size
-        self._style_scales = set(int(x) for x in attn_scales) if attn_scales else None
+        self._style_scales = set(int(x) for x in FIXED_STYLE_TRANSFORMER_SCALES)
+        self._local_style_scales = set(int(x) for x in FIXED_STYLE_LOCAL_MOD_SCALES)
+        self._disabled_down_self_attn_scales = set(int(x) for x in FIXED_DISABLED_DOWN_SELF_ATTN_SCALES)
+        self._disabled_up_self_attn_scales = set(int(x) for x in FIXED_DISABLED_UP_SELF_ATTN_SCALES)
         time_embed_dim = block_out_channels[0] * 4
 
         # input
@@ -80,9 +86,15 @@ class UNet(ModelMixin, ConfigMixin):
         self.up_blocks = nn.ModuleList([])
 
         def _style_attn_enabled(resolution: Optional[int]) -> bool:
-            if resolution is None or self._style_scales is None:
-                return True
+            if resolution is None:
+                return False
             return int(resolution) in self._style_scales
+
+        def _style_condition_enabled(resolution: Optional[int]) -> bool:
+            if resolution is None:
+                return False
+            r = int(resolution)
+            return (r in self._style_scales) or (r in self._local_style_scales)
 
         # down
         output_channel = block_out_channels[0]
@@ -93,6 +105,7 @@ class UNet(ModelMixin, ConfigMixin):
             is_final_block = i == len(block_out_channels) - 1
 
             content_channel = content_start_channel * (2 ** i)
+            enable_self_attn = current_resolution not in self._disabled_down_self_attn_scales
 
             print("Load the down block ", down_block_type)
             down_block = get_down_block(
@@ -112,6 +125,7 @@ class UNet(ModelMixin, ConfigMixin):
                 reduction=reduction,
                 channel_attn=channel_attn,
                 enable_style_attn=False,
+                enable_self_attn=enable_self_attn,
             )
             self.down_blocks.append(down_block)
             if current_resolution is not None and not is_final_block:
@@ -159,6 +173,8 @@ class UNet(ModelMixin, ConfigMixin):
                 add_upsample = False
 
             content_channel = content_start_channel * (2 ** (content_encoder_downsample_size - i - 1))
+            use_local_style_modulation = up_resolution in self._local_style_scales
+            enable_self_attn = up_resolution not in self._disabled_up_self_attn_scales
 
             print("Load the up block ", up_block_type)
             up_block = get_up_block(
@@ -176,10 +192,12 @@ class UNet(ModelMixin, ConfigMixin):
                 attn_num_head_channels=attention_head_dim,
                 upblock_index=i + 1,
                 enable_style_attn=_style_attn_enabled(up_resolution),
+                use_local_style_modulation=use_local_style_modulation,
+                enable_self_attn=enable_self_attn,
             )
             self.up_blocks.append(up_block)
             self.up_block_style_keys.append(
-                f"up_{int(up_resolution)}" if _style_attn_enabled(up_resolution) and up_resolution is not None else None
+                f"up_{int(up_resolution)}" if _style_condition_enabled(up_resolution) else None
             )
             prev_output_channel = output_channel
             if up_resolution is not None and add_upsample:

@@ -247,6 +247,13 @@ class HierarchicalStyleEncoderMixin:
         attn_map = weights.view(b, 1, r, h, w).squeeze(1)
         return tok, attn_map
 
+    @staticmethod
+    def _pool_to_token_grid(feat: torch.Tensor, target_hw: tuple[int, int]) -> torch.Tensor:
+        target_h, target_w = int(target_hw[0]), int(target_hw[1])
+        if feat.shape[-2:] == (target_h, target_w):
+            return feat
+        return F.adaptive_avg_pool2d(feat, output_size=(target_h, target_w))
+
     def _encode_style_impl(
         self,
         style_img: torch.Tensor,
@@ -262,6 +269,9 @@ class HierarchicalStyleEncoderMixin:
         feat_low = feat_low_raw.view(b, r, 256, feat_low_raw.shape[-2], feat_low_raw.shape[-1])
         feat_mid = feat_mid_raw.view(b, r, 128, feat_mid_raw.shape[-2], feat_mid_raw.shape[-1])
         feat_high = feat_high_raw.view(b, r, 64, feat_high_raw.shape[-2], feat_high_raw.shape[-1])
+        token_grid_hw = feat_low_raw.shape[-2:]
+        feat_mid_tok_raw = self._pool_to_token_grid(feat_mid_raw, token_grid_hw)
+        feat_high_tok_raw = self._pool_to_token_grid(feat_high_raw, token_grid_hw)
 
         t_low, attn_low = self._aggregate_scale_token(
             feat_low_raw,
@@ -277,7 +287,7 @@ class HierarchicalStyleEncoderMixin:
             return_attention=return_token_attention,
         )
         t_mid, attn_mid = self._aggregate_scale_token(
-            feat_mid_raw,
+            feat_mid_tok_raw,
             b=b,
             r=r,
             ref_mask=style_ref_mask,
@@ -290,7 +300,7 @@ class HierarchicalStyleEncoderMixin:
             return_attention=return_token_attention,
         )
         t_high, attn_high = self._aggregate_scale_token(
-            feat_high_raw,
+            feat_high_tok_raw,
             b=b,
             r=r,
             ref_mask=style_ref_mask,
@@ -375,6 +385,27 @@ class HierarchicalStyleEncoderMixin:
             "target_high": out["target_high"],
         }
         return out["tokens"], proxy
+
+    def encode_style_tokens_full(
+        self,
+        style_img: torch.Tensor,
+        style_ref_mask: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor]:
+        out = self._encode_style_impl(
+            style_img=style_img,
+            style_ref_mask=style_ref_mask,
+            return_token_attention=True,
+            return_proxy=True,
+        )
+        proxy = {
+            "pred_low": out["pred_low"],
+            "pred_mid": out["pred_mid"],
+            "pred_high": out["pred_high"],
+            "target_low": out["target_low"],
+            "target_mid": out["target_mid"],
+            "target_high": out["target_high"],
+        }
+        return out["tokens"], proxy, out["token_attn"]
 
     def encode_style_embedding(
         self,

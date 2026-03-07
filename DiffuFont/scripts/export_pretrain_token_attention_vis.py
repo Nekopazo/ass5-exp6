@@ -34,12 +34,23 @@ def _extract_state_dict(obj: Any) -> dict[str, torch.Tensor]:
 
 
 def _infer_arch(sd: dict[str, torch.Tensor]) -> tuple[int, int, int]:
-    if "style_queries" not in sd:
-        raise KeyError("state_dict missing key 'style_queries'")
-    style_token_count = int(sd["style_queries"].shape[0])
-    style_token_dim = int(sd["style_queries"].shape[1])
-    local_token_count = int(sd["style_local_queries"].shape[0]) if "style_local_queries" in sd else 3
-    return style_token_dim, style_token_count, local_token_count
+    query_keys = ("t_low_query", "t_mid_query", "t_high_query")
+    if all(k in sd for k in query_keys):
+        dims = {int(sd[k].shape[-1]) for k in query_keys}
+        if len(dims) != 1:
+            raise ValueError(f"inconsistent token dims in checkpoint queries: {sorted(dims)}")
+        return int(next(iter(dims))), len(query_keys), 3
+
+    if "style_queries" in sd:
+        style_token_count = int(sd["style_queries"].shape[0])
+        style_token_dim = int(sd["style_queries"].shape[1])
+        local_token_count = int(sd["style_local_queries"].shape[0]) if "style_local_queries" in sd else 3
+        return style_token_dim, style_token_count, local_token_count
+
+    raise KeyError(
+        "state_dict missing token query keys; expected one of: "
+        "('t_low_query','t_mid_query','t_high_query') or 'style_queries'"
+    )
 
 
 def _tensor_to_u8(img: torch.Tensor) -> np.ndarray:
@@ -96,6 +107,20 @@ def _norm_entropy(prob: np.ndarray) -> float:
     h = float(-(p * np.log(p)).sum())
     hmax = float(np.log(max(2, p.size)))
     return float(h / hmax)
+
+
+def _vis_heat_from_prob(prob: np.ndarray, mode: str) -> np.ndarray:
+    mode_key = str(mode).strip().lower()
+    if mode_key == "max":
+        return prob / max(1e-8, float(prob.max()))
+    if mode_key == "deviation":
+        base = 1.0 / float(prob.size)
+        pos = np.clip(prob - base, 0.0, None)
+        scale = float(pos.max())
+        if scale <= 0.0:
+            return np.zeros_like(prob, dtype=np.float64)
+        return pos / scale
+    raise ValueError(f"unsupported vis mode: {mode}")
 
 
 def _cosine(a: np.ndarray, b: np.ndarray) -> float:
@@ -174,6 +199,7 @@ def main() -> None:
     p.add_argument("--style-ref-count", type=int, default=8)
     p.add_argument("--device", type=str, default="cuda:0")
     p.add_argument("--tile-size", type=int, default=160)
+    p.add_argument("--vis-mode", type=str, default="deviation", choices=["deviation", "max"])
     args = p.parse_args()
 
     random.seed(int(args.seed))
@@ -247,6 +273,7 @@ def main() -> None:
 
             token_tiles: list[np.ndarray] = []
             token_peaks: list[float] = []
+            token_peak_mean_ratios: list[float] = []
             token_entropies: list[float] = []
             token_vecs_sample: list[np.ndarray] = []
             for t_i in range(int(token_attn.shape[0])):
@@ -254,8 +281,9 @@ def main() -> None:
                 heat_prob = _normalize_prob_map(heat_raw)
                 token_vecs_sample.append(heat_prob.reshape(-1).astype(np.float64))
                 token_peaks.append(float(heat_prob.max()))
+                token_peak_mean_ratios.append(float(heat_prob.max() / max(1e-12, float(heat_prob.mean()))))
                 token_entropies.append(_norm_entropy(heat_prob))
-                heat_vis = heat_prob / max(1e-8, float(heat_prob.max()))
+                heat_vis = _vis_heat_from_prob(heat_prob, mode=str(args.vis_mode))
                 token_tiles.append(
                     _make_token_tile(
                         base_u8,
@@ -297,6 +325,7 @@ def main() -> None:
                     "char_codepoint": f"U+{ord(sample['char']):04X}",
                     "style_chars": [str(x) for x in sample.get("style_chars", [])],
                     "token_peaks": [float(x) for x in token_peaks],
+                    "token_peak_mean_ratios": [float(x) for x in token_peak_mean_ratios],
                     "token_entropies": [float(x) for x in token_entropies],
                     "sample_token_overlap_offdiag": float(sample_overlap_offdiag),
                     "image": str(Path("images") / out_name),
@@ -316,6 +345,7 @@ def main() -> None:
         "seed": int(args.seed),
         "style_ref_count": int(args.style_ref_count),
         "style_transform": "resize_only",
+        "vis_mode": str(args.vis_mode),
         "style_token_dim": int(style_token_dim),
         "style_token_count": int(style_token_count),
         "local_token_count": int(local_token_count),

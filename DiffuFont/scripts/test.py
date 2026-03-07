@@ -25,7 +25,6 @@ def main() -> None:
         style_start_channel=8,
         unet_channels=(32, 64, 128, 256),
         conditioning_profile="style_only",
-        attn_scales=(16, 32, 64),
         style_token_dim=256,
         style_token_count=3,
     ).cpu()
@@ -43,7 +42,7 @@ def main() -> None:
     timesteps = torch.tensor([3], dtype=torch.long)
 
     with torch.no_grad():
-        tokens, proxy = model.encode_style_tokens_with_proxy(style, mask)
+        tokens, proxy, token_attn = model.encode_style_tokens_full(style, mask)
         contexts = model._resolve_style_hidden_states("style_only", style, mask)
         out = model(
             x_t,
@@ -63,6 +62,7 @@ def main() -> None:
     for key in ("pred_low", "pred_mid", "pred_high", "target_low", "target_mid", "target_high"):
         assert key in proxy
         assert proxy[key].shape[0] == batch
+    assert token_attn.shape == (batch, 3, refs, 32, 32)
 
     print("smoke test passed")
 

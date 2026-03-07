@@ -29,7 +29,7 @@ mkdir -p logs checkpoints
 
 if [[ "${RUN_MODE}" == "daemon" ]]; then
   nohup bash "${SCRIPT_PATH}" --foreground --log-file "${LOG_FILE}" --pid-file "${PID_FILE}" \
-    >> "${LOG_FILE}" 2>&1 < /dev/null &
+    > /dev/null 2>&1 < /dev/null &
   DAEMON_PID=$!
   echo "${DAEMON_PID}" > "${PID_FILE}"
   echo "[parts_only] started in background  pid=${DAEMON_PID}"
@@ -79,8 +79,7 @@ while true; do
     --log-every-steps 100 \
     --detailed-log \
     --save-every-steps 5000 \
-    --save-dir checkpoints/parts_only_diffusion_100k \
-    --attn-scales 16,32,64
+    --save-dir checkpoints/parts_only_diffusion_100k
   RC=$?
   set -e
 

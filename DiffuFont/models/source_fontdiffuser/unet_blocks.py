@@ -15,7 +15,7 @@ class PassthroughSpatialTransformer(nn.Module):
 
 
 class SelfAttentionBlock(nn.Module):
-    def __init__(self, channels: int, n_heads: int, num_groups: int):
+    def __init__(self, channels: int, n_heads: int, num_groups: int, use_ffn: bool = True):
         super().__init__()
         self.attn = SpatialTransformer(
             channels,
@@ -25,6 +25,7 @@ class SelfAttentionBlock(nn.Module):
             context_dim=None,
             num_groups=num_groups,
             use_self_attn=False,
+            use_ffn=use_ffn,
         )
 
     def _set_attention_slice(self, slice_size):
@@ -54,6 +55,54 @@ class StyleCrossAttentionBlock(nn.Module):
         return self.attn(hidden_states, context=context)
 
 
+class StyleModulatedLocalMixBlock(nn.Module):
+    """AdaGN-style modulation followed by lightweight local mixing."""
+
+    def __init__(
+        self,
+        channels: int,
+        context_dim: int | None,
+        num_groups: int,
+        eps: float = 1e-6,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.norm = nn.GroupNorm(num_groups=num_groups, num_channels=channels, eps=eps, affine=False)
+        self.style_proj = None
+        if context_dim is not None:
+            self.style_proj = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(context_dim, channels * 2),
+            )
+            nn.init.zeros_(self.style_proj[-1].weight)
+            nn.init.zeros_(self.style_proj[-1].bias)
+        self.act = nn.SiLU()
+        self.depthwise = nn.Conv2d(channels, channels, kernel_size=3, padding=1, groups=channels)
+        self.dropout = nn.Dropout(dropout)
+        self.pointwise = nn.Conv2d(channels, channels, kernel_size=1)
+
+    def forward(self, hidden_states, context=None):
+        residual = hidden_states
+        hidden_states = self.norm(hidden_states)
+
+        if context is not None and self.style_proj is not None:
+            if context.dim() == 3:
+                style_vec = context.mean(dim=1)
+            elif context.dim() == 2:
+                style_vec = context
+            else:
+                raise ValueError(f"style context must be 2D or 3D, got {tuple(context.shape)}")
+            scale, shift = self.style_proj(style_vec).chunk(2, dim=-1)
+            scale = scale.unsqueeze(-1).unsqueeze(-1)
+            shift = shift.unsqueeze(-1).unsqueeze(-1)
+            hidden_states = hidden_states * (1.0 + scale) + shift
+
+        hidden_states = self.depthwise(self.act(hidden_states))
+        hidden_states = self.dropout(hidden_states)
+        hidden_states = self.pointwise(self.act(hidden_states))
+        return hidden_states + residual
+
+
 class PassthroughChannelAttn(nn.Module):
     def forward(self, hidden_states, content_states=None):
         return hidden_states
@@ -75,7 +124,8 @@ def get_down_block(
     channel_attn=False,
     content_channel=32,
     reduction=32,
-    enable_style_attn=True):
+    enable_style_attn=True,
+    enable_self_attn=True):
 
     down_block_type = down_block_type[7:] if down_block_type.startswith("UNetRes") else down_block_type
     if down_block_type == "DownBlock2D":
@@ -107,7 +157,8 @@ def get_down_block(
             attn_num_head_channels=attn_num_head_channels,
             content_channel=content_channel,
             reduction=reduction,
-            enable_style_attn=enable_style_attn)
+            enable_style_attn=enable_style_attn,
+            enable_self_attn=enable_self_attn)
     else:
         raise ValueError(f"{down_block_type} does not exist.")
 
@@ -126,6 +177,8 @@ def get_up_block(
     resnet_groups=None,
     cross_attention_dim=None,
     enable_style_attn=True,
+    use_local_style_modulation=False,
+    enable_self_attn=True,
     **kwargs,
 ):
 
@@ -154,7 +207,9 @@ def get_up_block(
             resnet_groups=resnet_groups,
             cross_attention_dim=cross_attention_dim,
             attn_num_head_channels=attn_num_head_channels,
-            enable_style_attn=enable_style_attn)
+            enable_style_attn=enable_style_attn,
+            use_local_style_modulation=use_local_style_modulation,
+            enable_self_attn=enable_self_attn)
     else:
         raise ValueError(f"{up_block_type} does not exist.")
 
@@ -333,6 +388,7 @@ class MCADownBlock2D(nn.Module):
         content_channel=16,
         reduction=32,
         enable_style_attn: bool = True,
+        enable_self_attn: bool = True,
     ):
         super().__init__()
         content_attentions = []
@@ -344,6 +400,7 @@ class MCADownBlock2D(nn.Module):
         self.attention_type = attention_type
         self.attn_num_head_channels = attn_num_head_channels
         self.enable_style_attn = bool(enable_style_attn)
+        self.enable_self_attn = bool(enable_self_attn)
 
         for i in range(num_layers):
             in_channels = in_channels if i == 0 else out_channels
@@ -371,7 +428,16 @@ class MCADownBlock2D(nn.Module):
                     pre_norm=resnet_pre_norm,
                 )
             )
-            self_attentions.append(SelfAttentionBlock(out_channels, attn_num_head_channels, resnet_groups))
+            if self.enable_self_attn:
+                self_attentions.append(
+                    SelfAttentionBlock(
+                        out_channels,
+                        attn_num_head_channels,
+                        resnet_groups,
+                    )
+                )
+            else:
+                self_attentions.append(PassthroughSpatialTransformer())
             if self.enable_style_attn:
                 print("The style_attention cross attention dim in Down Block {} layer is {}".format(i + 1, cross_attention_dim))
                 style_cross_attentions.append(
@@ -615,16 +681,21 @@ class StyleUpBlock2D(nn.Module):
         output_scale_factor=1.0,
         add_upsample=True,
         enable_style_attn: bool = True,
+        use_local_style_modulation: bool = False,
+        enable_self_attn: bool = True,
     ):
         super().__init__()
         resnets = []
         self_attentions = []
         style_cross_attentions = []
+        local_mix_blocks = []
         post_attn_resnets = []
 
         self.attention_type = attention_type
         self.attn_num_head_channels = attn_num_head_channels
         self.enable_style_attn = bool(enable_style_attn)
+        self.use_local_style_modulation = bool(use_local_style_modulation)
+        self.enable_self_attn = bool(enable_self_attn)
 
         for i in range(num_layers):
             res_skip_channels = in_channels if (i == num_layers - 1) else out_channels
@@ -644,18 +715,41 @@ class StyleUpBlock2D(nn.Module):
                     pre_norm=resnet_pre_norm,
                 )
             )
-            self_attentions.append(SelfAttentionBlock(out_channels, attn_num_head_channels, resnet_groups))
-            if self.enable_style_attn:
-                style_cross_attentions.append(
-                    StyleCrossAttentionBlock(
+            if self.enable_self_attn:
+                self_attentions.append(
+                    SelfAttentionBlock(
                         out_channels,
                         attn_num_head_channels,
-                        cross_attention_dim,
                         resnet_groups,
+                        use_ffn=not self.use_local_style_modulation,
                     )
                 )
             else:
+                self_attentions.append(PassthroughSpatialTransformer())
+            if self.use_local_style_modulation:
                 style_cross_attentions.append(PassthroughSpatialTransformer())
+                local_mix_blocks.append(
+                    StyleModulatedLocalMixBlock(
+                        out_channels,
+                        cross_attention_dim,
+                        resnet_groups,
+                        eps=resnet_eps,
+                        dropout=dropout,
+                    )
+                )
+            else:
+                if self.enable_style_attn:
+                    style_cross_attentions.append(
+                        StyleCrossAttentionBlock(
+                            out_channels,
+                            attn_num_head_channels,
+                            cross_attention_dim,
+                            resnet_groups,
+                        )
+                    )
+                else:
+                    style_cross_attentions.append(PassthroughSpatialTransformer())
+                local_mix_blocks.append(PassthroughSpatialTransformer())
             post_attn_resnets.append(
                 ResnetBlock2D(
                     in_channels=out_channels,
@@ -672,6 +766,7 @@ class StyleUpBlock2D(nn.Module):
             )
         self.self_attentions = nn.ModuleList(self_attentions)
         self.style_cross_attentions = nn.ModuleList(style_cross_attentions)
+        self.local_mix_blocks = nn.ModuleList(local_mix_blocks)
         self.post_attn_resnets = nn.ModuleList(post_attn_resnets)
         self.resnets = nn.ModuleList(resnets)
 
@@ -709,10 +804,11 @@ class StyleUpBlock2D(nn.Module):
         encoder_hidden_states=None,
         upsample_size=None,
     ):
-        for resnet, self_attn, style_cross_attn, post_resnet in zip(
+        for resnet, self_attn, style_cross_attn, local_mix_block, post_resnet in zip(
             self.resnets,
             self.self_attentions,
             self.style_cross_attentions,
+            self.local_mix_blocks,
             self.post_attn_resnets,
         ):
             # pop res hidden states
@@ -730,16 +826,29 @@ class StyleUpBlock2D(nn.Module):
 
                 hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(resnet), hidden_states, temb, use_reentrant=False)
                 hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(self_attn), hidden_states, use_reentrant=False)
-                if encoder_hidden_states is not None:
-                    hidden_states = torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(style_cross_attn), hidden_states, encoder_hidden_states, use_reentrant=False
-                    )
+                if self.use_local_style_modulation:
+                    if encoder_hidden_states is not None:
+                        hidden_states = torch.utils.checkpoint.checkpoint(
+                            create_custom_forward(local_mix_block), hidden_states, encoder_hidden_states, use_reentrant=False
+                        )
+                    else:
+                        hidden_states = torch.utils.checkpoint.checkpoint(
+                            create_custom_forward(local_mix_block), hidden_states, use_reentrant=False
+                        )
+                else:
+                    if encoder_hidden_states is not None:
+                        hidden_states = torch.utils.checkpoint.checkpoint(
+                            create_custom_forward(style_cross_attn), hidden_states, encoder_hidden_states, use_reentrant=False
+                        )
                 hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(post_resnet), hidden_states, temb, use_reentrant=False)
             else:
                 hidden_states = resnet(hidden_states, temb)
                 hidden_states = self_attn(hidden_states)
-                if encoder_hidden_states is not None:
-                    hidden_states = style_cross_attn(hidden_states, context=encoder_hidden_states)
+                if self.use_local_style_modulation:
+                    hidden_states = local_mix_block(hidden_states, context=encoder_hidden_states)
+                else:
+                    if encoder_hidden_states is not None:
+                        hidden_states = style_cross_attn(hidden_states, context=encoder_hidden_states)
                 hidden_states = post_resnet(hidden_states, temb)
 
         if self.upsamplers is not None:

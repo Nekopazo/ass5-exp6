@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Source-aligned DiffuFont model with hard-routed low/mid/high style tokens."""
+"""Source-aligned DiffuFont model with fixed low/mid/high style routing."""
 
 from __future__ import annotations
 
@@ -11,6 +11,21 @@ import torch.nn.functional as F
 
 from .hierarchical_style_encoder import HierarchicalStyleEncoderMixin
 from .source_fontdiffuser import ContentEncoder, UNet
+
+
+FIXED_STYLE_TRANSFORMER_SCALES = (16, 32, 64)
+FIXED_STYLE_LOCAL_MOD_SCALES = ()
+FIXED_STYLE_TOKEN_CONSUMER_MAP = {
+    "t_low": ("mid", "up_16"),
+    "t_mid": ("up_32",),
+    "t_high": ("up_64",),
+}
+FIXED_STYLE_SITE_ARCH = {
+    "mid": "transformer_cross_attn",
+    "up_16": "transformer_cross_attn",
+    "up_32": "transformer_cross_attn",
+    "up_64": "transformer_cross_attn",
+}
 
 
 class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
@@ -29,7 +44,6 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         content_encoder_downsample_size: int = 4,
         channel_attn: bool = True,
         conditioning_profile: str = "parts_vector_only",
-        attn_scales: Optional[tuple[int, ...]] = None,
         style_token_dim: int = 256,
         style_token_count: int = 3,
         local_token_count: int = 3,
@@ -71,9 +85,6 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         self.inject_up32 = self._build_inject_head()
         self.inject_up64 = self._build_inject_head()
 
-        if attn_scales is None:
-            attn_scales = (16, 32, 64)
-
         self.unet = UNet(
             sample_size=self.unet_input_size,
             in_channels=self.unet_in_channels,
@@ -95,9 +106,10 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
             content_encoder_downsample_size=self.content_encoder_downsample_size,
             content_start_channel=content_start_channel // 2,
             reduction=32,
-            attn_scales=attn_scales,
             mid_enable_content_attn=False,
         )
+        self._attention_logging_enabled = False
+        self._style_usage_logging: dict[str, float] = {}
 
     @classmethod
     def _normalize_conditioning_mode(cls, mode: str) -> str:
@@ -120,6 +132,19 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
 
     def load_style_pretrained(self, ckpt_path: str) -> None:
         obj = torch.load(ckpt_path, map_location="cpu")
+        if isinstance(obj, dict) and isinstance(obj.get("extra"), dict):
+            expected_route = {k: list(v) for k, v in FIXED_STYLE_TOKEN_CONSUMER_MAP.items()}
+            route_meta = obj["extra"].get("token_consumer_map", {}) or {}
+            if route_meta != expected_route:
+                raise RuntimeError(
+                    f"style pretrained routing mismatch: ckpt={route_meta or '<missing>'} current={expected_route}"
+                )
+            consumer_arch_meta = obj["extra"].get("style_site_arch", {}) or {}
+            expected_arch = dict(FIXED_STYLE_SITE_ARCH)
+            if consumer_arch_meta != expected_arch:
+                raise RuntimeError(
+                    f"style pretrained consumer mismatch: ckpt={consumer_arch_meta or '<missing>'} current={expected_arch}"
+                )
         if isinstance(obj, dict) and isinstance(obj.get("style_encoder"), dict):
             sd = obj["style_encoder"]
         elif isinstance(obj, dict) and isinstance(obj.get("model_state"), dict):
@@ -139,28 +164,32 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
             raise ValueError(f"{name} must be {expected}x{expected}, got {h}x{w}. Online resize is disabled.")
 
     def set_attention_logging(self, enabled: bool) -> None:
+        self._attention_logging_enabled = bool(enabled)
+        if not self._attention_logging_enabled:
+            self._style_usage_logging = {}
         if hasattr(self.unet, "set_attention_logging"):
             self.unet.set_attention_logging(bool(enabled))
 
     def reset_attention_logging(self) -> None:
+        self._style_usage_logging = {}
         if hasattr(self.unet, "reset_attention_logging"):
             self.unet.reset_attention_logging()
 
     def collect_attention_logging(self) -> dict[str, float]:
-        if not hasattr(self.unet, "collect_attention_logging"):
-            return {}
-        raw = self.unet.collect_attention_logging()
         out: dict[str, float] = {}
-        for klen, mass in raw.items():
-            if len(mass) <= 0:
-                continue
-            probs = torch.tensor(mass, dtype=torch.float64)
-            probs = probs.clamp_min(1e-12)
-            probs = probs / probs.sum().clamp_min(1e-12)
-            out[f"attn_klen_{int(klen)}_max"] = float(probs.max().item())
-            out[f"attn_klen_{int(klen)}_entropy"] = float(
-                (-(probs * probs.log()).sum() / torch.log(torch.tensor(float(max(2, klen))))).item()
-            )
+        if hasattr(self.unet, "collect_attention_logging"):
+            raw = self.unet.collect_attention_logging()
+            for klen, mass in raw.items():
+                if len(mass) <= 0:
+                    continue
+                probs = torch.tensor(mass, dtype=torch.float64)
+                probs = probs.clamp_min(1e-12)
+                probs = probs / probs.sum().clamp_min(1e-12)
+                out[f"attn_klen_{int(klen)}_max"] = float(probs.max().item())
+                out[f"attn_klen_{int(klen)}_entropy"] = float(
+                    (-(probs * probs.log()).sum() / torch.log(torch.tensor(float(max(2, klen))))).item()
+                )
+        out.update(self._style_usage_logging)
         return out
 
     def _normalize_style_inputs(
@@ -197,23 +226,6 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
             style_ref_mask = style_ref_mask.to(device=style_img.device, dtype=torch.float32)
         return style_img, style_ref_mask
 
-    def _apply_style_token_dropout(self, style_tokens: torch.Tensor, drop_prob: float) -> torch.Tensor:
-        p = float(max(0.0, min(1.0, drop_prob)))
-        if p <= 0.0:
-            return style_tokens
-        if style_tokens.dim() != 3 or int(style_tokens.size(1)) != 3:
-            raise ValueError(f"style_tokens must be (B,3,D), got {tuple(style_tokens.shape)}")
-
-        b, t, _ = style_tokens.shape
-        drop_rows = torch.rand((b,), device=style_tokens.device) < p
-        if not bool(drop_rows.any().item()):
-            return style_tokens
-        keep = torch.ones((b, t), device=style_tokens.device, dtype=torch.bool)
-        rows = torch.nonzero(drop_rows, as_tuple=False).flatten()
-        picked = torch.randint(0, t, (rows.numel(),), device=style_tokens.device)
-        keep[rows, picked] = False
-        return style_tokens * keep.unsqueeze(-1).to(dtype=style_tokens.dtype)
-
     def _content_features_for_unet(self, content_img: torch.Tensor) -> list[torch.Tensor]:
         content_img_feature, content_residual_features = self.content_encoder(content_img)
         if len(content_residual_features) < 4:
@@ -230,11 +242,46 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         t_low = style_tokens[:, 0]
         t_mid = style_tokens[:, 1]
         t_high = style_tokens[:, 2]
-        return {
+        style_contexts = {
             "mid": self.inject_mid(t_low).unsqueeze(1),
-            "up_16": self.inject_up16(t_mid).unsqueeze(1),
+            "up_16": self.inject_up16(t_low).unsqueeze(1),
             "up_32": self.inject_up32(t_mid).unsqueeze(1),
             "up_64": self.inject_up64(t_high).unsqueeze(1),
+        }
+        self._record_style_usage_logging(style_contexts)
+        return style_contexts
+
+    def _record_style_usage_logging(self, style_contexts: dict[str, torch.Tensor]) -> None:
+        if not self._attention_logging_enabled:
+            return
+
+        def _ctx_rms(x: torch.Tensor) -> float:
+            return float(x.detach().pow(2).mean(dim=-1).sqrt().mean().item())
+
+        ctx_mid = _ctx_rms(style_contexts["mid"])
+        ctx_up16 = _ctx_rms(style_contexts["up_16"])
+        ctx_up32 = _ctx_rms(style_contexts["up_32"])
+        ctx_up64 = _ctx_rms(style_contexts["up_64"])
+
+        tok_low = ctx_mid
+        tok_mid = 0.5 * (ctx_up16 + ctx_up32)
+        tok_high = ctx_up64
+        total = max(tok_low + tok_mid + tok_high, 1e-8)
+        probs = torch.tensor(
+            [tok_low / total, tok_mid / total, tok_high / total],
+            dtype=torch.float64,
+        ).clamp_min(1e-12)
+        imp_entropy = float((-(probs * probs.log()).sum() / torch.log(torch.tensor(3.0))).item())
+
+        self._style_usage_logging = {
+            "ctx_mid_norm": ctx_mid,
+            "ctx_up16_norm": ctx_up16,
+            "ctx_up32_norm": ctx_up32,
+            "ctx_up64_norm": ctx_up64,
+            "tok_imp_low": float(probs[0].item()),
+            "tok_imp_mid": float(probs[1].item()),
+            "tok_imp_high": float(probs[2].item()),
+            "tok_imp_entropy": imp_entropy,
         }
 
     def _resolve_style_hidden_states(
@@ -242,15 +289,12 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         mode: str,
         style_img: Optional[torch.Tensor],
         style_ref_mask: Optional[torch.Tensor],
-        style_token_drop_prob: float = 0.0,
     ) -> Optional[dict[str, torch.Tensor]]:
         mode_norm = self._normalize_conditioning_mode(mode)
         if mode_norm == "baseline" or style_img is None:
             return None
 
         tokens = self.encode_style_tokens(style_img, style_ref_mask=style_ref_mask)
-        if self.training and float(style_token_drop_prob) > 0.0:
-            tokens = self._apply_style_token_dropout(tokens, drop_prob=float(style_token_drop_prob))
         return self._build_style_site_contexts(tokens)
 
     def encode_to_latent(self, x_pixel: torch.Tensor) -> torch.Tensor:
@@ -269,7 +313,6 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         part_mask: Optional[torch.Tensor] = None,
         condition_mode: Optional[str] = None,
         style_ref_mask: Optional[torch.Tensor] = None,
-        style_token_drop_prob: float = 0.0,
     ) -> torch.Tensor:
         _ = part_imgs
         _ = part_mask
@@ -281,7 +324,6 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
             mode,
             style_img,
             style_ref_mask=style_ref_mask,
-            style_token_drop_prob=float(style_token_drop_prob),
         )
 
         encoder_hidden_states = [
