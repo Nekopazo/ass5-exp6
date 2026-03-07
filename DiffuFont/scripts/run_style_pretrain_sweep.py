@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run style-encoder pretraining sweep over (ref_per_style, style_token_count)."""
+"""Run style-encoder pretraining sweep over reference count with fixed 3-token encoder."""
 
 from __future__ import annotations
 
@@ -114,7 +114,7 @@ def main() -> None:
     parser.add_argument("--save-root", type=Path, default=Path("checkpoints"))
     parser.add_argument("--run-name", type=str, default="")
     parser.add_argument("--refs", type=str, default="8,12")
-    parser.add_argument("--tokens", type=str, default="4,8,12")
+    parser.add_argument("--tokens", type=str, default="3")
     parser.add_argument("--steps", type=int, default=10000)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--loader-steps-per-epoch", type=int, default=2048)
@@ -124,8 +124,7 @@ def main() -> None:
     parser.add_argument("--val-font-count", type=int, default=0)
     parser.add_argument("--val-batches", type=int, default=4)
     parser.add_argument("--log-every", type=int, default=100)
-    parser.add_argument("--rank-metric", type=str, default="best_val_monitor", choices=["best_val_monitor", "best_val_retr_top1", "best_val_loss"])
-    parser.add_argument("--time-ema-decay", type=float, default=0.90)
+    parser.add_argument("--rank-metric", type=str, default="best_val_loss", choices=["best_val_monitor", "best_val_retr_top1", "best_val_loss"])
     parser.add_argument("--decode-cache-size", type=int, default=3000)
     parser.add_argument("--decode-workers", type=int, default=8)
     parser.add_argument("--prefetch-factor", type=int, default=4)
@@ -143,6 +142,8 @@ def main() -> None:
 
     refs = parse_int_csv(args.refs)
     tokens = parse_int_csv(args.tokens)
+    if any(int(tok) != 3 for tok in tokens):
+        raise ValueError("style-token-count is now fixed to 3 (t_low/t_mid/t_high)")
 
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     sweep_name = args.run_name.strip() or f"style_pretrain_sweep_{stamp}"
@@ -193,8 +194,6 @@ def main() -> None:
                 str(int(args.val_batches)),
                 "--log-every",
                 str(int(args.log_every)),
-                "--time-ema-decay",
-                str(float(args.time_ema_decay)),
                 "--decode-cache-size",
                 str(int(args.decode_cache_size)),
                 "--decode-workers",

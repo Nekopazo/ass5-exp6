@@ -521,7 +521,7 @@ def main() -> None:
     parser.add_argument("--part-image-size", type=int, default=40)
     parser.add_argument("--style-start-channel", type=int, default=16)
     parser.add_argument("--style-token-dim", type=int, default=256)
-    parser.add_argument("--attn-scales", type=str, default="16,32")
+    parser.add_argument("--attn-scales", type=str, default="16,32,64")
     parser.add_argument("--inference-steps", type=int, default=20)
     parser.add_argument("--diffusion-steps", type=int, default=1000)
     parser.add_argument("--max-samples", type=int, default=32)

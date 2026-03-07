@@ -26,7 +26,6 @@ import lmdb
 import numpy as np
 import cv2
 from PIL import Image
-
 try:
     import torch
     from torch.utils.data import Dataset

@@ -222,8 +222,8 @@ class UNetMidMCABlock2D(nn.Module):
                 )
             else:
                 content_attentions.append(PassthroughChannelAttn())
+            self_attentions.append(SelfAttentionBlock(in_channels, attn_num_head_channels, resnet_groups))
             if self.enable_style_attn:
-                self_attentions.append(SelfAttentionBlock(in_channels, attn_num_head_channels, resnet_groups))
                 style_cross_attentions.append(
                     StyleCrossAttentionBlock(
                         in_channels,
@@ -233,7 +233,6 @@ class UNetMidMCABlock2D(nn.Module):
                     )
                 )
             else:
-                self_attentions.append(PassthroughSpatialTransformer())
                 style_cross_attentions.append(PassthroughSpatialTransformer())
             post_attn_resnets.append(
                 ResnetBlock2D(
@@ -279,6 +278,7 @@ class UNetMidMCABlock2D(nn.Module):
         hidden_states, 
         temb=None, 
         encoder_hidden_states=None,
+        style_hidden_states=None,
         index=None,
     ):
         hidden_states = self.resnets[0](hidden_states, temb)
@@ -300,8 +300,8 @@ class UNetMidMCABlock2D(nn.Module):
             hidden_states = self_attn(hidden_states)
 
             # parts_vector condition is optional; when disabled we skip style cross-attention.
-            current_style_feature = None
-            if encoder_hidden_states is not None and len(encoder_hidden_states) > 2:
+            current_style_feature = style_hidden_states
+            if current_style_feature is None and encoder_hidden_states is not None and len(encoder_hidden_states) > 2:
                 current_style_feature = encoder_hidden_states[2]
             if current_style_feature is not None:
                 hidden_states = style_cross_attn(hidden_states, context=current_style_feature)
@@ -371,9 +371,9 @@ class MCADownBlock2D(nn.Module):
                     pre_norm=resnet_pre_norm,
                 )
             )
+            self_attentions.append(SelfAttentionBlock(out_channels, attn_num_head_channels, resnet_groups))
             if self.enable_style_attn:
                 print("The style_attention cross attention dim in Down Block {} layer is {}".format(i + 1, cross_attention_dim))
-                self_attentions.append(SelfAttentionBlock(out_channels, attn_num_head_channels, resnet_groups))
                 style_cross_attentions.append(
                     StyleCrossAttentionBlock(
                         out_channels,
@@ -383,7 +383,6 @@ class MCADownBlock2D(nn.Module):
                     )
                 )
             else:
-                self_attentions.append(PassthroughSpatialTransformer())
                 style_cross_attentions.append(PassthroughSpatialTransformer())
             post_attn_resnets.append(
                 ResnetBlock2D(
@@ -645,8 +644,8 @@ class StyleUpBlock2D(nn.Module):
                     pre_norm=resnet_pre_norm,
                 )
             )
+            self_attentions.append(SelfAttentionBlock(out_channels, attn_num_head_channels, resnet_groups))
             if self.enable_style_attn:
-                self_attentions.append(SelfAttentionBlock(out_channels, attn_num_head_channels, resnet_groups))
                 style_cross_attentions.append(
                     StyleCrossAttentionBlock(
                         out_channels,
@@ -656,7 +655,6 @@ class StyleUpBlock2D(nn.Module):
                     )
                 )
             else:
-                self_attentions.append(PassthroughSpatialTransformer())
                 style_cross_attentions.append(PassthroughSpatialTransformer())
             post_attn_resnets.append(
                 ResnetBlock2D(

@@ -63,7 +63,7 @@ class UNet(ModelMixin, ConfigMixin):
         self.content_encoder_downsample_size = content_encoder_downsample_size
 
         self.sample_size = sample_size
-        self._attn_scales = set(int(x) for x in attn_scales) if attn_scales else None
+        self._style_scales = set(int(x) for x in attn_scales) if attn_scales else None
         time_embed_dim = block_out_channels[0] * 4
 
         # input
@@ -80,9 +80,9 @@ class UNet(ModelMixin, ConfigMixin):
         self.up_blocks = nn.ModuleList([])
 
         def _style_attn_enabled(resolution: Optional[int]) -> bool:
-            if resolution is None or self._attn_scales is None:
+            if resolution is None or self._style_scales is None:
                 return True
-            return int(resolution) in self._attn_scales
+            return int(resolution) in self._style_scales
 
         # down
         output_channel = block_out_channels[0]
@@ -111,7 +111,7 @@ class UNet(ModelMixin, ConfigMixin):
                 content_channel=content_channel,
                 reduction=reduction,
                 channel_attn=channel_attn,
-                enable_style_attn=_style_attn_enabled(current_resolution),
+                enable_style_attn=False,
             )
             self.down_blocks.append(down_block)
             if current_resolution is not None and not is_final_block:
@@ -143,6 +143,7 @@ class UNet(ModelMixin, ConfigMixin):
         reversed_block_out_channels = list(reversed(block_out_channels))
         output_channel = reversed_block_out_channels[0]
         up_resolution = mid_resolution
+        self.up_block_style_keys: list[str | None] = []
         for i, up_block_type in enumerate(up_block_types):
             is_final_block = i == len(block_out_channels) - 1
 
@@ -177,6 +178,9 @@ class UNet(ModelMixin, ConfigMixin):
                 enable_style_attn=_style_attn_enabled(up_resolution),
             )
             self.up_blocks.append(up_block)
+            self.up_block_style_keys.append(
+                f"up_{int(up_resolution)}" if _style_attn_enabled(up_resolution) and up_resolution is not None else None
+            )
             prev_output_channel = output_channel
             if up_resolution is not None and add_upsample:
                 up_resolution *= 2
@@ -314,6 +318,10 @@ class UNet(ModelMixin, ConfigMixin):
         # 2. pre-process
         sample = self.conv_in(sample)
 
+        style_contexts = None
+        if encoder_hidden_states is not None and len(encoder_hidden_states) > 2:
+            style_contexts = encoder_hidden_states[2]
+
         # 3. down
         down_block_res_samples = (sample,)
         for index, downsample_block in enumerate(self.down_blocks):
@@ -335,7 +343,10 @@ class UNet(ModelMixin, ConfigMixin):
                 sample, 
                 emb, 
                 index=content_encoder_downsample_size,
-                encoder_hidden_states=encoder_hidden_states
+                encoder_hidden_states=encoder_hidden_states,
+                style_hidden_states=(
+                    style_contexts.get("mid") if isinstance(style_contexts, dict) else style_contexts
+                ),
             )
 
         # 5. up
@@ -351,10 +362,13 @@ class UNet(ModelMixin, ConfigMixin):
                 upsample_size = down_block_res_samples[-1].shape[2:]
 
             if isinstance(upsample_block, StyleUpBlock2D):
-                # Style cross-attention tokens (from parts_vector).
                 style_tokens = None
-                if encoder_hidden_states is not None and len(encoder_hidden_states) > 2:
-                    style_tokens = encoder_hidden_states[2]
+                if isinstance(style_contexts, dict):
+                    key = self.up_block_style_keys[i]
+                    if key is not None:
+                        style_tokens = style_contexts.get(key)
+                else:
+                    style_tokens = style_contexts
                 sample = upsample_block(
                     hidden_states=sample,
                     temb=emb,

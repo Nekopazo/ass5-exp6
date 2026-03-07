@@ -52,8 +52,7 @@ python scripts/pretrain_style_encoder.py \
     --steps 10000 \
     --batch-size 64 \
     --ref-per-style 8 \
-    --views 2 \
-    --style-token-count 8 \
+    --style-token-count 3 \
     --device auto \
     --log-every 50
 

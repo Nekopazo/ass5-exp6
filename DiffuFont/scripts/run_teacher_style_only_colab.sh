@@ -6,7 +6,7 @@ SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SO
 RUN_MODE="daemon"
 LOG_FILE=""
 PID_FILE=""
-RESUME_CKPT=""
+RESUME_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/teacher_style_only_20260305_164907/ckpt_step_42000.pt"
 SAVE_DIR_OVERRIDE=""
 PRETRAIN_STYLE_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/style_encoder_pretrain_20260305_154850.pt"
 DEVICE_ARG="cuda:1"
@@ -109,14 +109,22 @@ python -u train.py \
   --total-steps "${TARGET_STEPS}" \
   --val-ratio 0.1 \
   --lambda-diff 1.0 \
+  --lambda-nce 0.02 \
+  --lambda-cons 0.10 \
+  --lambda-div 0.02 \
+  --lambda-proxy-low 0.05 \
+  --lambda-proxy-mid 0.05 \
+  --lambda-proxy-high 0.05 \
   --style-ref-count 12 \
+  --freeze-style-backbone-steps 5000 \
+  --style-backbone-lr-scale 0.1 \
   --pretrained-style-encoder "${PRETRAIN_STYLE_CKPT}" \
   --num-workers 8 \
   --sample-every-steps 300 \
   --log-every-steps 100 \
   --save-every-steps 2000 \
   --save-dir "${SAVE_DIR}" \
-  --attn-scales 16,32 \
+  --attn-scales 16,32,64 \
   "$@"
 
 echo "[teacher_style_only] done $(date '+%Y-%m-%d %H:%M:%S')"

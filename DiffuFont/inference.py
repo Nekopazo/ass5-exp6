@@ -225,7 +225,7 @@ def main():
     parser.add_argument("--trainer", type=str, default="diffusion", choices=["diffusion", "flow_matching"])
     parser.add_argument("--conditioning-profile", type=str, default="part_only",
                         choices=["baseline", "parts_vector_only", "part_only", "style_only"])
-    parser.add_argument("--attn-scales", type=str, default="16,32")
+    parser.add_argument("--attn-scales", type=str, default="16,32,64")
     parser.add_argument("--image-size", type=int, default=256)
     parser.add_argument("--diffusion-steps", type=int, default=1000)
     parser.add_argument("--inference-steps", type=int, default=20, help="Sampling steps")

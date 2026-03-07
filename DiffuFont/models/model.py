@@ -119,6 +119,12 @@ def token_diversity_loss(tokens: torch.Tensor) -> torch.Tensor:
     return (off_diag.pow(2).sum(dim=(1, 2)) / float(denom)).mean()
 
 
+def proxy_band_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    pred_n = F.normalize(pred, dim=-1)
+    target_n = F.normalize(target, dim=-1)
+    return (1.0 - (pred_n * target_n).sum(dim=-1)).mean()
+
+
 def token_collapse_score(tokens: torch.Tensor) -> torch.Tensor:
     """Mean off-diagonal token cosine; high means token collapse."""
     t = F.normalize(tokens, dim=-1)
@@ -155,6 +161,9 @@ class DiffusionTrainer:
         lambda_nce: float = 0.0,
         lambda_cons: float = 0.0,
         lambda_div: float = 0.0,
+        lambda_proxy_low: float = 0.0,
+        lambda_proxy_mid: float = 0.0,
+        lambda_proxy_high: float = 0.0,
         nce_temperature: float = 0.07,
         nce_warmup_steps: int = 0,
         T: int = 1000,
@@ -171,7 +180,8 @@ class DiffusionTrainer:
         style_ref_drop_min_keep: int = 1,
         style_token_drop_prob: float = 0.0,
         freeze_part_encoder_steps: int = 0,
-        freeze_style_branch_steps: int = 0,
+        freeze_style_backbone_steps: int = 0,
+        style_backbone_lr_scale: float = 0.1,
         cfg_drop_prob: float = 0.0,  # deprecated, kept for backward compat (ignored)
     ):
         self.device = device
@@ -186,10 +196,24 @@ class DiffusionTrainer:
         self._accum_step = 0
         self.freeze_part_encoder_steps = max(0, int(freeze_part_encoder_steps))
         self._part_encoder_is_frozen = False
-        self.freeze_style_branch_steps = max(0, int(freeze_style_branch_steps))
-        self._style_branch_is_frozen = False
+        self.freeze_style_backbone_steps = max(0, int(freeze_style_backbone_steps))
+        self.style_backbone_lr_scale = float(max(0.0, min(1.0, float(style_backbone_lr_scale))))
+        self._style_backbone_low_is_frozen = False
+        self._style_backbone_high_is_frozen = False
 
-        self.opt = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-4)
+        high_params = list(self._iter_style_backbone_high_params())
+        high_param_ids = {id(p) for p in high_params}
+        main_params = [p for p in self.model.parameters() if id(p) not in high_param_ids]
+        if high_params:
+            self.opt = torch.optim.AdamW(
+                [
+                    {"params": main_params, "lr": lr},
+                    {"params": high_params, "lr": lr * self.style_backbone_lr_scale},
+                ],
+                weight_decay=1e-4,
+            )
+        else:
+            self.opt = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-4)
         if int(T) <= 0:
             raise ValueError(f"Diffusion timestep T must be > 0, got {T}")
         self.diffusion_steps = int(T)
@@ -211,6 +235,9 @@ class DiffusionTrainer:
         self.lambda_nce = float(lambda_nce)
         self.lambda_cons = float(lambda_cons)
         self.lambda_div = float(lambda_div)
+        self.lambda_proxy_low = float(lambda_proxy_low)
+        self.lambda_proxy_mid = float(lambda_proxy_mid)
+        self.lambda_proxy_high = float(lambda_proxy_high)
         self.nce_temperature = float(nce_temperature)
         self.nce_warmup_steps = max(0, int(nce_warmup_steps))
         self.global_step = 0
@@ -281,13 +308,16 @@ class DiffusionTrainer:
                     f"until global_step>={self.freeze_part_encoder_steps}",
                     flush=True,
                 )
-        if self.freeze_style_branch_steps > 0:
-            frozen_style_params = self._set_style_branch_requires_grad(False)
-            if frozen_style_params > 0:
-                self._style_branch_is_frozen = True
+        if self.freeze_style_backbone_steps > 0:
+            frozen_low = self._set_style_backbone_low_requires_grad(False)
+            frozen_high = self._set_style_backbone_high_requires_grad(False)
+            self._style_backbone_low_is_frozen = frozen_low > 0
+            self._style_backbone_high_is_frozen = frozen_high > 0
+            if frozen_low > 0 or frozen_high > 0:
                 print(
-                    f"[trainer] froze style branch params={frozen_style_params} "
-                    "(kept frozen for full training)",
+                    "[trainer] froze style backbone "
+                    f"low_params={frozen_low} high_params={frozen_high} "
+                    f"until global_step>={self.freeze_style_backbone_steps} (high only unfreezes)",
                     flush=True,
                 )
 
@@ -317,49 +347,50 @@ class DiffusionTrainer:
             flush=True,
         )
 
-    def _set_style_branch_requires_grad(self, requires_grad: bool) -> int:
-        """Set requires_grad for style encoder/token-layer submodules if present."""
-        module_names = (
-            "style_img_encoder",
-            "style_feat_to_token",
-            "style_token_attn",
-            "style_token_norm",
-            "style_token_ffn",
-            "style_token_out_norm",
-        )
-        changed = 0
-        for name in module_names:
-            module = getattr(self.model, name, None)
-            if module is None:
-                continue
-            for p in module.parameters():
-                p.requires_grad_(requires_grad)
-                changed += 1
+    def _iter_style_backbone_low_params(self):
+        if hasattr(self.model, "iter_style_backbone_low_parameters"):
+            yield from self.model.iter_style_backbone_low_parameters()
 
-        style_queries = getattr(self.model, "style_queries", None)
-        if style_queries is not None and isinstance(style_queries, torch.Tensor):
-            style_queries.requires_grad_(requires_grad)
+    def _iter_style_backbone_high_params(self):
+        if hasattr(self.model, "iter_style_backbone_high_parameters"):
+            yield from self.model.iter_style_backbone_high_parameters()
+
+    def _set_style_backbone_low_requires_grad(self, requires_grad: bool) -> int:
+        changed = 0
+        for p in self._iter_style_backbone_low_params():
+            p.requires_grad_(requires_grad)
             changed += 1
         return changed
 
-    def _set_style_branch_train_mode(self, training: bool) -> None:
-        module_names = (
-            "style_img_encoder",
-            "style_feat_to_token",
-            "style_token_attn",
-            "style_token_norm",
-            "style_token_ffn",
-            "style_token_out_norm",
-        )
-        for name in module_names:
-            module = getattr(self.model, name, None)
-            if module is not None and isinstance(module, nn.Module):
-                module.train(training)
+    def _set_style_backbone_high_requires_grad(self, requires_grad: bool) -> int:
+        changed = 0
+        for p in self._iter_style_backbone_high_params():
+            p.requires_grad_(requires_grad)
+            changed += 1
+        return changed
 
-    def _maybe_unfreeze_style_branch(self) -> None:
-        if self._style_branch_is_frozen:
-            self._set_style_branch_train_mode(False)
-        return
+    def _set_style_backbone_modules_train_mode(self, *, low_training: bool, high_training: bool) -> None:
+        if hasattr(self.model, "iter_style_backbone_low_modules"):
+            for module in self.model.iter_style_backbone_low_modules():
+                module.train(bool(low_training))
+        if hasattr(self.model, "iter_style_backbone_high_modules"):
+            for module in self.model.iter_style_backbone_high_modules():
+                module.train(bool(high_training))
+
+    def _maybe_unfreeze_style_backbone(self) -> None:
+        if self._style_backbone_low_is_frozen or self._style_backbone_high_is_frozen:
+            high_training = not self._style_backbone_high_is_frozen
+            self._set_style_backbone_modules_train_mode(low_training=False, high_training=high_training)
+
+        if self._style_backbone_high_is_frozen and self.global_step >= self.freeze_style_backbone_steps:
+            unfrozen = self._set_style_backbone_high_requires_grad(True)
+            self._style_backbone_high_is_frozen = False
+            self._set_style_backbone_modules_train_mode(low_training=False, high_training=True)
+            print(
+                f"[trainer] unfroze style backbone high layers at global_step={self.global_step} "
+                f"(params={unfrozen}, lr_scale={self.style_backbone_lr_scale:g})",
+                flush=True,
+            )
 
     # ------------------------------------------------------------------ #
     #  Gradient accumulation helpers
@@ -565,6 +596,9 @@ class DiffusionTrainer:
             "loss_nce": zero,
             "loss_cons": zero,
             "loss_div": zero,
+            "loss_proxy_low": zero,
+            "loss_proxy_mid": zero,
+            "loss_proxy_high": zero,
             "cos_same": zero,
             "cos_diff": zero,
             "token_collapse": zero,
@@ -593,8 +627,36 @@ class DiffusionTrainer:
         style_ref_mask_v1 = self._apply_style_ref_dropout(style_ref_mask_v1)
         style_ref_mask_v2 = self._apply_style_ref_dropout(style_ref_mask_v2)
 
-        tok1 = self.model.encode_style_tokens(style_img_v1, style_ref_mask=style_ref_mask_v1)
-        tok2 = self.model.encode_style_tokens(style_img_v2, style_ref_mask=style_ref_mask_v2)
+        if hasattr(self.model, "encode_style_tokens_with_proxy"):
+            tok1, proxy1 = self.model.encode_style_tokens_with_proxy(
+                style_img_v1,
+                style_ref_mask=style_ref_mask_v1,
+            )
+            tok2, proxy2 = self.model.encode_style_tokens_with_proxy(
+                style_img_v2,
+                style_ref_mask=style_ref_mask_v2,
+            )
+            out["loss_proxy_low"] = 0.5 * (
+                proxy_band_loss(proxy1["pred_low"], proxy1["target_low"])
+                + proxy_band_loss(proxy2["pred_low"], proxy2["target_low"])
+            )
+            out["loss_proxy_mid"] = 0.5 * (
+                proxy_band_loss(proxy1["pred_mid"], proxy1["target_mid"])
+                + proxy_band_loss(proxy2["pred_mid"], proxy2["target_mid"])
+            )
+            out["loss_proxy_high"] = 0.5 * (
+                proxy_band_loss(proxy1["pred_high"], proxy1["target_high"])
+                + proxy_band_loss(proxy2["pred_high"], proxy2["target_high"])
+            )
+        else:
+            tok1 = self.model.encode_style_tokens(
+                style_img_v1,
+                style_ref_mask=style_ref_mask_v1,
+            )
+            tok2 = self.model.encode_style_tokens(
+                style_img_v2,
+                style_ref_mask=style_ref_mask_v2,
+            )
         z1 = F.normalize(tok1.mean(dim=1), dim=-1)
         z2 = F.normalize(tok2.mean(dim=1), dim=-1)
 
@@ -619,7 +681,7 @@ class DiffusionTrainer:
         _train_t0 = time.perf_counter()
         self.model.train()
         self._maybe_unfreeze_part_encoder()
-        self._maybe_unfreeze_style_branch()
+        self._maybe_unfreeze_style_backbone()
         attn_log_enabled = self._prepare_attention_logging()
         x0 = batch["target"].to(self.device)
         content = batch["content"].to(self.device)
@@ -672,6 +734,9 @@ class DiffusionTrainer:
             loss_nce = style_losses["loss_nce"]
             loss_cons = style_losses["loss_cons"]
             loss_div = style_losses["loss_div"]
+            loss_proxy_low = style_losses["loss_proxy_low"]
+            loss_proxy_mid = style_losses["loss_proxy_mid"]
+            loss_proxy_high = style_losses["loss_proxy_high"]
             cos_same = style_losses["cos_same"]
             cos_diff = style_losses["cos_diff"]
             token_collapse = style_losses["token_collapse"]
@@ -681,6 +746,9 @@ class DiffusionTrainer:
                 + eff_lnce * loss_nce
                 + self.lambda_cons * loss_cons
                 + self.lambda_div * loss_div
+                + self.lambda_proxy_low * loss_proxy_low
+                + self.lambda_proxy_mid * loss_proxy_mid
+                + self.lambda_proxy_high * loss_proxy_high
             )
 
         counterfactual_stats: Dict[str, float] = {}
@@ -738,6 +806,9 @@ class DiffusionTrainer:
                 "loss_nce": loss_nce.item(),
                 "loss_cons": loss_cons.item(),
                 "loss_div": loss_div.item(),
+                "loss_proxy_low": loss_proxy_low.item(),
+                "loss_proxy_mid": loss_proxy_mid.item(),
+                "loss_proxy_high": loss_proxy_high.item(),
                 "cos_same": cos_same.item(),
                 "cos_diff": cos_diff.item(),
                 "token_collapse": token_collapse.item(),
@@ -797,6 +868,9 @@ class DiffusionTrainer:
                 "loss_nce": float(loss_nce.item()),
                 "loss_cons": float(loss_cons.item()),
                 "loss_div": float(loss_div.item()),
+                "loss_proxy_low": float(loss_proxy_low.item()),
+                "loss_proxy_mid": float(loss_proxy_mid.item()),
+                "loss_proxy_high": float(loss_proxy_high.item()),
                 "cos_same": float(cos_same.item()),
                 "cos_diff": float(cos_diff.item()),
                 "token_collapse": float(token_collapse.item()),
@@ -817,7 +891,9 @@ class DiffusionTrainer:
                 f"[step] gstep={self.global_step} ep={self.current_epoch} estep={self.local_step} "
                 f"loss={loss.item():.4f} mse={loss_mse.item():.4f} "
                 f"nce={loss_nce.item():.4f} cons={loss_cons.item():.4f} "
-                f"div={loss_div.item():.4f} cos_same={cos_same.item():.4f} "
+                f"div={loss_div.item():.4f} "
+                f"proxy=({loss_proxy_low.item():.4f},{loss_proxy_mid.item():.4f},{loss_proxy_high.item():.4f}) "
+                f"cos_same={cos_same.item():.4f} "
                 f"cos_diff={cos_diff.item():.4f} tok_coll={token_collapse.item():.4f} "
                 f"λnce={eff_lnce:.4f} "
                 f"lr={self.lr_schedule.get_last_lr()[0]:.6e} "
@@ -844,6 +920,9 @@ class DiffusionTrainer:
             "loss_nce": loss_nce.item(),
             "loss_cons": loss_cons.item(),
             "loss_div": loss_div.item(),
+            "loss_proxy_low": loss_proxy_low.item(),
+            "loss_proxy_mid": loss_proxy_mid.item(),
+            "loss_proxy_high": loss_proxy_high.item(),
             "cos_same": cos_same.item(),
             "cos_diff": cos_diff.item(),
             "token_collapse": token_collapse.item(),
@@ -1173,6 +1252,9 @@ class FlowMatchingTrainer(DiffusionTrainer):
         lambda_nce: float = 0.0,
         lambda_cons: float = 0.0,
         lambda_div: float = 0.0,
+        lambda_proxy_low: float = 0.0,
+        lambda_proxy_mid: float = 0.0,
+        lambda_proxy_high: float = 0.0,
         nce_temperature: float = 0.07,
         nce_warmup_steps: int = 0,
         T: int = 1000,
@@ -1189,12 +1271,19 @@ class FlowMatchingTrainer(DiffusionTrainer):
         style_ref_drop_min_keep: int = 1,
         style_token_drop_prob: float = 0.0,
         freeze_part_encoder_steps: int = 0,
-        freeze_style_branch_steps: int = 0,
+        freeze_style_backbone_steps: int = 0,
+        style_backbone_lr_scale: float = 0.1,
         cfg_drop_prob: float = 0.0,  # deprecated, kept for backward compat (ignored)
     ):
         super().__init__(
             model=model, device=device, lr=lr,
-            lambda_mse=1.0, lambda_nce=lambda_nce, lambda_cons=lambda_cons, lambda_div=lambda_div,
+            lambda_mse=1.0,
+            lambda_nce=lambda_nce,
+            lambda_cons=lambda_cons,
+            lambda_div=lambda_div,
+            lambda_proxy_low=lambda_proxy_low,
+            lambda_proxy_mid=lambda_proxy_mid,
+            lambda_proxy_high=lambda_proxy_high,
             nce_temperature=nce_temperature, nce_warmup_steps=nce_warmup_steps,
             T=T, total_steps=total_steps,
             sample_every_steps=sample_every_steps, precision=precision,
@@ -1207,7 +1296,8 @@ class FlowMatchingTrainer(DiffusionTrainer):
             style_ref_drop_min_keep=style_ref_drop_min_keep,
             style_token_drop_prob=style_token_drop_prob,
             freeze_part_encoder_steps=freeze_part_encoder_steps,
-            freeze_style_branch_steps=freeze_style_branch_steps,
+            freeze_style_backbone_steps=freeze_style_backbone_steps,
+            style_backbone_lr_scale=style_backbone_lr_scale,
         )
         self.lambda_fm = float(lambda_fm)
 
@@ -1229,7 +1319,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
         _train_t0 = time.perf_counter()
         self.model.train()
         self._maybe_unfreeze_part_encoder()
-        self._maybe_unfreeze_style_branch()
+        self._maybe_unfreeze_style_backbone()
         attn_log_enabled = self._prepare_attention_logging()
         x0 = batch["target"].to(self.device)
         content = batch["content"].to(self.device)
@@ -1286,6 +1376,9 @@ class FlowMatchingTrainer(DiffusionTrainer):
             loss_nce = style_losses["loss_nce"]
             loss_cons = style_losses["loss_cons"]
             loss_div = style_losses["loss_div"]
+            loss_proxy_low = style_losses["loss_proxy_low"]
+            loss_proxy_mid = style_losses["loss_proxy_mid"]
+            loss_proxy_high = style_losses["loss_proxy_high"]
             cos_same = style_losses["cos_same"]
             cos_diff = style_losses["cos_diff"]
             token_collapse = style_losses["token_collapse"]
@@ -1295,6 +1388,9 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 + eff_lnce * loss_nce
                 + self.lambda_cons * loss_cons
                 + self.lambda_div * loss_div
+                + self.lambda_proxy_low * loss_proxy_low
+                + self.lambda_proxy_mid * loss_proxy_mid
+                + self.lambda_proxy_high * loss_proxy_high
             )
 
         counterfactual_stats: Dict[str, float] = {}
@@ -1349,6 +1445,9 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 "loss_nce": loss_nce.item(),
                 "loss_cons": loss_cons.item(),
                 "loss_div": loss_div.item(),
+                "loss_proxy_low": loss_proxy_low.item(),
+                "loss_proxy_mid": loss_proxy_mid.item(),
+                "loss_proxy_high": loss_proxy_high.item(),
                 "cos_same": cos_same.item(),
                 "cos_diff": cos_diff.item(),
                 "token_collapse": token_collapse.item(),
@@ -1404,6 +1503,9 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 "loss_nce": float(loss_nce.item()),
                 "loss_cons": float(loss_cons.item()),
                 "loss_div": float(loss_div.item()),
+                "loss_proxy_low": float(loss_proxy_low.item()),
+                "loss_proxy_mid": float(loss_proxy_mid.item()),
+                "loss_proxy_high": float(loss_proxy_high.item()),
                 "cos_same": float(cos_same.item()),
                 "cos_diff": float(cos_diff.item()),
                 "token_collapse": float(token_collapse.item()),
@@ -1422,7 +1524,9 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 f"[fm-step] gstep={self.global_step} ep={self.current_epoch} estep={self.local_step} "
                 f"loss={loss.item():.4f} fm={loss_fm.item():.4f} "
                 f"nce={loss_nce.item():.4f} cons={loss_cons.item():.4f} "
-                f"div={loss_div.item():.4f} cos_same={cos_same.item():.4f} "
+                f"div={loss_div.item():.4f} "
+                f"proxy=({loss_proxy_low.item():.4f},{loss_proxy_mid.item():.4f},{loss_proxy_high.item():.4f}) "
+                f"cos_same={cos_same.item():.4f} "
                 f"cos_diff={cos_diff.item():.4f} tok_coll={token_collapse.item():.4f} "
                 f"λnce={eff_lnce:.4f} "
                 f"lr={self.lr_schedule.get_last_lr()[0]:.6e} "
@@ -1449,6 +1553,9 @@ class FlowMatchingTrainer(DiffusionTrainer):
             "loss_nce": loss_nce.item(),
             "loss_cons": loss_cons.item(),
             "loss_div": loss_div.item(),
+            "loss_proxy_low": loss_proxy_low.item(),
+            "loss_proxy_mid": loss_proxy_mid.item(),
+            "loss_proxy_high": loss_proxy_high.item(),
             "cos_same": cos_same.item(),
             "cos_diff": cos_diff.item(),
             "token_collapse": token_collapse.item(),

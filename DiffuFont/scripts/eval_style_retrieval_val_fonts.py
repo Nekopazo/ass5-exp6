@@ -499,19 +499,9 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
 
     parser.add_argument("--style-token-dim", type=int, default=256)
-    parser.add_argument("--style-token-count", type=int, default=8)
+    parser.add_argument("--style-token-count", type=int, default=3)
     parser.add_argument("--style-start-channel", type=int, default=16)
 
-    parser.add_argument("--style-aug-canvas-size", type=int, default=256)
-    parser.add_argument("--style-aug-crop-min", type=float, default=0.6)
-    parser.add_argument("--style-aug-crop-max", type=float, default=0.9)
-    parser.add_argument("--style-aug-mask-prob", type=float, default=0.5)
-    parser.add_argument("--style-aug-mask-min", type=float, default=0.15)
-    parser.add_argument("--style-aug-mask-max", type=float, default=0.3)
-    parser.add_argument("--style-aug-affine-deg", type=float, default=5.0)
-    parser.add_argument("--style-aug-translate", type=float, default=0.05)
-    parser.add_argument("--style-aug-scale-min", type=float, default=1.0)
-    parser.add_argument("--style-aug-scale-max", type=float, default=1.0)
     args = parser.parse_args()
 
     set_seed(int(args.seed))
@@ -541,23 +531,9 @@ def main() -> None:
         style_token_count=int(args.style_token_count),
     )
 
-    clean_transform = build_style_reference_transform(image_size=128, augment=False)
-    aug_transform = build_style_reference_transform(
-        image_size=128,
-        augment=True,
-        pre_resize=int(args.style_aug_canvas_size),
-        crop_scale_min=float(args.style_aug_crop_min),
-        crop_scale_max=float(args.style_aug_crop_max),
-        mask_prob=float(args.style_aug_mask_prob),
-        mask_area_min=float(args.style_aug_mask_min),
-        mask_area_max=float(args.style_aug_mask_max),
-        affine_degrees=float(args.style_aug_affine_deg),
-        affine_translate=float(args.style_aug_translate),
-        affine_scale_min=float(args.style_aug_scale_min),
-        affine_scale_max=float(args.style_aug_scale_max),
-    )
+    resize_only_transform = build_style_reference_transform(image_size=128)
 
-    clean = run_trials(
+    resize_only = run_trials(
         encoder=encoder,
         lmdb_path=lmdb_path,
         fonts=val_fonts,
@@ -568,30 +544,10 @@ def main() -> None:
         consistency_sets_per_font=int(args.consistency_sets_per_font),
         gallery_sets_per_font=int(args.gallery_sets_per_font),
         query_sets_per_font=int(args.query_sets_per_font),
-        transform_query=clean_transform,
-        transform_gallery=clean_transform,
-        transform_consistency=clean_transform,
+        transform_query=resize_only_transform,
+        transform_gallery=resize_only_transform,
+        transform_consistency=resize_only_transform,
         seed=int(args.seed) + 11,
-        workers=int(args.workers),
-        prefetch_factor=int(args.prefetch_factor),
-        worker_torch_threads=int(args.worker_torch_threads),
-        decode_cache_size=int(args.decode_cache_size),
-    )
-    aug = run_trials(
-        encoder=encoder,
-        lmdb_path=lmdb_path,
-        fonts=val_fonts,
-        font_infos=font_infos,
-        ref_per_style=int(args.ref_per_style),
-        trials=int(args.trials),
-        batch_size=int(args.batch_size),
-        consistency_sets_per_font=int(args.consistency_sets_per_font),
-        gallery_sets_per_font=int(args.gallery_sets_per_font),
-        query_sets_per_font=int(args.query_sets_per_font),
-        transform_query=aug_transform,
-        transform_gallery=aug_transform,
-        transform_consistency=aug_transform,
-        seed=int(args.seed) + 97,
         workers=int(args.workers),
         prefetch_factor=int(args.prefetch_factor),
         worker_torch_threads=int(args.worker_torch_threads),
@@ -611,8 +567,8 @@ def main() -> None:
         "consistency_sets_per_font": int(args.consistency_sets_per_font),
         "gallery_sets_per_font": int(args.gallery_sets_per_font),
         "query_sets_per_font": int(args.query_sets_per_font),
-        "clean": clean["summary"],
-        "aug": aug["summary"],
+        "style_transform": "resize_only",
+        "resize_only": resize_only["summary"],
     }
     out_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(payload, ensure_ascii=False, indent=2))

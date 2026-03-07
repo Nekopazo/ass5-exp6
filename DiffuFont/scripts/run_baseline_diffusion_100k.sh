@@ -74,7 +74,7 @@ while true; do
     --detailed-log \
     --save-every-steps 5000 \
     --save-dir checkpoints/baseline_diffusion_100k \
-    --attn-scales 16,32
+    --attn-scales 16,32,64
   RC=$?
   set -e
 

@@ -70,9 +70,8 @@ while true; do
     --lambda-cons 0.0 \
     --lambda-div 0.0 \
     --style-nce-temp 0.07 \
-    --freeze-style-branch-steps 5000 \
     --style-ref-count 8 \
-    --style-token-count 8 \
+    --style-token-count 3 \
     --pretrained-style-encoder checkpoints/style_encoder_pretrain_best.pt \
     --num-workers 8 \
     --sample-every-steps 300 \
@@ -81,7 +80,7 @@ while true; do
     --detailed-log \
     --save-every-steps 5000 \
     --save-dir checkpoints/parts_only_diffusion_100k \
-    --attn-scales 16,32
+    --attn-scales 16,32,64
   RC=$?
   set -e
 

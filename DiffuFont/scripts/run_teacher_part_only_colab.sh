@@ -94,13 +94,12 @@ python -u train.py \
   --lambda-div 0.0 \
   --style-nce-temp 0.07 \
   --nce-warmup-steps 5000 \
-  --freeze-style-branch-steps 5000 \
   --num-workers 8 \
   --sample-every-steps 200 \
   --log-every-steps 100 \
   --save-every-steps 500 \
   --save-dir "${SAVE_DIR}" \
-  --attn-scales 16,32 \
+  --attn-scales 16,32,64 \
   "$@"
 
 echo "[teacher_part_only] done $(date '+%Y-%m-%d %H:%M:%S')"

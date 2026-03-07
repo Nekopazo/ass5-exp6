@@ -94,7 +94,7 @@ python -u train.py \
   --log-every-steps 50 \
   --save-every-steps 500 \
   --save-dir "${SAVE_DIR}" \
-  --attn-scales 16,32 \
+  --attn-scales 16,32,64 \
   "$@"
 
 echo "[teacher_baseline] done $(date '+%Y-%m-%d %H:%M:%S')"

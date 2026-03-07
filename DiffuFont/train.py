@@ -327,6 +327,9 @@ def main() -> None:
     parser.add_argument("--lambda-nce", type=float, default=0.0)
     parser.add_argument("--lambda-cons", type=float, default=0.0)
     parser.add_argument("--lambda-div", type=float, default=0.0)
+    parser.add_argument("--lambda-proxy-low", type=float, default=0.05)
+    parser.add_argument("--lambda-proxy-mid", type=float, default=0.05)
+    parser.add_argument("--lambda-proxy-high", type=float, default=0.05)
     parser.add_argument("--style-nce-temp", type=float, default=0.07)
     parser.add_argument("--nce-warmup-steps", type=int, default=0)
     parser.add_argument("--diffusion-steps", type=int, default=1000)
@@ -362,8 +365,8 @@ def main() -> None:
     parser.add_argument(
         "--attn-scales",
         type=str,
-        default="16,32",
-        help="Comma-separated resolutions where style attention is enabled, e.g. '32,64'. Empty means all scales.",
+        default="16,32,64",
+        help="Comma-separated resolutions where style attention is enabled on mid/up blocks.",
     )
 
     parser.add_argument("--style-ref-count", type=int, default=8)
@@ -388,30 +391,20 @@ def main() -> None:
         "--style-token-drop-prob",
         type=float,
         default=0.10,
-        help="Style token dropout probability in main training (1.md suggests 0.1).",
+        help="Per-sample probability of randomly dropping exactly one style token; keeps at least 2 tokens.",
     )
     parser.add_argument(
-        "--freeze-style-branch-steps",
+        "--freeze-style-backbone-steps",
         type=int,
-        default=1,
-        help="Legacy switch: >0 keeps style encoder + token layer frozen for full training.",
+        default=5000,
+        help="Freeze the style CNN backbone until this step, then unfreeze only high layers.",
     )
     parser.add_argument(
-        "--style-augment",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Enable style-image augmentation (crop+mask+affine) before resize to 128.",
+        "--style-backbone-lr-scale",
+        type=float,
+        default=0.1,
+        help="LR scale applied to unfrozen style backbone high layers.",
     )
-    parser.add_argument("--style-aug-canvas-size", type=int, default=256)
-    parser.add_argument("--style-aug-crop-min", type=float, default=0.6)
-    parser.add_argument("--style-aug-crop-max", type=float, default=0.9)
-    parser.add_argument("--style-aug-mask-prob", type=float, default=0.5)
-    parser.add_argument("--style-aug-mask-min", type=float, default=0.15)
-    parser.add_argument("--style-aug-mask-max", type=float, default=0.3)
-    parser.add_argument("--style-aug-affine-deg", type=float, default=5.0)
-    parser.add_argument("--style-aug-translate", type=float, default=0.05)
-    parser.add_argument("--style-aug-scale-min", type=float, default=1.0)
-    parser.add_argument("--style-aug-scale-max", type=float, default=1.0)
 
     parser.add_argument("--sample-every-steps", type=int, default=300)
     parser.add_argument("--sample-solver", type=str, default="dpm", choices=["dpm", "ddim"])
@@ -425,7 +418,7 @@ def main() -> None:
 
     parser.add_argument("--style-start-channel", type=int, default=16)
     parser.add_argument("--style-token-dim", type=int, default=256)
-    parser.add_argument("--style-token-count", type=int, default=8)
+    parser.add_argument("--style-token-count", type=int, default=3)
     parser.add_argument("--pretrained-style-encoder", type=str, default=None)
 
     parser.add_argument("--resume", type=str, default=None)
@@ -459,21 +452,7 @@ def main() -> None:
     )
 
     glyph_transform = build_base_glyph_transform(image_size=128)
-    style_aug_active = bool(use_style_image and args.style_augment)
-    style_transform = build_style_reference_transform(
-        image_size=128,
-        augment=style_aug_active,
-        pre_resize=int(args.style_aug_canvas_size),
-        crop_scale_min=float(args.style_aug_crop_min),
-        crop_scale_max=float(args.style_aug_crop_max),
-        mask_prob=float(args.style_aug_mask_prob),
-        mask_area_min=float(args.style_aug_mask_min),
-        mask_area_max=float(args.style_aug_mask_max),
-        affine_degrees=float(args.style_aug_affine_deg),
-        affine_translate=float(args.style_aug_translate),
-        affine_scale_min=float(args.style_aug_scale_min),
-        affine_scale_max=float(args.style_aug_scale_max),
-    )
+    style_transform = build_style_reference_transform(image_size=128)
 
     dataset = FontImageDataset(
         project_root=args.data_root,
@@ -490,7 +469,7 @@ def main() -> None:
     run_cfg.update(
         {
             "style_ref_count_active": int(args.style_ref_count) if use_style_image else 0,
-            "style_augment_active": bool(style_aug_active),
+            "style_transform": "resize_only",
             "cache_style_image": False,
             "style_ref_drop_prob_active": float(args.style_ref_drop_prob) if use_style_image else 0.0,
             "style_ref_drop_min_keep_active": int(args.style_ref_drop_min_keep) if use_style_image else 0,
@@ -627,6 +606,9 @@ def main() -> None:
         "lambda_nce": float(args.lambda_nce),
         "lambda_cons": float(args.lambda_cons),
         "lambda_div": float(args.lambda_div),
+        "lambda_proxy_low": float(args.lambda_proxy_low),
+        "lambda_proxy_mid": float(args.lambda_proxy_mid),
+        "lambda_proxy_high": float(args.lambda_proxy_high),
         "nce_temperature": float(args.style_nce_temp),
         "nce_warmup_steps": int(args.nce_warmup_steps),
         "T": args.diffusion_steps,
@@ -642,7 +624,8 @@ def main() -> None:
         "style_ref_drop_min_keep": int(args.style_ref_drop_min_keep) if use_style_image else 1,
         "style_token_drop_prob": float(args.style_token_drop_prob) if use_style_image else 0.0,
         "freeze_part_encoder_steps": 0,
-        "freeze_style_branch_steps": int(args.freeze_style_branch_steps) if use_style_image else 0,
+        "freeze_style_backbone_steps": int(args.freeze_style_backbone_steps) if use_style_image else 0,
+        "style_backbone_lr_scale": float(args.style_backbone_lr_scale),
     }
     if args.trainer == "flow_matching":
         trainer_kwargs["lambda_fm"] = args.lambda_fm
