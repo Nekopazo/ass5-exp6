@@ -8,7 +8,7 @@ LOG_FILE=""
 PID_FILE=""
 RESUME_CKPT=""
 SAVE_DIR_OVERRIDE=""
-PRETRAIN_STYLE_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/pretrain_sg3_scratch_b32_ref12_s5000_20260307_110449/style_encoder_pretrain.pt"
+PRETRAIN_STYLE_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/pretrain_style_only_site_dropout_20260308/style_encoder_pretrain.pt"
 DEVICE_ARG="cuda:1"
 
 while [[ $# -gt 0 ]]; do
@@ -109,11 +109,25 @@ python -u train.py \
   --total-steps "${TARGET_STEPS}" \
   --val-ratio 0.1 \
   --style-ref-count 12 \
+  --style-ref-drop-prob 0.15 \
+  --style-ref-drop-min-keep 4 \
+  --style-site-drop-prob 0.15 \
+  --style-site-drop-min-keep 1 \
+  --aux-loss-warmup-steps 5000 \
+  --lambda-slot-nce 0.02 \
+  --lambda-cons 0.0 \
+  --lambda-div 0.0 \
+  --lambda-proxy-low 0.05 \
+  --lambda-proxy-mid 0.05 \
+  --lambda-proxy-high 0.05 \
+  --lambda-attn-sep 0.02 \
+  --lambda-attn-order 0.0 \
+  --lambda-attn-role 0.01 \
   --pretrained-style-encoder "${PRETRAIN_STYLE_CKPT}" \
   --num-workers 8 \
   --sample-every-steps 300 \
   --log-every-steps 100 \
-  --save-every-steps 2000 \
+  --save-every-steps 3000 \
   --save-dir "${SAVE_DIR}" \
   "$@"
 

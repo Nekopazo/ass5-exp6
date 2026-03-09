@@ -1,0 +1,1282 @@
+{
+  "run_dir": "/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/teacher_style_only_20260308_054542",
+  "checkpoint": "/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/teacher_style_only_20260308_054542/ckpt_step_60000.pt",
+  "device": "cuda:1",
+  "split": "val",
+  "split_stats": {
+    "total_fonts": 137,
+    "train_fonts": 123,
+    "val_fonts": 14
+  },
+  "num_samples": 50,
+  "samples": [
+    {
+      "sample_name": "STXINGKA__挥",
+      "font": "STXINGKA",
+      "char": "挥",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.500143826007843,
+          "pixel_l1": 0.29099106788635254
+        },
+        "drop_mid": {
+          "pixel_mse": 0.5454609990119934,
+          "pixel_l1": 0.31379568576812744
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.5512148141860962,
+          "pixel_l1": 0.3146425485610962
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.5059071779251099,
+          "pixel_l1": 0.293219655752182
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/STXINGKA__挥.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/STXINGKA__挥.png"
+    },
+    {
+      "sample_name": "方正字迹-童体硬笔字体__谊",
+      "font": "方正字迹-童体硬笔字体",
+      "char": "谊",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.5281081199645996,
+          "pixel_l1": 0.29884350299835205
+        },
+        "drop_mid": {
+          "pixel_mse": 0.5072442293167114,
+          "pixel_l1": 0.2895563542842865
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.5380421876907349,
+          "pixel_l1": 0.3030802607536316
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.5142434239387512,
+          "pixel_l1": 0.2910054624080658
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正字迹-童体硬笔字体__谊.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正字迹-童体硬笔字体__谊.png"
+    },
+    {
+      "sample_name": "方正启笛简体__淫",
+      "font": "方正启笛简体",
+      "char": "淫",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.6378054022789001,
+          "pixel_l1": 0.35925984382629395
+        },
+        "drop_mid": {
+          "pixel_mse": 0.6185683012008667,
+          "pixel_l1": 0.34960809350013733
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.6083917021751404,
+          "pixel_l1": 0.3428901731967926
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6238760352134705,
+          "pixel_l1": 0.350257009267807
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正启笛简体__淫.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正启笛简体__淫.png"
+    },
+    {
+      "sample_name": "方正苏新诗柳楷简体__逾",
+      "font": "方正苏新诗柳楷简体",
+      "char": "逾",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.5757050514221191,
+          "pixel_l1": 0.34143710136413574
+        },
+        "drop_mid": {
+          "pixel_mse": 0.5978608131408691,
+          "pixel_l1": 0.35155990719795227
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.5743053555488586,
+          "pixel_l1": 0.3409211039543152
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.5903589725494385,
+          "pixel_l1": 0.348245769739151
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正苏新诗柳楷简体__逾.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正苏新诗柳楷简体__逾.png"
+    },
+    {
+      "sample_name": "方正字迹-童体硬笔字体__爬",
+      "font": "方正字迹-童体硬笔字体",
+      "char": "爬",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.45569488406181335,
+          "pixel_l1": 0.2564830183982849
+        },
+        "drop_mid": {
+          "pixel_mse": 0.4518652856349945,
+          "pixel_l1": 0.25501465797424316
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.44046735763549805,
+          "pixel_l1": 0.24988049268722534
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.4271923899650574,
+          "pixel_l1": 0.2446058988571167
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正字迹-童体硬笔字体__爬.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正字迹-童体硬笔字体__爬.png"
+    },
+    {
+      "sample_name": "方正少儿简体__憎",
+      "font": "方正少儿简体",
+      "char": "憎",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.6109592914581299,
+          "pixel_l1": 0.3575834035873413
+        },
+        "drop_mid": {
+          "pixel_mse": 0.6137911081314087,
+          "pixel_l1": 0.35967186093330383
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.603858470916748,
+          "pixel_l1": 0.35296905040740967
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6696515083312988,
+          "pixel_l1": 0.3868473470211029
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正少儿简体__憎.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正少儿简体__憎.png"
+    },
+    {
+      "sample_name": "方正平和简体__帘",
+      "font": "方正平和简体",
+      "char": "帘",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.800536572933197,
+          "pixel_l1": 0.4327777624130249
+        },
+        "drop_mid": {
+          "pixel_mse": 0.7376811504364014,
+          "pixel_l1": 0.39906787872314453
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.8314949870109558,
+          "pixel_l1": 0.44712960720062256
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.7826658487319946,
+          "pixel_l1": 0.42399126291275024
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正平和简体__帘.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正平和简体__帘.png"
+    },
+    {
+      "sample_name": "方正少儿简体__囊",
+      "font": "方正少儿简体",
+      "char": "囊",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.9480607509613037,
+          "pixel_l1": 0.5438370108604431
+        },
+        "drop_mid": {
+          "pixel_mse": 0.9583200216293335,
+          "pixel_l1": 0.5496335625648499
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.9277827739715576,
+          "pixel_l1": 0.5337269306182861
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.9388312101364136,
+          "pixel_l1": 0.5372163653373718
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正少儿简体__囊.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正少儿简体__囊.png"
+    },
+    {
+      "sample_name": "方正准圆简体__召",
+      "font": "方正准圆简体",
+      "char": "召",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.3518837094306946,
+          "pixel_l1": 0.21620717644691467
+        },
+        "drop_mid": {
+          "pixel_mse": 0.33717504143714905,
+          "pixel_l1": 0.20814965665340424
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.35943955183029175,
+          "pixel_l1": 0.21856631338596344
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.34361913800239563,
+          "pixel_l1": 0.21135981380939484
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正准圆简体__召.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正准圆简体__召.png"
+    },
+    {
+      "sample_name": "方正准圆简体__思",
+      "font": "方正准圆简体",
+      "char": "思",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.471628874540329,
+          "pixel_l1": 0.2995251417160034
+        },
+        "drop_mid": {
+          "pixel_mse": 0.44122666120529175,
+          "pixel_l1": 0.2883196771144867
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.34993690252304077,
+          "pixel_l1": 0.23908355832099915
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.4728633463382721,
+          "pixel_l1": 0.29974937438964844
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正准圆简体__思.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正准圆简体__思.png"
+    },
+    {
+      "sample_name": "方正少儿简体__里",
+      "font": "方正少儿简体",
+      "char": "里",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.512728750705719,
+          "pixel_l1": 0.30250123143196106
+        },
+        "drop_mid": {
+          "pixel_mse": 0.5822914838790894,
+          "pixel_l1": 0.3373485803604126
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.8907296657562256,
+          "pixel_l1": 0.4840972423553467
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6597463488578796,
+          "pixel_l1": 0.3741253912448883
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正少儿简体__里.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正少儿简体__里.png"
+    },
+    {
+      "sample_name": "方正字迹-童体硬笔字体__唧",
+      "font": "方正字迹-童体硬笔字体",
+      "char": "唧",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.6441052556037903,
+          "pixel_l1": 0.3566403090953827
+        },
+        "drop_mid": {
+          "pixel_mse": 0.6426540613174438,
+          "pixel_l1": 0.3569844663143158
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.6412073969841003,
+          "pixel_l1": 0.35476770997047424
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6106831431388855,
+          "pixel_l1": 0.33976322412490845
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正字迹-童体硬笔字体__唧.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正字迹-童体硬笔字体__唧.png"
+    },
+    {
+      "sample_name": "方正卡通简体__己",
+      "font": "方正卡通简体",
+      "char": "己",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.6544626951217651,
+          "pixel_l1": 0.34924015402793884
+        },
+        "drop_mid": {
+          "pixel_mse": 0.66599041223526,
+          "pixel_l1": 0.3540888726711273
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.4870401918888092,
+          "pixel_l1": 0.2643519341945648
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.623471200466156,
+          "pixel_l1": 0.33332887291908264
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正卡通简体__己.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正卡通简体__己.png"
+    },
+    {
+      "sample_name": "方正平和简体__灵",
+      "font": "方正平和简体",
+      "char": "灵",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.7287615537643433,
+          "pixel_l1": 0.4032684564590454
+        },
+        "drop_mid": {
+          "pixel_mse": 0.7101272344589233,
+          "pixel_l1": 0.3927994966506958
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.6443395614624023,
+          "pixel_l1": 0.3604752719402313
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.8053721189498901,
+          "pixel_l1": 0.4410804808139801
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正平和简体__灵.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正平和简体__灵.png"
+    },
+    {
+      "sample_name": "方正启笛简体__四",
+      "font": "方正启笛简体",
+      "char": "四",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.43124547600746155,
+          "pixel_l1": 0.23915153741836548
+        },
+        "drop_mid": {
+          "pixel_mse": 0.40339866280555725,
+          "pixel_l1": 0.22512857615947723
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.40657657384872437,
+          "pixel_l1": 0.227356418967247
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.38809704780578613,
+          "pixel_l1": 0.21701385080814362
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正启笛简体__四.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正启笛简体__四.png"
+    },
+    {
+      "sample_name": "方正粗宋简体__窗",
+      "font": "方正粗宋简体",
+      "char": "窗",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.6316853165626526,
+          "pixel_l1": 0.3745083212852478
+        },
+        "drop_mid": {
+          "pixel_mse": 0.7076303362846375,
+          "pixel_l1": 0.4137791395187378
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.5950305461883545,
+          "pixel_l1": 0.3592625856399536
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6477113366127014,
+          "pixel_l1": 0.3846467137336731
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正粗宋简体__窗.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正粗宋简体__窗.png"
+    },
+    {
+      "sample_name": "方正启笛简体__洛",
+      "font": "方正启笛简体",
+      "char": "洛",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.771668553352356,
+          "pixel_l1": 0.42088794708251953
+        },
+        "drop_mid": {
+          "pixel_mse": 0.7664370536804199,
+          "pixel_l1": 0.41800642013549805
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.734876275062561,
+          "pixel_l1": 0.40260985493659973
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.7293804287910461,
+          "pixel_l1": 0.39962702989578247
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正启笛简体__洛.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正启笛简体__洛.png"
+    },
+    {
+      "sample_name": "方正粗宋简体__大",
+      "font": "方正粗宋简体",
+      "char": "大",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.1884719878435135,
+          "pixel_l1": 0.131465882062912
+        },
+        "drop_mid": {
+          "pixel_mse": 0.18868792057037354,
+          "pixel_l1": 0.130814790725708
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.18309088051319122,
+          "pixel_l1": 0.1289224773645401
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.19407689571380615,
+          "pixel_l1": 0.13530537486076355
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正粗宋简体__大.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正粗宋简体__大.png"
+    },
+    {
+      "sample_name": "方正苏新诗柳楷简体__仓",
+      "font": "方正苏新诗柳楷简体",
+      "char": "仓",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.4436017572879791,
+          "pixel_l1": 0.26155567169189453
+        },
+        "drop_mid": {
+          "pixel_mse": 0.46041339635849,
+          "pixel_l1": 0.2700258791446686
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.4705941677093506,
+          "pixel_l1": 0.2742897570133209
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.43777814507484436,
+          "pixel_l1": 0.2580663561820984
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正苏新诗柳楷简体__仓.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正苏新诗柳楷简体__仓.png"
+    },
+    {
+      "sample_name": "方正隶变简体__私",
+      "font": "方正隶变简体",
+      "char": "私",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.5844767689704895,
+          "pixel_l1": 0.3221885859966278
+        },
+        "drop_mid": {
+          "pixel_mse": 0.5417090058326721,
+          "pixel_l1": 0.30039769411087036
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.5846956372261047,
+          "pixel_l1": 0.3200240731239319
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6057572960853577,
+          "pixel_l1": 0.3320781886577606
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正隶变简体__私.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正隶变简体__私.png"
+    },
+    {
+      "sample_name": "方正字迹-童体硬笔字体__收",
+      "font": "方正字迹-童体硬笔字体",
+      "char": "收",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.5256597995758057,
+          "pixel_l1": 0.29641422629356384
+        },
+        "drop_mid": {
+          "pixel_mse": 0.4715574085712433,
+          "pixel_l1": 0.26821303367614746
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.5683562159538269,
+          "pixel_l1": 0.3186476230621338
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.5219780802726746,
+          "pixel_l1": 0.294838547706604
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正字迹-童体硬笔字体__收.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正字迹-童体硬笔字体__收.png"
+    },
+    {
+      "sample_name": "方正楷体简体__会",
+      "font": "方正楷体简体",
+      "char": "会",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.32252970337867737,
+          "pixel_l1": 0.18951396644115448
+        },
+        "drop_mid": {
+          "pixel_mse": 0.32493355870246887,
+          "pixel_l1": 0.1908109486103058
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.2856677174568176,
+          "pixel_l1": 0.1704007387161255
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.3184363543987274,
+          "pixel_l1": 0.18717817962169647
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正楷体简体__会.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正楷体简体__会.png"
+    },
+    {
+      "sample_name": "方正楷体简体__伦",
+      "font": "方正楷体简体",
+      "char": "伦",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.39690732955932617,
+          "pixel_l1": 0.22832496464252472
+        },
+        "drop_mid": {
+          "pixel_mse": 0.3601474463939667,
+          "pixel_l1": 0.2118997722864151
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.31094852089881897,
+          "pixel_l1": 0.1847795844078064
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.40146955847740173,
+          "pixel_l1": 0.230136901140213
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正楷体简体__伦.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正楷体简体__伦.png"
+    },
+    {
+      "sample_name": "方正准雅宋简__固",
+      "font": "方正准雅宋简",
+      "char": "固",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.353541761636734,
+          "pixel_l1": 0.23091135919094086
+        },
+        "drop_mid": {
+          "pixel_mse": 0.3819397985935211,
+          "pixel_l1": 0.24516086280345917
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.3651573061943054,
+          "pixel_l1": 0.2374158501625061
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.3796464800834656,
+          "pixel_l1": 0.24856612086296082
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正准雅宋简__固.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正准雅宋简__固.png"
+    },
+    {
+      "sample_name": "方正平和简体__夕",
+      "font": "方正平和简体",
+      "char": "夕",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.5618287324905396,
+          "pixel_l1": 0.3055267333984375
+        },
+        "drop_mid": {
+          "pixel_mse": 0.6317492723464966,
+          "pixel_l1": 0.34016239643096924
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.6617031097412109,
+          "pixel_l1": 0.3562749922275543
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.5900055170059204,
+          "pixel_l1": 0.31938788294792175
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正平和简体__夕.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正平和简体__夕.png"
+    },
+    {
+      "sample_name": "方正启笛简体__翎",
+      "font": "方正启笛简体",
+      "char": "翎",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.677048921585083,
+          "pixel_l1": 0.376125305891037
+        },
+        "drop_mid": {
+          "pixel_mse": 0.6651179790496826,
+          "pixel_l1": 0.37034472823143005
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.7122210264205933,
+          "pixel_l1": 0.3933895528316498
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.7058097124099731,
+          "pixel_l1": 0.3917398452758789
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正启笛简体__翎.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正启笛简体__翎.png"
+    },
+    {
+      "sample_name": "方正启笛简体__距",
+      "font": "方正启笛简体",
+      "char": "距",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.6585164666175842,
+          "pixel_l1": 0.36869436502456665
+        },
+        "drop_mid": {
+          "pixel_mse": 0.5932170152664185,
+          "pixel_l1": 0.3359348773956299
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.6753273010253906,
+          "pixel_l1": 0.3778708279132843
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6810939908027649,
+          "pixel_l1": 0.37806081771850586
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正启笛简体__距.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正启笛简体__距.png"
+    },
+    {
+      "sample_name": "方正隶变简体__炒",
+      "font": "方正隶变简体",
+      "char": "炒",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.6544130444526672,
+          "pixel_l1": 0.3620572090148926
+        },
+        "drop_mid": {
+          "pixel_mse": 0.625980019569397,
+          "pixel_l1": 0.3441987633705139
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.6963678598403931,
+          "pixel_l1": 0.3805864155292511
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6720468401908875,
+          "pixel_l1": 0.37102851271629333
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正隶变简体__炒.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正隶变简体__炒.png"
+    },
+    {
+      "sample_name": "STXINGKA__讹",
+      "font": "STXINGKA",
+      "char": "讹",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.49642476439476013,
+          "pixel_l1": 0.29463717341423035
+        },
+        "drop_mid": {
+          "pixel_mse": 0.4953068792819977,
+          "pixel_l1": 0.29494136571884155
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.49599769711494446,
+          "pixel_l1": 0.2941359877586365
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.4587070047855377,
+          "pixel_l1": 0.27643030881881714
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/STXINGKA__讹.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/STXINGKA__讹.png"
+    },
+    {
+      "sample_name": "方正启笛简体__啊",
+      "font": "方正启笛简体",
+      "char": "啊",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.6150781512260437,
+          "pixel_l1": 0.34549954533576965
+        },
+        "drop_mid": {
+          "pixel_mse": 0.6094517111778259,
+          "pixel_l1": 0.34172242879867554
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.7044191360473633,
+          "pixel_l1": 0.38802438974380493
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6120094656944275,
+          "pixel_l1": 0.34390518069267273
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正启笛简体__啊.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正启笛简体__啊.png"
+    },
+    {
+      "sample_name": "方正卡通简体__恭",
+      "font": "方正卡通简体",
+      "char": "恭",
+      "metrics": {
+        "full": {
+          "pixel_mse": 1.0386217832565308,
+          "pixel_l1": 0.5580796003341675
+        },
+        "drop_mid": {
+          "pixel_mse": 1.0358126163482666,
+          "pixel_l1": 0.5571192502975464
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.8816934823989868,
+          "pixel_l1": 0.4784407913684845
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.956220269203186,
+          "pixel_l1": 0.5167455673217773
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正卡通简体__恭.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正卡通简体__恭.png"
+    },
+    {
+      "sample_name": "方正准雅宋简__定",
+      "font": "方正准雅宋简",
+      "char": "定",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.24443121254444122,
+          "pixel_l1": 0.16837289929389954
+        },
+        "drop_mid": {
+          "pixel_mse": 0.2317754626274109,
+          "pixel_l1": 0.15836142003536224
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.2957990765571594,
+          "pixel_l1": 0.1927202343940735
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.2402087152004242,
+          "pixel_l1": 0.1639849841594696
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正准雅宋简__定.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正准雅宋简__定.png"
+    },
+    {
+      "sample_name": "方正准雅宋简__摔",
+      "font": "方正准雅宋简",
+      "char": "摔",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.343240886926651,
+          "pixel_l1": 0.22882629930973053
+        },
+        "drop_mid": {
+          "pixel_mse": 0.38538339734077454,
+          "pixel_l1": 0.24798117578029633
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.3983495831489563,
+          "pixel_l1": 0.2565075159072876
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.4318981170654297,
+          "pixel_l1": 0.2738892734050751
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正准雅宋简__摔.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正准雅宋简__摔.png"
+    },
+    {
+      "sample_name": "方正平和简体__幻",
+      "font": "方正平和简体",
+      "char": "幻",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.7744649648666382,
+          "pixel_l1": 0.42487582564353943
+        },
+        "drop_mid": {
+          "pixel_mse": 0.75245201587677,
+          "pixel_l1": 0.411370187997818
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.7060832977294922,
+          "pixel_l1": 0.38916170597076416
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.73032546043396,
+          "pixel_l1": 0.4020293056964874
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正平和简体__幻.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正平和简体__幻.png"
+    },
+    {
+      "sample_name": "方正启笛简体__坤",
+      "font": "方正启笛简体",
+      "char": "坤",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.5843332409858704,
+          "pixel_l1": 0.31615394353866577
+        },
+        "drop_mid": {
+          "pixel_mse": 0.5657820701599121,
+          "pixel_l1": 0.30652350187301636
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.5808813571929932,
+          "pixel_l1": 0.31528446078300476
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.597588837146759,
+          "pixel_l1": 0.32302337884902954
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正启笛简体__坤.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正启笛简体__坤.png"
+    },
+    {
+      "sample_name": "方正准圆简体__刽",
+      "font": "方正准圆简体",
+      "char": "刽",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.6472958326339722,
+          "pixel_l1": 0.377050518989563
+        },
+        "drop_mid": {
+          "pixel_mse": 0.6407564878463745,
+          "pixel_l1": 0.3734331429004669
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.6703361868858337,
+          "pixel_l1": 0.38830628991127014
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6528435945510864,
+          "pixel_l1": 0.3798237442970276
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正准圆简体__刽.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正准圆简体__刽.png"
+    },
+    {
+      "sample_name": "方正准圆简体__码",
+      "font": "方正准圆简体",
+      "char": "码",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.45873475074768066,
+          "pixel_l1": 0.27396437525749207
+        },
+        "drop_mid": {
+          "pixel_mse": 0.46412190794944763,
+          "pixel_l1": 0.2768283188343048
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.4041607975959778,
+          "pixel_l1": 0.2446991354227066
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.4729757606983185,
+          "pixel_l1": 0.2817087471485138
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正准圆简体__码.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正准圆简体__码.png"
+    },
+    {
+      "sample_name": "方正粗宋简体__蔗",
+      "font": "方正粗宋简体",
+      "char": "蔗",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.36437952518463135,
+          "pixel_l1": 0.23400674760341644
+        },
+        "drop_mid": {
+          "pixel_mse": 0.34584152698516846,
+          "pixel_l1": 0.2225310355424881
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.35606271028518677,
+          "pixel_l1": 0.22915935516357422
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.3698885440826416,
+          "pixel_l1": 0.23778654634952545
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正粗宋简体__蔗.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正粗宋简体__蔗.png"
+    },
+    {
+      "sample_name": "方正苏新诗柳楷简体__咬",
+      "font": "方正苏新诗柳楷简体",
+      "char": "咬",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.5850636959075928,
+          "pixel_l1": 0.32574665546417236
+        },
+        "drop_mid": {
+          "pixel_mse": 0.5175689458847046,
+          "pixel_l1": 0.2921353280544281
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.606338620185852,
+          "pixel_l1": 0.3367328941822052
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.523963212966919,
+          "pixel_l1": 0.2951449453830719
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正苏新诗柳楷简体__咬.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正苏新诗柳楷简体__咬.png"
+    },
+    {
+      "sample_name": "方正小篆体__鹃",
+      "font": "方正小篆体",
+      "char": "鹃",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.745913565158844,
+          "pixel_l1": 0.42580312490463257
+        },
+        "drop_mid": {
+          "pixel_mse": 0.7353718876838684,
+          "pixel_l1": 0.41843584179878235
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.8495827913284302,
+          "pixel_l1": 0.4754623770713806
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.7128036618232727,
+          "pixel_l1": 0.4081358313560486
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正小篆体__鹃.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正小篆体__鹃.png"
+    },
+    {
+      "sample_name": "方正粗宋简体__悦",
+      "font": "方正粗宋简体",
+      "char": "悦",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.46030232310295105,
+          "pixel_l1": 0.27291956543922424
+        },
+        "drop_mid": {
+          "pixel_mse": 0.4511902630329132,
+          "pixel_l1": 0.2658904492855072
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.4525609016418457,
+          "pixel_l1": 0.2704869508743286
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.4715804159641266,
+          "pixel_l1": 0.27909165620803833
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正粗宋简体__悦.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正粗宋简体__悦.png"
+    },
+    {
+      "sample_name": "方正准圆简体__单",
+      "font": "方正准圆简体",
+      "char": "单",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.6231764554977417,
+          "pixel_l1": 0.35546183586120605
+        },
+        "drop_mid": {
+          "pixel_mse": 0.6763485670089722,
+          "pixel_l1": 0.3841555714607239
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.5859367847442627,
+          "pixel_l1": 0.33607783913612366
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6307458281517029,
+          "pixel_l1": 0.35869497060775757
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正准圆简体__单.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正准圆简体__单.png"
+    },
+    {
+      "sample_name": "方正楷体简体__当",
+      "font": "方正楷体简体",
+      "char": "当",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.4428688883781433,
+          "pixel_l1": 0.24741941690444946
+        },
+        "drop_mid": {
+          "pixel_mse": 0.44909462332725525,
+          "pixel_l1": 0.25030240416526794
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.41101571917533875,
+          "pixel_l1": 0.23162740468978882
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.4428353011608124,
+          "pixel_l1": 0.2472086250782013
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正楷体简体__当.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正楷体简体__当.png"
+    },
+    {
+      "sample_name": "方正少儿简体__芋",
+      "font": "方正少儿简体",
+      "char": "芋",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.41640615463256836,
+          "pixel_l1": 0.24251464009284973
+        },
+        "drop_mid": {
+          "pixel_mse": 0.3439791202545166,
+          "pixel_l1": 0.2106671929359436
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.4606328010559082,
+          "pixel_l1": 0.266072154045105
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.4181830883026123,
+          "pixel_l1": 0.246581569314003
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正少儿简体__芋.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正少儿简体__芋.png"
+    },
+    {
+      "sample_name": "方正粗宋简体__支",
+      "font": "方正粗宋简体",
+      "char": "支",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.257466584444046,
+          "pixel_l1": 0.1789664477109909
+        },
+        "drop_mid": {
+          "pixel_mse": 0.2543533444404602,
+          "pixel_l1": 0.18068605661392212
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.2663109302520752,
+          "pixel_l1": 0.18289977312088013
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.27324753999710083,
+          "pixel_l1": 0.18637515604496002
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正粗宋简体__支.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正粗宋简体__支.png"
+    },
+    {
+      "sample_name": "方正粗宋简体__党",
+      "font": "方正粗宋简体",
+      "char": "党",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.4811728298664093,
+          "pixel_l1": 0.2902962565422058
+        },
+        "drop_mid": {
+          "pixel_mse": 0.472152978181839,
+          "pixel_l1": 0.2851755917072296
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.47731688618659973,
+          "pixel_l1": 0.2864803373813629
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.4794381260871887,
+          "pixel_l1": 0.2889766991138458
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正粗宋简体__党.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正粗宋简体__党.png"
+    },
+    {
+      "sample_name": "方正启笛简体__既",
+      "font": "方正启笛简体",
+      "char": "既",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.6445072293281555,
+          "pixel_l1": 0.3557896614074707
+        },
+        "drop_mid": {
+          "pixel_mse": 0.6270723938941956,
+          "pixel_l1": 0.3477764129638672
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.6729212403297424,
+          "pixel_l1": 0.36866849660873413
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6442294120788574,
+          "pixel_l1": 0.3569093346595764
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正启笛简体__既.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正启笛简体__既.png"
+    },
+    {
+      "sample_name": "方正启笛简体__煮",
+      "font": "方正启笛简体",
+      "char": "煮",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.5326807498931885,
+          "pixel_l1": 0.30295729637145996
+        },
+        "drop_mid": {
+          "pixel_mse": 0.5222944021224976,
+          "pixel_l1": 0.29791563749313354
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.5415255427360535,
+          "pixel_l1": 0.30875298380851746
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.5187856554985046,
+          "pixel_l1": 0.29635003209114075
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正启笛简体__煮.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正启笛简体__煮.png"
+    },
+    {
+      "sample_name": "方正准雅宋简__入",
+      "font": "方正准雅宋简",
+      "char": "入",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.3306520879268646,
+          "pixel_l1": 0.18376044929027557
+        },
+        "drop_mid": {
+          "pixel_mse": 0.3494035601615906,
+          "pixel_l1": 0.19323588907718658
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.35200661420822144,
+          "pixel_l1": 0.19398319721221924
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.33041125535964966,
+          "pixel_l1": 0.18386007845401764
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正准雅宋简__入.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正准雅宋简__入.png"
+    },
+    {
+      "sample_name": "方正字迹-童体硬笔字体__蹲",
+      "font": "方正字迹-童体硬笔字体",
+      "char": "蹲",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.8000907897949219,
+          "pixel_l1": 0.4490729868412018
+        },
+        "drop_mid": {
+          "pixel_mse": 0.7995151877403259,
+          "pixel_l1": 0.44921866059303284
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.7604219913482666,
+          "pixel_l1": 0.4308527112007141
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.7200609445571899,
+          "pixel_l1": 0.41212114691734314
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/heatmaps/方正字迹-童体硬笔字体__蹲.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260309_random50/generations/方正字迹-童体硬笔字体__蹲.png"
+    }
+  ],
+  "aggregate_metrics": {
+    "full": {
+      "pixel_mse": 0.5501897364854813,
+      "pixel_l1": 0.31536193042993543
+    },
+    "drop_mid": {
+      "pixel_mse": 0.5451641005277633,
+      "pixel_l1": 0.3127376699447632
+    },
+    "drop_up_16": {
+      "pixel_mse": 0.5525843641161918,
+      "pixel_l1": 0.3160589987039566
+    },
+    "drop_up_32": {
+      "pixel_mse": 0.5506143951416016,
+      "pixel_l1": 0.31562494665384294
+    }
+  }
+}

@@ -202,7 +202,7 @@ class DiffusionTrainer:
         lambda_attn_order: float = 0.0,
         lambda_attn_role: float = 0.0,
         nce_temperature: float = 0.07,
-        nce_warmup_steps: int = 0,
+        aux_loss_warmup_steps: int = 0,
         attn_overlap_margin: float = 0.80,
         attn_entropy_gap: float = 0.03,
         T: int = 1000,
@@ -217,6 +217,8 @@ class DiffusionTrainer:
         part_drop_prob: float = 0.0,
         style_ref_drop_prob: float = 0.0,
         style_ref_drop_min_keep: int = 1,
+        style_site_drop_prob: float = 0.0,
+        style_site_drop_min_keep: int = 1,
         freeze_part_encoder_steps: int = 0,
         freeze_style_backbone_steps: int = 0,
         style_backbone_lr_scale: float = 0.1,
@@ -228,6 +230,13 @@ class DiffusionTrainer:
         self.part_drop_prob = float(max(0.0, min(1.0, part_drop_prob)))
         self.style_ref_drop_prob = float(max(0.0, min(1.0, style_ref_drop_prob)))
         self.style_ref_drop_min_keep = max(1, int(style_ref_drop_min_keep))
+        self.style_site_drop_prob = float(max(0.0, min(1.0, style_site_drop_prob)))
+        self.style_site_drop_min_keep = max(1, int(style_site_drop_min_keep))
+        if hasattr(self.model, "set_style_site_dropout"):
+            self.model.set_style_site_dropout(
+                prob=self.style_site_drop_prob,
+                min_keep=self.style_site_drop_min_keep,
+            )
 
         self.grad_accum_steps = max(1, int(grad_accum_steps))
         self._accum_step = 0
@@ -238,14 +247,17 @@ class DiffusionTrainer:
         self._style_backbone_low_is_frozen = False
         self._style_backbone_high_is_frozen = False
 
+        low_params = list(self._iter_style_backbone_low_params())
+        low_param_ids = {id(p) for p in low_params}
         high_params = list(self._iter_style_backbone_high_params())
-        high_param_ids = {id(p) for p in high_params}
-        main_params = [p for p in self.model.parameters() if id(p) not in high_param_ids]
-        if high_params:
+        style_backbone_params = list(low_params) + [p for p in high_params if id(p) not in low_param_ids]
+        style_backbone_param_ids = {id(p) for p in style_backbone_params}
+        main_params = [p for p in self.model.parameters() if id(p) not in style_backbone_param_ids]
+        if style_backbone_params:
             self.opt = torch.optim.AdamW(
                 [
                     {"params": main_params, "lr": lr},
-                    {"params": high_params, "lr": lr * self.style_backbone_lr_scale},
+                    {"params": style_backbone_params, "lr": lr * self.style_backbone_lr_scale},
                 ],
                 weight_decay=1e-4,
             )
@@ -259,7 +271,11 @@ class DiffusionTrainer:
         # OneCycleLR — per-step, built-in warmup + cosine annealing.
         self.lr_schedule = torch.optim.lr_scheduler.OneCycleLR(
             self.opt,
-            max_lr=lr,
+            max_lr=(
+                [lr, lr * self.style_backbone_lr_scale]
+                if len(self.opt.param_groups) > 1
+                else lr
+            ),
             total_steps=self.total_steps,
             pct_start=0.05,          # 5 % warmup (~5k steps for 100k total)
             anneal_strategy="cos",
@@ -280,7 +296,7 @@ class DiffusionTrainer:
         self.lambda_attn_order = float(lambda_attn_order)
         self.lambda_attn_role = float(lambda_attn_role)
         self.nce_temperature = float(nce_temperature)
-        self.nce_warmup_steps = max(0, int(nce_warmup_steps))
+        self.aux_loss_warmup_steps = max(0, int(aux_loss_warmup_steps))
         self.attn_overlap_margin = float(attn_overlap_margin)
         self.attn_entropy_gap = float(attn_entropy_gap)
         self.global_step = 0
@@ -360,7 +376,7 @@ class DiffusionTrainer:
                 print(
                     "[trainer] froze style backbone "
                     f"low_params={frozen_low} high_params={frozen_high} "
-                    f"until global_step>={self.freeze_style_backbone_steps} (high only unfreezes)",
+                    f"until global_step>={self.freeze_style_backbone_steps} (fully unfreezes)",
                     flush=True,
                 )
 
@@ -422,16 +438,23 @@ class DiffusionTrainer:
 
     def _maybe_unfreeze_style_backbone(self) -> None:
         if self._style_backbone_low_is_frozen or self._style_backbone_high_is_frozen:
+            low_training = not self._style_backbone_low_is_frozen
             high_training = not self._style_backbone_high_is_frozen
-            self._set_style_backbone_modules_train_mode(low_training=False, high_training=high_training)
+            self._set_style_backbone_modules_train_mode(low_training=low_training, high_training=high_training)
 
-        if self._style_backbone_high_is_frozen and self.global_step >= self.freeze_style_backbone_steps:
-            unfrozen = self._set_style_backbone_high_requires_grad(True)
+        if (
+            (self._style_backbone_low_is_frozen or self._style_backbone_high_is_frozen)
+            and self.global_step >= self.freeze_style_backbone_steps
+        ):
+            unfrozen_low = self._set_style_backbone_low_requires_grad(True) if self._style_backbone_low_is_frozen else 0
+            unfrozen_high = self._set_style_backbone_high_requires_grad(True) if self._style_backbone_high_is_frozen else 0
+            self._style_backbone_low_is_frozen = False
             self._style_backbone_high_is_frozen = False
-            self._set_style_backbone_modules_train_mode(low_training=False, high_training=True)
+            self._set_style_backbone_modules_train_mode(low_training=True, high_training=True)
             print(
-                f"[trainer] unfroze style backbone high layers at global_step={self.global_step} "
-                f"(params={unfrozen}, lr_scale={self.style_backbone_lr_scale:g})",
+                f"[trainer] unfroze full style backbone at global_step={self.global_step} "
+                f"(low_params={unfrozen_low}, high_params={unfrozen_high}, "
+                f"style_backbone_lr_scale={self.style_backbone_lr_scale:g})",
                 flush=True,
             )
 
@@ -442,10 +465,8 @@ class DiffusionTrainer:
         }
 
     def _style_backbone_phase(self) -> str:
-        if self._style_backbone_high_is_frozen:
+        if self._style_backbone_low_is_frozen or self._style_backbone_high_is_frozen:
             return "freeze_all"
-        if self._style_backbone_low_is_frozen:
-            return "low_frozen_high_tune"
         return "fully_trainable"
 
     # ------------------------------------------------------------------ #
@@ -528,36 +549,16 @@ class DiffusionTrainer:
         with self.step_log_file.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    def _prepare_attention_logging(self) -> bool:
-        # Attention logging is disabled globally to avoid training-step OOMs
-        # from explicit attention-probability materialization on large maps.
-        if hasattr(self.model, "set_attention_logging"):
-            self.model.set_attention_logging(False)
-        return False
-
-    def _finalize_attention_logging(self, enabled: bool) -> Dict[str, float]:
-        out: Dict[str, float] = {}
-        if not enabled:
-            if hasattr(self.model, "set_attention_logging"):
-                self.model.set_attention_logging(False)
-            return out
-        if hasattr(self.model, "collect_attention_logging"):
-            try:
-                out = {
-                    k: float(v) for k, v in self.model.collect_attention_logging().items()
-                }
-            except Exception:
-                out = {}
-        if hasattr(self.model, "set_attention_logging"):
-            self.model.set_attention_logging(False)
-        return out
+    def _set_style_site_force_keep(self, keep_sites: tuple[str, ...] | None) -> None:
+        if hasattr(self.model, "set_style_site_force_keep"):
+            self.model.set_style_site_force_keep(keep_sites)
 
     @property
-    def effective_lambda_nce(self) -> float:
-        """Lambda_nce with linear warmup: 0 → lambda_nce over nce_warmup_steps steps."""
-        if self.nce_warmup_steps <= 0 or self.lambda_nce <= 0.0:
-            return self.lambda_nce
-        return self.lambda_nce * min(1.0, self.global_step / self.nce_warmup_steps)
+    def effective_aux_loss_scale(self) -> float:
+        """Shared linear warmup scale for all auxiliary losses except the main reconstruction loss."""
+        if self.aux_loss_warmup_steps <= 0:
+            return 1.0
+        return min(1.0, self.global_step / self.aux_loss_warmup_steps)
 
     @staticmethod
     def _mode_uses_parts(mode: str) -> bool:
@@ -799,7 +800,6 @@ class DiffusionTrainer:
         self.model.train()
         self._maybe_unfreeze_part_encoder()
         self._maybe_unfreeze_style_backbone()
-        attn_log_enabled = self._prepare_attention_logging()
         x0 = batch["target"].to(self.device)
         content = batch["content"].to(self.device)
         style_img, style_ref_mask = self._select_style_view(batch)
@@ -866,41 +866,52 @@ class DiffusionTrainer:
             cos_same = style_losses["cos_same"]
             cos_diff = style_losses["cos_diff"]
             token_collapse = style_losses["token_collapse"]
-            eff_lnce = self.effective_lambda_nce
+            eff_aux = self.effective_aux_loss_scale
+            eff_lnce = eff_aux * self.lambda_nce
+            eff_lslot = eff_aux * self.lambda_slot_nce
+            eff_lcons = eff_aux * self.lambda_cons
+            eff_ldiv = eff_aux * self.lambda_div
+            eff_lproxy_low = eff_aux * self.lambda_proxy_low
+            eff_lproxy_mid = eff_aux * self.lambda_proxy_mid
+            eff_lproxy_high = eff_aux * self.lambda_proxy_high
+            eff_lattn_sep = eff_aux * self.lambda_attn_sep
+            eff_lattn_order = eff_aux * self.lambda_attn_order
+            eff_lattn_role = eff_aux * self.lambda_attn_role
             loss = (
                 self.lambda_mse * loss_mse
                 + eff_lnce * loss_nce
-                + self.lambda_slot_nce * loss_slot_nce
-                + self.lambda_cons * loss_cons
-                + self.lambda_div * loss_div
-                + self.lambda_proxy_low * loss_proxy_low
-                + self.lambda_proxy_mid * loss_proxy_mid
-                + self.lambda_proxy_high * loss_proxy_high
-                + self.lambda_attn_sep * loss_attn_sep
-                + self.lambda_attn_order * loss_attn_order
-                + self.lambda_attn_role * loss_attn_role
+                + eff_lslot * loss_slot_nce
+                + eff_lcons * loss_cons
+                + eff_ldiv * loss_div
+                + eff_lproxy_low * loss_proxy_low
+                + eff_lproxy_mid * loss_proxy_mid
+                + eff_lproxy_high * loss_proxy_high
+                + eff_lattn_sep * loss_attn_sep
+                + eff_lattn_order * loss_attn_order
+                + eff_lattn_role * loss_attn_role
             )
 
         counterfactual_stats: Dict[str, float] = {}
-        if (
-            attn_log_enabled
-            and style_img is not None
-            and part_imgs is not None
-            and self._mode_uses_parts(self.conditioning_mode)
-            and self._mode_uses_style(self.conditioning_mode)
-        ):
+        should_log_counterfactual = bool(
+            self.log_every_steps and ((self.global_step + 1) % self.log_every_steps == 0)
+        )
+        if should_log_counterfactual and style_img is not None and self._mode_uses_style(self.conditioning_mode):
             with torch.no_grad(), torch.autocast(
                 device_type=self.device.type,
                 dtype=self.amp_dtype,
                 enabled=self.use_amp,
             ):
-                eps_hat_part_only = self.model(
-                    x_t_latent, t, content,
-                    style_img=None,
-                    part_imgs=part_imgs,
-                    part_mask=part_mask,
-                    condition_mode="part_only",
-                )
+                if part_imgs is not None and self._mode_uses_parts(self.conditioning_mode):
+                    eps_hat_part_only = self.model(
+                        x_t_latent, t, content,
+                        style_img=None,
+                        part_imgs=part_imgs,
+                        part_mask=part_mask,
+                        condition_mode="part_only",
+                    )
+                    cf_loss_part_only = F.mse_loss(eps_hat_part_only, eps_latent)
+                else:
+                    cf_loss_part_only = loss_mse.detach()
                 eps_hat_style_only = self.model(
                     x_t_latent, t, content,
                     style_img=style_img,
@@ -909,8 +920,27 @@ class DiffusionTrainer:
                     condition_mode="style_only",
                     style_ref_mask=style_ref_mask,
                 )
-                cf_loss_part_only = F.mse_loss(eps_hat_part_only, eps_latent)
                 cf_loss_style_only = F.mse_loss(eps_hat_style_only, eps_latent)
+                solo_site_losses: Dict[str, float] = {}
+                if self.conditioning_mode == "style_only" and hasattr(self.model, "set_style_site_force_keep"):
+                    try:
+                        for site_name, stat_key in (
+                            ("mid", "cf_loss_style_mid_only"),
+                            ("up_16", "cf_loss_style_up16_only"),
+                            ("up_32", "cf_loss_style_up32_only"),
+                        ):
+                            self._set_style_site_force_keep((site_name,))
+                            eps_hat_solo = self.model(
+                                x_t_latent, t, content,
+                                style_img=style_img,
+                                part_imgs=None,
+                                part_mask=None,
+                                condition_mode="style_only",
+                                style_ref_mask=style_ref_mask,
+                            )
+                            solo_site_losses[stat_key] = float(F.mse_loss(eps_hat_solo, eps_latent).item())
+                    finally:
+                        self._set_style_site_force_keep(None)
             base = float(loss_mse.detach().item())
             lp = float(cf_loss_part_only.item())
             ls = float(cf_loss_style_only.item())
@@ -923,10 +953,13 @@ class DiffusionTrainer:
                 # Remove-part effect: compare both vs style_only.
                 "cf_delta_drop_part": ls - base,
             }
+            counterfactual_stats.update(solo_site_losses)
+            if solo_site_losses:
+                counterfactual_stats["cf_delta_style_mid_only"] = solo_site_losses["cf_loss_style_mid_only"] - base
+                counterfactual_stats["cf_delta_style_up16_only"] = solo_site_losses["cf_loss_style_up16_only"] - base
+                counterfactual_stats["cf_delta_style_up32_only"] = solo_site_losses["cf_loss_style_up32_only"] - base
 
         did_update, grad_norm = self._do_optimizer_update(loss, grad_clip)
-        attn_stats = self._finalize_attention_logging(attn_log_enabled)
-
         # For micro-steps (not yet an optimizer update), return early with metrics
         if not did_update:
             out = {
@@ -957,7 +990,6 @@ class DiffusionTrainer:
                 "train_time": float(time.perf_counter() - _train_t0),
             }
             out.update(self._style_backbone_status())
-            out.update(attn_stats)
             out.update(counterfactual_stats)
             return out
 
@@ -1034,7 +1066,6 @@ class DiffusionTrainer:
             log_row.update(self._style_backbone_status())
             if grad_norm is not None:
                 log_row["grad_norm"] = float(grad_norm)
-            log_row.update(attn_stats)
             log_row.update(counterfactual_stats)
             self._write_step_log(log_row)
 
@@ -1050,28 +1081,24 @@ class DiffusionTrainer:
                 f"H=({attn_entropy_low.item():.3f},{attn_entropy_mid.item():.3f},{attn_entropy_high.item():.3f}) "
                 f"cos_same={cos_same.item():.4f} "
                 f"cos_diff={cos_diff.item():.4f} tok_coll={token_collapse.item():.4f} "
-                f"λnce={eff_lnce:.4f} λslot={self.lambda_slot_nce:.4f} "
+                f"λnce={eff_lnce:.4f} λslot={eff_lslot:.4f} λaux={eff_aux:.4f} "
                 f"lr={self.lr_schedule.get_last_lr()[0]:.6e} "
                 f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s "
                 f"style_bb={self._style_backbone_phase()}"
             )
             if grad_norm is not None:
                 msg += f" gnorm={grad_norm:.4f}"
-            if (
-                "tok_imp_low" in attn_stats
-                and "tok_imp_mid" in attn_stats
-                and "tok_imp_high" in attn_stats
-            ):
-                msg += (
-                    f" tok_imp=({attn_stats['tok_imp_low']:.3f},"
-                    f"{attn_stats['tok_imp_mid']:.3f},"
-                    f"{attn_stats['tok_imp_high']:.3f})"
-                )
             if counterfactual_stats:
                 msg += (
                     f" cf_drop_part={counterfactual_stats['cf_delta_drop_part']:.4f}"
                     f" cf_drop_style={counterfactual_stats['cf_delta_drop_style']:.4f}"
                 )
+                if "cf_delta_style_mid_only" in counterfactual_stats:
+                    msg += (
+                        f" cf_solo=(mid:{counterfactual_stats['cf_delta_style_mid_only']:.4f},"
+                        f"u16:{counterfactual_stats['cf_delta_style_up16_only']:.4f},"
+                        f"u32:{counterfactual_stats['cf_delta_style_up32_only']:.4f})"
+                    )
             print(msg, flush=True)
 
         out = {
@@ -1102,7 +1129,6 @@ class DiffusionTrainer:
             "train_time": float(self._step_train_time),
         }
         out.update(self._style_backbone_status())
-        out.update(attn_stats)
         out.update(counterfactual_stats)
         return out
 
@@ -1433,7 +1459,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
         lambda_attn_order: float = 0.0,
         lambda_attn_role: float = 0.0,
         nce_temperature: float = 0.07,
-        nce_warmup_steps: int = 0,
+        aux_loss_warmup_steps: int = 0,
         attn_overlap_margin: float = 0.80,
         attn_entropy_gap: float = 0.03,
         T: int = 1000,
@@ -1448,6 +1474,8 @@ class FlowMatchingTrainer(DiffusionTrainer):
         part_drop_prob: float = 0.0,
         style_ref_drop_prob: float = 0.0,
         style_ref_drop_min_keep: int = 1,
+        style_site_drop_prob: float = 0.0,
+        style_site_drop_min_keep: int = 1,
         freeze_part_encoder_steps: int = 0,
         freeze_style_backbone_steps: int = 0,
         style_backbone_lr_scale: float = 0.1,
@@ -1466,7 +1494,8 @@ class FlowMatchingTrainer(DiffusionTrainer):
             lambda_attn_sep=lambda_attn_sep,
             lambda_attn_order=lambda_attn_order,
             lambda_attn_role=lambda_attn_role,
-            nce_temperature=nce_temperature, nce_warmup_steps=nce_warmup_steps,
+            nce_temperature=nce_temperature,
+            aux_loss_warmup_steps=aux_loss_warmup_steps,
             attn_overlap_margin=attn_overlap_margin,
             attn_entropy_gap=attn_entropy_gap,
             T=T, total_steps=total_steps,
@@ -1478,6 +1507,8 @@ class FlowMatchingTrainer(DiffusionTrainer):
             part_drop_prob=part_drop_prob,
             style_ref_drop_prob=style_ref_drop_prob,
             style_ref_drop_min_keep=style_ref_drop_min_keep,
+            style_site_drop_prob=style_site_drop_prob,
+            style_site_drop_min_keep=style_site_drop_min_keep,
             freeze_part_encoder_steps=freeze_part_encoder_steps,
             freeze_style_backbone_steps=freeze_style_backbone_steps,
             style_backbone_lr_scale=style_backbone_lr_scale,
@@ -1503,7 +1534,6 @@ class FlowMatchingTrainer(DiffusionTrainer):
         self.model.train()
         self._maybe_unfreeze_part_encoder()
         self._maybe_unfreeze_style_backbone()
-        attn_log_enabled = self._prepare_attention_logging()
         x0 = batch["target"].to(self.device)
         content = batch["content"].to(self.device)
         style_img, style_ref_mask = self._select_style_view(batch)
@@ -1574,41 +1604,52 @@ class FlowMatchingTrainer(DiffusionTrainer):
             cos_same = style_losses["cos_same"]
             cos_diff = style_losses["cos_diff"]
             token_collapse = style_losses["token_collapse"]
-            eff_lnce = self.effective_lambda_nce
+            eff_aux = self.effective_aux_loss_scale
+            eff_lnce = eff_aux * self.lambda_nce
+            eff_lslot = eff_aux * self.lambda_slot_nce
+            eff_lcons = eff_aux * self.lambda_cons
+            eff_ldiv = eff_aux * self.lambda_div
+            eff_lproxy_low = eff_aux * self.lambda_proxy_low
+            eff_lproxy_mid = eff_aux * self.lambda_proxy_mid
+            eff_lproxy_high = eff_aux * self.lambda_proxy_high
+            eff_lattn_sep = eff_aux * self.lambda_attn_sep
+            eff_lattn_order = eff_aux * self.lambda_attn_order
+            eff_lattn_role = eff_aux * self.lambda_attn_role
             loss = (
                 self.lambda_fm * loss_fm
                 + eff_lnce * loss_nce
-                + self.lambda_slot_nce * loss_slot_nce
-                + self.lambda_cons * loss_cons
-                + self.lambda_div * loss_div
-                + self.lambda_proxy_low * loss_proxy_low
-                + self.lambda_proxy_mid * loss_proxy_mid
-                + self.lambda_proxy_high * loss_proxy_high
-                + self.lambda_attn_sep * loss_attn_sep
-                + self.lambda_attn_order * loss_attn_order
-                + self.lambda_attn_role * loss_attn_role
+                + eff_lslot * loss_slot_nce
+                + eff_lcons * loss_cons
+                + eff_ldiv * loss_div
+                + eff_lproxy_low * loss_proxy_low
+                + eff_lproxy_mid * loss_proxy_mid
+                + eff_lproxy_high * loss_proxy_high
+                + eff_lattn_sep * loss_attn_sep
+                + eff_lattn_order * loss_attn_order
+                + eff_lattn_role * loss_attn_role
             )
 
         counterfactual_stats: Dict[str, float] = {}
-        if (
-            attn_log_enabled
-            and style_img is not None
-            and part_imgs is not None
-            and self._mode_uses_parts(self.conditioning_mode)
-            and self._mode_uses_style(self.conditioning_mode)
-        ):
+        should_log_counterfactual = bool(
+            self.log_every_steps and ((self.global_step + 1) % self.log_every_steps == 0)
+        )
+        if should_log_counterfactual and style_img is not None and self._mode_uses_style(self.conditioning_mode):
             with torch.no_grad(), torch.autocast(
                 device_type=self.device.type,
                 dtype=self.amp_dtype,
                 enabled=self.use_amp,
             ):
-                v_hat_part_only = self.model(
-                    x_t_latent, t_idx, content,
-                    style_img=None,
-                    part_imgs=part_imgs,
-                    part_mask=part_mask,
-                    condition_mode="part_only",
-                )
+                if part_imgs is not None and self._mode_uses_parts(self.conditioning_mode):
+                    v_hat_part_only = self.model(
+                        x_t_latent, t_idx, content,
+                        style_img=None,
+                        part_imgs=part_imgs,
+                        part_mask=part_mask,
+                        condition_mode="part_only",
+                    )
+                    cf_loss_part_only = F.mse_loss(v_hat_part_only, v_target)
+                else:
+                    cf_loss_part_only = loss_fm.detach()
                 v_hat_style_only = self.model(
                     x_t_latent, t_idx, content,
                     style_img=style_img,
@@ -1617,8 +1658,27 @@ class FlowMatchingTrainer(DiffusionTrainer):
                     condition_mode="style_only",
                     style_ref_mask=style_ref_mask,
                 )
-                cf_loss_part_only = F.mse_loss(v_hat_part_only, v_target)
                 cf_loss_style_only = F.mse_loss(v_hat_style_only, v_target)
+                solo_site_losses: Dict[str, float] = {}
+                if self.conditioning_mode == "style_only" and hasattr(self.model, "set_style_site_force_keep"):
+                    try:
+                        for site_name, stat_key in (
+                            ("mid", "cf_loss_style_mid_only"),
+                            ("up_16", "cf_loss_style_up16_only"),
+                            ("up_32", "cf_loss_style_up32_only"),
+                        ):
+                            self._set_style_site_force_keep((site_name,))
+                            v_hat_solo = self.model(
+                                x_t_latent, t_idx, content,
+                                style_img=style_img,
+                                part_imgs=None,
+                                part_mask=None,
+                                condition_mode="style_only",
+                                style_ref_mask=style_ref_mask,
+                            )
+                            solo_site_losses[stat_key] = float(F.mse_loss(v_hat_solo, v_target).item())
+                    finally:
+                        self._set_style_site_force_keep(None)
             base = float(loss_fm.detach().item())
             lp = float(cf_loss_part_only.item())
             ls = float(cf_loss_style_only.item())
@@ -1629,10 +1689,13 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 "cf_delta_drop_style": lp - base,
                 "cf_delta_drop_part": ls - base,
             }
+            counterfactual_stats.update(solo_site_losses)
+            if solo_site_losses:
+                counterfactual_stats["cf_delta_style_mid_only"] = solo_site_losses["cf_loss_style_mid_only"] - base
+                counterfactual_stats["cf_delta_style_up16_only"] = solo_site_losses["cf_loss_style_up16_only"] - base
+                counterfactual_stats["cf_delta_style_up32_only"] = solo_site_losses["cf_loss_style_up32_only"] - base
 
         did_update, grad_norm = self._do_optimizer_update(loss, grad_clip)
-        attn_stats = self._finalize_attention_logging(attn_log_enabled)
-
         if not did_update:
             out = {
                 "loss": loss.item(),
@@ -1662,7 +1725,6 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 "train_time": float(time.perf_counter() - _train_t0),
             }
             out.update(self._style_backbone_status())
-            out.update(attn_stats)
             out.update(counterfactual_stats)
             return out
 
@@ -1733,7 +1795,6 @@ class FlowMatchingTrainer(DiffusionTrainer):
             log_row.update(self._style_backbone_status())
             if grad_norm is not None:
                 log_row["grad_norm"] = float(grad_norm)
-            log_row.update(attn_stats)
             log_row.update(counterfactual_stats)
             self._write_step_log(log_row)
 
@@ -1749,28 +1810,24 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 f"H=({attn_entropy_low.item():.3f},{attn_entropy_mid.item():.3f},{attn_entropy_high.item():.3f}) "
                 f"cos_same={cos_same.item():.4f} "
                 f"cos_diff={cos_diff.item():.4f} tok_coll={token_collapse.item():.4f} "
-                f"λnce={eff_lnce:.4f} λslot={self.lambda_slot_nce:.4f} "
+                f"λnce={eff_lnce:.4f} λslot={eff_lslot:.4f} λaux={eff_aux:.4f} "
                 f"lr={self.lr_schedule.get_last_lr()[0]:.6e} "
                 f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s "
                 f"style_bb={self._style_backbone_phase()}"
             )
             if grad_norm is not None:
                 msg += f" gnorm={grad_norm:.4f}"
-            if (
-                "tok_imp_low" in attn_stats
-                and "tok_imp_mid" in attn_stats
-                and "tok_imp_high" in attn_stats
-            ):
-                msg += (
-                    f" tok_imp=({attn_stats['tok_imp_low']:.3f},"
-                    f"{attn_stats['tok_imp_mid']:.3f},"
-                    f"{attn_stats['tok_imp_high']:.3f})"
-                )
             if counterfactual_stats:
                 msg += (
                     f" cf_drop_part={counterfactual_stats['cf_delta_drop_part']:.4f}"
                     f" cf_drop_style={counterfactual_stats['cf_delta_drop_style']:.4f}"
                 )
+                if "cf_delta_style_mid_only" in counterfactual_stats:
+                    msg += (
+                        f" cf_solo=(mid:{counterfactual_stats['cf_delta_style_mid_only']:.4f},"
+                        f"u16:{counterfactual_stats['cf_delta_style_up16_only']:.4f},"
+                        f"u32:{counterfactual_stats['cf_delta_style_up32_only']:.4f})"
+                    )
             print(msg, flush=True)
 
         out = {
@@ -1801,7 +1858,6 @@ class FlowMatchingTrainer(DiffusionTrainer):
             "train_time": float(self._step_train_time),
         }
         out.update(self._style_backbone_status())
-        out.update(attn_stats)
         out.update(counterfactual_stats)
         return out
 

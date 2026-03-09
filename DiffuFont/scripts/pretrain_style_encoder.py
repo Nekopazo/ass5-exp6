@@ -29,6 +29,7 @@ if str(PROJECT_ROOT_FALLBACK) not in sys.path:
 
 from models.hierarchical_style_encoder import HierarchicalStyleEncoderMixin
 from models.source_part_ref_unet import (
+    ACTIVE_STYLE_SITES,
     FIXED_STYLE_SITE_ARCH,
     FIXED_STYLE_TOKEN_CONSUMER_MAP,
 )
@@ -144,7 +145,6 @@ class StyleEncoderModule(nn.Module, HierarchicalStyleEncoderMixin):
         self.inject_mid = self._build_inject_head()
         self.inject_up16 = self._build_inject_head()
         self.inject_up32 = self._build_inject_head()
-        self.inject_up64 = self._build_inject_head()
 
     def _build_inject_head(self) -> nn.Module:
         return nn.Sequential(
@@ -162,14 +162,13 @@ class StyleEncoderModule(nn.Module, HierarchicalStyleEncoderMixin):
         t_high = style_tokens[:, 2]
         return {
             "mid": self.inject_mid(t_low),
-            "up_16": self.inject_up16(t_low),
-            "up_32": self.inject_up32(t_mid),
-            "up_64": self.inject_up64(t_high),
+            "up_16": self.inject_up16(t_mid),
+            "up_32": self.inject_up32(t_high),
         }
 
     def stack_style_site_contexts(self, style_tokens: torch.Tensor) -> torch.Tensor:
         site_contexts = self.project_style_sites(style_tokens)
-        ordered_sites = ("mid", "up_16", "up_32", "up_64")
+        ordered_sites = ACTIVE_STYLE_SITES
         return torch.stack([site_contexts[name] for name in ordered_sites], dim=1)
 
     def _normalize_style_inputs(
@@ -606,7 +605,7 @@ def main() -> None:
     parser.add_argument("--log-file", type=Path, default=Path("checkpoints/style_encoder_pretrain.log"))
     parser.add_argument("--metrics-jsonl", type=Path, default=Path("checkpoints/style_encoder_pretrain.metrics.jsonl"))
     parser.add_argument("--init-checkpoint", type=Path, default=None)
-    parser.add_argument("--steps", type=int, default=10000)
+    parser.add_argument("--steps", type=int, default=5000)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--loader-steps-per-epoch", type=int, default=2048)
     parser.add_argument("--val-loader-steps-per-epoch", type=int, default=512)
@@ -624,17 +623,17 @@ def main() -> None:
     parser.add_argument("--decode-workers", type=int, default=8)
     parser.add_argument("--prefetch-factor", type=int, default=4)
     parser.add_argument("--worker-torch-threads", type=int, default=1)
-    parser.add_argument("--p-ref-drop", type=float, default=0.25)
+    parser.add_argument("--p-ref-drop", type=float, default=0.15)
     parser.add_argument("--min-keep", type=int, default=4)
     parser.add_argument("--tau", type=float, default=0.07)
-    parser.add_argument("--lambda-slot-nce", type=float, default=0.50)
-    parser.add_argument("--lambda-cons", type=float, default=0.15)
+    parser.add_argument("--lambda-slot-nce", type=float, default=0.02)
+    parser.add_argument("--lambda-cons", type=float, default=0.0)
     parser.add_argument("--lambda-div", type=float, default=0.0)
-    parser.add_argument("--lambda-proxy-low", type=float, default=0.20)
-    parser.add_argument("--lambda-proxy-mid", type=float, default=0.20)
-    parser.add_argument("--lambda-proxy-high", type=float, default=0.20)
-    parser.add_argument("--lambda-attn-sep", type=float, default=0.05)
-    parser.add_argument("--lambda-attn-order", type=float, default=0.02)
+    parser.add_argument("--lambda-proxy-low", type=float, default=0.05)
+    parser.add_argument("--lambda-proxy-mid", type=float, default=0.05)
+    parser.add_argument("--lambda-proxy-high", type=float, default=0.05)
+    parser.add_argument("--lambda-attn-sep", type=float, default=0.02)
+    parser.add_argument("--lambda-attn-order", type=float, default=0.0)
     parser.add_argument("--lambda-attn-role", type=float, default=0.0)
     parser.add_argument("--attn-overlap-margin", type=float, default=0.80)
     parser.add_argument("--attn-entropy-gap", type=float, default=0.03)
@@ -739,12 +738,6 @@ def main() -> None:
             "inject_up32.1.bias",
             "inject_up32.3.weight",
             "inject_up32.3.bias",
-            "inject_up64.0.weight",
-            "inject_up64.0.bias",
-            "inject_up64.1.weight",
-            "inject_up64.1.bias",
-            "inject_up64.3.weight",
-            "inject_up64.3.bias",
         }
         missing = sorted(missing)
         unexpected = sorted(unexpected)

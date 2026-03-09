@@ -32,6 +32,7 @@ from style_augment import build_base_glyph_transform, build_style_reference_tran
 
 STYLE_ONLY_MAIN_DEFAULTS: Dict[str, float | int] = {
     "lambda_nce": 0.0,
+    "aux_loss_warmup_steps": 5000,
     "lambda_slot_nce": 0.02,
     "lambda_cons": 0.0,
     "lambda_div": 0.0,
@@ -40,11 +41,13 @@ STYLE_ONLY_MAIN_DEFAULTS: Dict[str, float | int] = {
     "lambda_proxy_high": 0.05,
     "lambda_attn_sep": 0.02,
     "lambda_attn_order": 0.0,
-    "lambda_attn_role": 0.0,
+    "lambda_attn_role": 0.01,
     "attn_overlap_margin": 0.80,
     "attn_entropy_gap": 0.03,
     "style_ref_drop_prob": 0.15,
     "style_ref_drop_min_keep": 4,
+    "style_site_drop_prob": 0.15,
+    "style_site_drop_min_keep": 1,
     "freeze_style_backbone_steps": 5000,
     "style_backbone_lr_scale": 0.1,
 }
@@ -361,7 +364,7 @@ def main() -> None:
     parser.add_argument("--lambda-attn-order", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_attn_order"]))
     parser.add_argument("--lambda-attn-role", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_attn_role"]))
     parser.add_argument("--style-nce-temp", type=float, default=0.07)
-    parser.add_argument("--nce-warmup-steps", type=int, default=0)
+    parser.add_argument("--aux-loss-warmup-steps", type=int, default=int(STYLE_ONLY_MAIN_DEFAULTS["aux_loss_warmup_steps"]))
     parser.add_argument("--attn-overlap-margin", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["attn_overlap_margin"]))
     parser.add_argument("--attn-entropy-gap", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["attn_entropy_gap"]))
     parser.add_argument("--diffusion-steps", type=int, default=1000)
@@ -413,19 +416,30 @@ def main() -> None:
         help="Minimum kept references after dropout when style refs are used.",
     )
     parser.add_argument(
+        "--style-site-drop-prob",
+        type=float,
+        default=float(STYLE_ONLY_MAIN_DEFAULTS["style_site_drop_prob"]),
+        help="Drop probability for style injection sites during training.",
+    )
+    parser.add_argument(
+        "--style-site-drop-min-keep",
+        type=int,
+        default=int(STYLE_ONLY_MAIN_DEFAULTS["style_site_drop_min_keep"]),
+        help="Minimum kept style injection sites after site dropout.",
+    )
+    parser.add_argument(
         "--freeze-style-backbone-steps",
         type=int,
         default=int(STYLE_ONLY_MAIN_DEFAULTS["freeze_style_backbone_steps"]),
         help=(
-            "Freeze the entire style backbone until this step, then unfreeze only layer2/layer3. "
-            "conv1/bn1/layer1 stay frozen throughout training."
+            "Freeze the entire style backbone until this step, then unfreeze low and high stages together."
         ),
     )
     parser.add_argument(
         "--style-backbone-lr-scale",
         type=float,
         default=float(STYLE_ONLY_MAIN_DEFAULTS["style_backbone_lr_scale"]),
-        help="LR scale applied to unfrozen style backbone high layers.",
+        help="LR scale applied to the full style backbone parameter group after unfreezing.",
     )
 
     parser.add_argument("--sample-every-steps", type=int, default=300)
@@ -499,6 +513,8 @@ def main() -> None:
             "cache_style_image": False,
             "style_ref_drop_prob_active": float(args.style_ref_drop_prob) if use_style_image else 0.0,
             "style_ref_drop_min_keep_active": int(args.style_ref_drop_min_keep) if use_style_image else 0,
+            "style_site_drop_prob_active": float(args.style_site_drop_prob) if use_style_image else 0.0,
+            "style_site_drop_min_keep_active": int(args.style_site_drop_min_keep) if use_style_image else 0,
         }
     )
 
@@ -620,16 +636,18 @@ def main() -> None:
         expected_route = {k: list(v) for k, v in FIXED_STYLE_TOKEN_CONSUMER_MAP.items()}
         expected_consumer_arch = dict(FIXED_STYLE_SITE_ARCH)
         if route_meta != expected_route:
-            raise RuntimeError(
-                "[train] pretrained style encoder routing metadata mismatch: "
+            print(
+                "[train] warning: pretrained style encoder routing metadata mismatch: "
                 f"ckpt={route_meta or '<missing>'} current={expected_route}. "
-                "Please rerun style encoder pretraining for the current fixed routing."
+                "Loading style encoder weights non-strictly anyway.",
+                flush=True,
             )
         if consumer_arch_meta != expected_consumer_arch:
-            raise RuntimeError(
-                "[train] pretrained style encoder consumer metadata mismatch: "
+            print(
+                "[train] warning: pretrained style encoder consumer metadata mismatch: "
                 f"ckpt={consumer_arch_meta or '<missing>'} current={expected_consumer_arch}. "
-                "Please rerun style encoder pretraining for the current fixed architecture."
+                "Loading style encoder weights non-strictly anyway.",
+                flush=True,
             )
         if isinstance(ckpt, dict) and isinstance(ckpt.get("style_encoder"), dict):
             sd = ckpt["style_encoder"]
@@ -658,7 +676,7 @@ def main() -> None:
         "lambda_attn_order": float(args.lambda_attn_order),
         "lambda_attn_role": float(args.lambda_attn_role),
         "nce_temperature": float(args.style_nce_temp),
-        "nce_warmup_steps": int(args.nce_warmup_steps),
+        "aux_loss_warmup_steps": int(args.aux_loss_warmup_steps),
         "attn_overlap_margin": float(args.attn_overlap_margin),
         "attn_entropy_gap": float(args.attn_entropy_gap),
         "T": args.diffusion_steps,
@@ -672,6 +690,8 @@ def main() -> None:
         "part_drop_prob": 0.0,
         "style_ref_drop_prob": float(args.style_ref_drop_prob) if use_style_image else 0.0,
         "style_ref_drop_min_keep": int(args.style_ref_drop_min_keep) if use_style_image else 1,
+        "style_site_drop_prob": float(args.style_site_drop_prob) if use_style_image else 0.0,
+        "style_site_drop_min_keep": int(args.style_site_drop_min_keep) if use_style_image else 1,
         "freeze_part_encoder_steps": 0,
         "freeze_style_backbone_steps": int(args.freeze_style_backbone_steps) if use_style_image else 0,
         "style_backbone_lr_scale": float(args.style_backbone_lr_scale),

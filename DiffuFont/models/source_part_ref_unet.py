@@ -13,19 +13,20 @@ from .hierarchical_style_encoder import HierarchicalStyleEncoderMixin
 from .source_fontdiffuser import ContentEncoder, UNet
 
 
-FIXED_STYLE_TRANSFORMER_SCALES = (16, 32, 64)
+FIXED_STYLE_TRANSFORMER_SCALES = (16, 32)
 FIXED_STYLE_LOCAL_MOD_SCALES = ()
 FIXED_STYLE_TOKEN_CONSUMER_MAP = {
-    "t_low": ("mid", "up_16"),
-    "t_mid": ("up_32",),
-    "t_high": ("up_64",),
+    "t_low": ("mid",),
+    "t_mid": ("up_16",),
+    "t_high": ("up_32",),
 }
 FIXED_STYLE_SITE_ARCH = {
     "mid": "transformer_cross_attn",
     "up_16": "transformer_cross_attn",
     "up_32": "transformer_cross_attn",
-    "up_64": "transformer_cross_attn",
+    "up_64": "self_attention_only",
 }
+ACTIVE_STYLE_SITES = ("mid", "up_16", "up_32")
 
 
 class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
@@ -83,7 +84,6 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         self.inject_mid = self._build_inject_head()
         self.inject_up16 = self._build_inject_head()
         self.inject_up32 = self._build_inject_head()
-        self.inject_up64 = self._build_inject_head()
 
         self.unet = UNet(
             sample_size=self.unet_input_size,
@@ -108,8 +108,9 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
             reduction=32,
             mid_enable_content_attn=False,
         )
-        self._attention_logging_enabled = False
-        self._style_usage_logging: dict[str, float] = {}
+        self.style_site_drop_prob = 0.0
+        self.style_site_drop_min_keep = 1
+        self._style_site_force_keep: frozenset[str] | None = None
 
     @classmethod
     def _normalize_conditioning_mode(cls, mode: str) -> str:
@@ -136,14 +137,20 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
             expected_route = {k: list(v) for k, v in FIXED_STYLE_TOKEN_CONSUMER_MAP.items()}
             route_meta = obj["extra"].get("token_consumer_map", {}) or {}
             if route_meta != expected_route:
-                raise RuntimeError(
-                    f"style pretrained routing mismatch: ckpt={route_meta or '<missing>'} current={expected_route}"
+                print(
+                    "[load_style_pretrained] warning: routing metadata mismatch "
+                    f"ckpt={route_meta or '<missing>'} current={expected_route}; "
+                    "loading style encoder weights non-strictly anyway.",
+                    flush=True,
                 )
             consumer_arch_meta = obj["extra"].get("style_site_arch", {}) or {}
             expected_arch = dict(FIXED_STYLE_SITE_ARCH)
             if consumer_arch_meta != expected_arch:
-                raise RuntimeError(
-                    f"style pretrained consumer mismatch: ckpt={consumer_arch_meta or '<missing>'} current={expected_arch}"
+                print(
+                    "[load_style_pretrained] warning: consumer metadata mismatch "
+                    f"ckpt={consumer_arch_meta or '<missing>'} current={expected_arch}; "
+                    "loading style encoder weights non-strictly anyway.",
+                    flush=True,
                 )
         if isinstance(obj, dict) and isinstance(obj.get("style_encoder"), dict):
             sd = obj["style_encoder"]
@@ -163,34 +170,15 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         if h != expected or w != expected:
             raise ValueError(f"{name} must be {expected}x{expected}, got {h}x{w}. Online resize is disabled.")
 
-    def set_attention_logging(self, enabled: bool) -> None:
-        self._attention_logging_enabled = bool(enabled)
-        if not self._attention_logging_enabled:
-            self._style_usage_logging = {}
-        if hasattr(self.unet, "set_attention_logging"):
-            self.unet.set_attention_logging(bool(enabled))
+    def set_style_site_dropout(self, prob: float, min_keep: int = 1) -> None:
+        self.style_site_drop_prob = float(max(0.0, min(1.0, prob)))
+        self.style_site_drop_min_keep = max(1, int(min_keep))
 
-    def reset_attention_logging(self) -> None:
-        self._style_usage_logging = {}
-        if hasattr(self.unet, "reset_attention_logging"):
-            self.unet.reset_attention_logging()
-
-    def collect_attention_logging(self) -> dict[str, float]:
-        out: dict[str, float] = {}
-        if hasattr(self.unet, "collect_attention_logging"):
-            raw = self.unet.collect_attention_logging()
-            for klen, mass in raw.items():
-                if len(mass) <= 0:
-                    continue
-                probs = torch.tensor(mass, dtype=torch.float64)
-                probs = probs.clamp_min(1e-12)
-                probs = probs / probs.sum().clamp_min(1e-12)
-                out[f"attn_klen_{int(klen)}_max"] = float(probs.max().item())
-                out[f"attn_klen_{int(klen)}_entropy"] = float(
-                    (-(probs * probs.log()).sum() / torch.log(torch.tensor(float(max(2, klen))))).item()
-                )
-        out.update(self._style_usage_logging)
-        return out
+    def set_style_site_force_keep(self, keep_sites: tuple[str, ...] | list[str] | None) -> None:
+        if keep_sites is None:
+            self._style_site_force_keep = None
+            return
+        self._style_site_force_keep = frozenset(str(x) for x in keep_sites)
 
     def _normalize_style_inputs(
         self,
@@ -244,45 +232,43 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         t_high = style_tokens[:, 2]
         style_contexts = {
             "mid": self.inject_mid(t_low).unsqueeze(1),
-            "up_16": self.inject_up16(t_low).unsqueeze(1),
-            "up_32": self.inject_up32(t_mid).unsqueeze(1),
-            "up_64": self.inject_up64(t_high).unsqueeze(1),
+            "up_16": self.inject_up16(t_mid).unsqueeze(1),
+            "up_32": self.inject_up32(t_high).unsqueeze(1),
         }
-        self._record_style_usage_logging(style_contexts)
+        style_contexts = self._apply_style_site_dropout(style_contexts)
+        style_contexts = self._apply_style_site_force_mask(style_contexts)
         return style_contexts
 
-    def _record_style_usage_logging(self, style_contexts: dict[str, torch.Tensor]) -> None:
-        if not self._attention_logging_enabled:
-            return
+    def _apply_style_site_dropout(self, style_contexts: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        if (not self.training) or self.style_site_drop_prob <= 0.0:
+            return style_contexts
 
-        def _ctx_rms(x: torch.Tensor) -> float:
-            return float(x.detach().pow(2).mean(dim=-1).sqrt().mean().item())
+        active_sites = [site for site in ACTIVE_STYLE_SITES if site in style_contexts]
+        if len(active_sites) <= self.style_site_drop_min_keep:
+            return style_contexts
 
-        ctx_mid = _ctx_rms(style_contexts["mid"])
-        ctx_up16 = _ctx_rms(style_contexts["up_16"])
-        ctx_up32 = _ctx_rms(style_contexts["up_32"])
-        ctx_up64 = _ctx_rms(style_contexts["up_64"])
+        keep_mask = torch.rand((len(active_sites),), device=next(iter(style_contexts.values())).device)
+        keep_flags = keep_mask >= self.style_site_drop_prob
+        min_keep = min(len(active_sites), self.style_site_drop_min_keep)
+        if int(keep_flags.sum().item()) < min_keep:
+            keep_flags[:] = False
+            chosen = torch.randperm(len(active_sites), device=keep_flags.device)[:min_keep]
+            keep_flags[chosen] = True
 
-        tok_low = ctx_mid
-        tok_mid = 0.5 * (ctx_up16 + ctx_up32)
-        tok_high = ctx_up64
-        total = max(tok_low + tok_mid + tok_high, 1e-8)
-        probs = torch.tensor(
-            [tok_low / total, tok_mid / total, tok_high / total],
-            dtype=torch.float64,
-        ).clamp_min(1e-12)
-        imp_entropy = float((-(probs * probs.log()).sum() / torch.log(torch.tensor(3.0))).item())
+        out = dict(style_contexts)
+        for idx, site in enumerate(active_sites):
+            if not bool(keep_flags[idx].item()):
+                out[site] = torch.zeros_like(out[site])
+        return out
 
-        self._style_usage_logging = {
-            "ctx_mid_norm": ctx_mid,
-            "ctx_up16_norm": ctx_up16,
-            "ctx_up32_norm": ctx_up32,
-            "ctx_up64_norm": ctx_up64,
-            "tok_imp_low": float(probs[0].item()),
-            "tok_imp_mid": float(probs[1].item()),
-            "tok_imp_high": float(probs[2].item()),
-            "tok_imp_entropy": imp_entropy,
-        }
+    def _apply_style_site_force_mask(self, style_contexts: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        if self._style_site_force_keep is None:
+            return style_contexts
+        out = dict(style_contexts)
+        for site, tensor in out.items():
+            if site not in self._style_site_force_keep:
+                out[site] = torch.zeros_like(tensor)
+        return out
 
     def _resolve_style_hidden_states(
         self,

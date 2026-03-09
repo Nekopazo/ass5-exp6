@@ -1,0 +1,616 @@
+{
+  "run_dir": "/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/teacher_style_only_20260307_123410",
+  "checkpoint": "/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/teacher_style_only_20260307_123410/ckpt_step_48000.pt",
+  "device": "cuda:0",
+  "split": "val",
+  "split_stats": {
+    "total_fonts": 137,
+    "train_fonts": 123,
+    "val_fonts": 14
+  },
+  "num_samples": 20,
+  "samples": [
+    {
+      "sample_name": "STXINGKA__容",
+      "font": "STXINGKA",
+      "char": "容",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.41368353366851807,
+          "pixel_l1": 0.24918892979621887
+        },
+        "drop_mid": {
+          "pixel_mse": 0.49838775396347046,
+          "pixel_l1": 0.2951333522796631
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.4041598439216614,
+          "pixel_l1": 0.24520957469940186
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.3777225911617279,
+          "pixel_l1": 0.23047874867916107
+        },
+        "drop_up_64": {
+          "pixel_mse": 0.41216546297073364,
+          "pixel_l1": 0.24934540688991547
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/heatmaps/STXINGKA__容.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/generations/STXINGKA__容.png"
+    },
+    {
+      "sample_name": "STXINGKA__创",
+      "font": "STXINGKA",
+      "char": "创",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.5680138468742371,
+          "pixel_l1": 0.32627323269844055
+        },
+        "drop_mid": {
+          "pixel_mse": 0.7831255197525024,
+          "pixel_l1": 0.42958295345306396
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.7363898754119873,
+          "pixel_l1": 0.40760838985443115
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.5445234775543213,
+          "pixel_l1": 0.31016480922698975
+        },
+        "drop_up_64": {
+          "pixel_mse": 0.5689458250999451,
+          "pixel_l1": 0.3264664113521576
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/heatmaps/STXINGKA__创.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/generations/STXINGKA__创.png"
+    },
+    {
+      "sample_name": "STXINGKA__歪",
+      "font": "STXINGKA",
+      "char": "歪",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.46430784463882446,
+          "pixel_l1": 0.2717317044734955
+        },
+        "drop_mid": {
+          "pixel_mse": 0.7340491414070129,
+          "pixel_l1": 0.4088628888130188
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.5284358859062195,
+          "pixel_l1": 0.3072458803653717
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.48360809683799744,
+          "pixel_l1": 0.2834170460700989
+        },
+        "drop_up_64": {
+          "pixel_mse": 0.4784223139286041,
+          "pixel_l1": 0.28032270073890686
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/heatmaps/STXINGKA__歪.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/generations/STXINGKA__歪.png"
+    },
+    {
+      "sample_name": "STXINGKA__甸",
+      "font": "STXINGKA",
+      "char": "甸",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.6296864748001099,
+          "pixel_l1": 0.345158189535141
+        },
+        "drop_mid": {
+          "pixel_mse": 0.6199891567230225,
+          "pixel_l1": 0.34090593457221985
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.6399269104003906,
+          "pixel_l1": 0.35231533646583557
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6138408184051514,
+          "pixel_l1": 0.3373003304004669
+        },
+        "drop_up_64": {
+          "pixel_mse": 0.6155486702919006,
+          "pixel_l1": 0.339333713054657
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/heatmaps/STXINGKA__甸.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/generations/STXINGKA__甸.png"
+    },
+    {
+      "sample_name": "STXINGKA__悬",
+      "font": "STXINGKA",
+      "char": "悬",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.5340672135353088,
+          "pixel_l1": 0.31401526927948
+        },
+        "drop_mid": {
+          "pixel_mse": 0.5891584157943726,
+          "pixel_l1": 0.3450729548931122
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.6079047918319702,
+          "pixel_l1": 0.353503942489624
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.519733726978302,
+          "pixel_l1": 0.3086129426956177
+        },
+        "drop_up_64": {
+          "pixel_mse": 0.525650680065155,
+          "pixel_l1": 0.3116178512573242
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/heatmaps/STXINGKA__悬.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/generations/STXINGKA__悬.png"
+    },
+    {
+      "sample_name": "STXINGKA__哈",
+      "font": "STXINGKA",
+      "char": "哈",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.37949496507644653,
+          "pixel_l1": 0.21987421810626984
+        },
+        "drop_mid": {
+          "pixel_mse": 0.634506344795227,
+          "pixel_l1": 0.3517860174179077
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.5266425609588623,
+          "pixel_l1": 0.295235812664032
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.3885961174964905,
+          "pixel_l1": 0.2244611233472824
+        },
+        "drop_up_64": {
+          "pixel_mse": 0.381347119808197,
+          "pixel_l1": 0.2213505506515503
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/heatmaps/STXINGKA__哈.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/generations/STXINGKA__哈.png"
+    },
+    {
+      "sample_name": "STXINGKA__掩",
+      "font": "STXINGKA",
+      "char": "掩",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.7759494781494141,
+          "pixel_l1": 0.4323255121707916
+        },
+        "drop_mid": {
+          "pixel_mse": 0.9066202044487,
+          "pixel_l1": 0.4978271722793579
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.9158190488815308,
+          "pixel_l1": 0.5039921402931213
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.795703113079071,
+          "pixel_l1": 0.44126951694488525
+        },
+        "drop_up_64": {
+          "pixel_mse": 0.7657002806663513,
+          "pixel_l1": 0.4284398853778839
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/heatmaps/STXINGKA__掩.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/generations/STXINGKA__掩.png"
+    },
+    {
+      "sample_name": "STXINGKA__企",
+      "font": "STXINGKA",
+      "char": "企",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.6510522365570068,
+          "pixel_l1": 0.3623846173286438
+        },
+        "drop_mid": {
+          "pixel_mse": 0.815809428691864,
+          "pixel_l1": 0.44058558344841003
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.6656203866004944,
+          "pixel_l1": 0.3687945604324341
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.5805233120918274,
+          "pixel_l1": 0.3261496424674988
+        },
+        "drop_up_64": {
+          "pixel_mse": 0.6773690581321716,
+          "pixel_l1": 0.3758132755756378
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/heatmaps/STXINGKA__企.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/generations/STXINGKA__企.png"
+    },
+    {
+      "sample_name": "STXINGKA__盒",
+      "font": "STXINGKA",
+      "char": "盒",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.5966078639030457,
+          "pixel_l1": 0.34971195459365845
+        },
+        "drop_mid": {
+          "pixel_mse": 0.8487014174461365,
+          "pixel_l1": 0.47838202118873596
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.5036917924880981,
+          "pixel_l1": 0.30389031767845154
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.528212308883667,
+          "pixel_l1": 0.31786710023880005
+        },
+        "drop_up_64": {
+          "pixel_mse": 0.5924072861671448,
+          "pixel_l1": 0.34826740622520447
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/heatmaps/STXINGKA__盒.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/generations/STXINGKA__盒.png"
+    },
+    {
+      "sample_name": "STXINGKA__罕",
+      "font": "STXINGKA",
+      "char": "罕",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.5597169995307922,
+          "pixel_l1": 0.3075036406517029
+        },
+        "drop_mid": {
+          "pixel_mse": 0.6778476238250732,
+          "pixel_l1": 0.36831608414649963
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.5241840481758118,
+          "pixel_l1": 0.293209046125412
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.4814242720603943,
+          "pixel_l1": 0.2675304114818573
+        },
+        "drop_up_64": {
+          "pixel_mse": 0.5678094625473022,
+          "pixel_l1": 0.31248006224632263
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/heatmaps/STXINGKA__罕.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/generations/STXINGKA__罕.png"
+    },
+    {
+      "sample_name": "STXINGKA__今",
+      "font": "STXINGKA",
+      "char": "今",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.4616093635559082,
+          "pixel_l1": 0.2543453574180603
+        },
+        "drop_mid": {
+          "pixel_mse": 0.5154724717140198,
+          "pixel_l1": 0.28407520055770874
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.3942399322986603,
+          "pixel_l1": 0.2194238156080246
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.4399571418762207,
+          "pixel_l1": 0.24285589158535004
+        },
+        "drop_up_64": {
+          "pixel_mse": 0.47271987795829773,
+          "pixel_l1": 0.26005905866622925
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/heatmaps/STXINGKA__今.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/generations/STXINGKA__今.png"
+    },
+    {
+      "sample_name": "STXINGKA__俭",
+      "font": "STXINGKA",
+      "char": "俭",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.529475212097168,
+          "pixel_l1": 0.3099779188632965
+        },
+        "drop_mid": {
+          "pixel_mse": 0.8907824754714966,
+          "pixel_l1": 0.491228312253952
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.717161238193512,
+          "pixel_l1": 0.404806524515152
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.627202033996582,
+          "pixel_l1": 0.3570236265659332
+        },
+        "drop_up_64": {
+          "pixel_mse": 0.5269938111305237,
+          "pixel_l1": 0.3101775646209717
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/heatmaps/STXINGKA__俭.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/generations/STXINGKA__俭.png"
+    },
+    {
+      "sample_name": "STXINGKA__窜",
+      "font": "STXINGKA",
+      "char": "窜",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.3888556957244873,
+          "pixel_l1": 0.23362424969673157
+        },
+        "drop_mid": {
+          "pixel_mse": 0.531815767288208,
+          "pixel_l1": 0.3093881905078888
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.4329019784927368,
+          "pixel_l1": 0.256437212228775
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.4523898661136627,
+          "pixel_l1": 0.2652044892311096
+        },
+        "drop_up_64": {
+          "pixel_mse": 0.39255157113075256,
+          "pixel_l1": 0.23619304597377777
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/heatmaps/STXINGKA__窜.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/generations/STXINGKA__窜.png"
+    },
+    {
+      "sample_name": "STXINGKA__仓",
+      "font": "STXINGKA",
+      "char": "仓",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.28342416882514954,
+          "pixel_l1": 0.1759336143732071
+        },
+        "drop_mid": {
+          "pixel_mse": 0.505473256111145,
+          "pixel_l1": 0.2913532853126526
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.38692963123321533,
+          "pixel_l1": 0.22894559800624847
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.3092833161354065,
+          "pixel_l1": 0.18908575177192688
+        },
+        "drop_up_64": {
+          "pixel_mse": 0.28120169043540955,
+          "pixel_l1": 0.17642764747142792
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/heatmaps/STXINGKA__仓.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/generations/STXINGKA__仓.png"
+    },
+    {
+      "sample_name": "STXINGKA__倘",
+      "font": "STXINGKA",
+      "char": "倘",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.587750256061554,
+          "pixel_l1": 0.3408440053462982
+        },
+        "drop_mid": {
+          "pixel_mse": 0.7325358390808105,
+          "pixel_l1": 0.4117424786090851
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.6972386240959167,
+          "pixel_l1": 0.39843830466270447
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6024268865585327,
+          "pixel_l1": 0.3490806519985199
+        },
+        "drop_up_64": {
+          "pixel_mse": 0.5757160782814026,
+          "pixel_l1": 0.3360148072242737
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/heatmaps/STXINGKA__倘.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/generations/STXINGKA__倘.png"
+    },
+    {
+      "sample_name": "STXINGKA__盔",
+      "font": "STXINGKA",
+      "char": "盔",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.6394487619400024,
+          "pixel_l1": 0.360990047454834
+        },
+        "drop_mid": {
+          "pixel_mse": 0.7104856967926025,
+          "pixel_l1": 0.3988463580608368
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.6859674453735352,
+          "pixel_l1": 0.3847532868385315
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6249884366989136,
+          "pixel_l1": 0.35488277673721313
+        },
+        "drop_up_64": {
+          "pixel_mse": 0.6152076125144958,
+          "pixel_l1": 0.349840372800827
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/heatmaps/STXINGKA__盔.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/generations/STXINGKA__盔.png"
+    },
+    {
+      "sample_name": "STXINGKA__喻",
+      "font": "STXINGKA",
+      "char": "喻",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.7555767893791199,
+          "pixel_l1": 0.4187936782836914
+        },
+        "drop_mid": {
+          "pixel_mse": 0.6783514022827148,
+          "pixel_l1": 0.38439837098121643
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.8385748863220215,
+          "pixel_l1": 0.46595415472984314
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.740328311920166,
+          "pixel_l1": 0.4093579947948456
+        },
+        "drop_up_64": {
+          "pixel_mse": 0.7569596171379089,
+          "pixel_l1": 0.42004144191741943
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/heatmaps/STXINGKA__喻.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/generations/STXINGKA__喻.png"
+    },
+    {
+      "sample_name": "STXINGKA__器",
+      "font": "STXINGKA",
+      "char": "器",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.49079346656799316,
+          "pixel_l1": 0.2903471291065216
+        },
+        "drop_mid": {
+          "pixel_mse": 0.5625223517417908,
+          "pixel_l1": 0.32682934403419495
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.6374333500862122,
+          "pixel_l1": 0.3689480721950531
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.48120802640914917,
+          "pixel_l1": 0.28497785329818726
+        },
+        "drop_up_64": {
+          "pixel_mse": 0.5035622715950012,
+          "pixel_l1": 0.29852452874183655
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/heatmaps/STXINGKA__器.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/generations/STXINGKA__器.png"
+    },
+    {
+      "sample_name": "STXINGKA__管",
+      "font": "STXINGKA",
+      "char": "管",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.40173837542533875,
+          "pixel_l1": 0.23952226340770721
+        },
+        "drop_mid": {
+          "pixel_mse": 0.5672332644462585,
+          "pixel_l1": 0.3223971724510193
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.5205756425857544,
+          "pixel_l1": 0.3007546365261078
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.3769213855266571,
+          "pixel_l1": 0.22728823125362396
+        },
+        "drop_up_64": {
+          "pixel_mse": 0.3905617296695709,
+          "pixel_l1": 0.2348591387271881
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/heatmaps/STXINGKA__管.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/generations/STXINGKA__管.png"
+    },
+    {
+      "sample_name": "STXINGKA__给",
+      "font": "STXINGKA",
+      "char": "给",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.6633144021034241,
+          "pixel_l1": 0.37432336807250977
+        },
+        "drop_mid": {
+          "pixel_mse": 0.7251354455947876,
+          "pixel_l1": 0.4060364067554474
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.8322392106056213,
+          "pixel_l1": 0.46160733699798584
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6583290100097656,
+          "pixel_l1": 0.3698654770851135
+        },
+        "drop_up_64": {
+          "pixel_mse": 0.663098931312561,
+          "pixel_l1": 0.3752962052822113
+        }
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/heatmaps/STXINGKA__给.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260308_n20/generations/STXINGKA__给.png"
+    }
+  ],
+  "aggregate_metrics": {
+    "full": {
+      "pixel_mse": 0.5387283474206924,
+      "pixel_l1": 0.308843445032835
+    },
+    "drop_mid": {
+      "pixel_mse": 0.6764001488685608,
+      "pixel_l1": 0.37913750410079955
+    },
+    "drop_up_16": {
+      "pixel_mse": 0.6098018541932106,
+      "pixel_l1": 0.34605369716882706
+    },
+    "drop_up_32": {
+      "pixel_mse": 0.5313461124897003,
+      "pixel_l1": 0.30484372079372407
+    },
+    "drop_up_64": {
+      "pixel_mse": 0.5381969675421715,
+      "pixel_l1": 0.30954355373978615
+    }
+  }
+}

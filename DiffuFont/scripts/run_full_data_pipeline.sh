@@ -49,14 +49,21 @@ echo "[pipeline] Step 5: Pretrain style encoder (contrastive, docs setup)"
 echo "=========================================="
 python scripts/pretrain_style_encoder.py \
     --project-root "${ROOT}" \
-    --steps 10000 \
-    --batch-size 64 \
-    --ref-per-style 8 \
+    --steps 5000 \
+    --batch-size 32 \
+    --ref-per-style 12 \
     --style-token-count 3 \
-    --lambda-div 0.02 \
-    --lambda-slot-nce 0.5 \
-    --lambda-attn-sep 0.05 \
-    --lambda-attn-order 0.02 \
+    --p-ref-drop 0.15 \
+    --min-keep 4 \
+    --lambda-slot-nce 0.02 \
+    --lambda-cons 0.0 \
+    --lambda-div 0.0 \
+    --lambda-proxy-low 0.05 \
+    --lambda-proxy-mid 0.05 \
+    --lambda-proxy-high 0.05 \
+    --lambda-attn-sep 0.02 \
+    --lambda-attn-order 0.0 \
+    --lambda-attn-role 0.0 \
     --device auto \
     --log-every 50
 
