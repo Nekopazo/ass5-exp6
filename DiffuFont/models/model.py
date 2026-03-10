@@ -167,6 +167,14 @@ def token_collapse_score(tokens: torch.Tensor) -> torch.Tensor:
     return off_diag.mean()
 
 
+def mean_tensor_loss(terms: list[torch.Tensor]) -> torch.Tensor:
+    if not terms:
+        raise ValueError("mean_tensor_loss requires at least one tensor")
+    if len(terms) == 1:
+        return terms[0]
+    return torch.stack(terms).mean()
+
+
 def cosine_same_diff(z1: torch.Tensor, z2: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     same = F.cosine_similarity(z1, z2, dim=-1).mean()
     sim = z1 @ z2.t()
@@ -687,7 +695,35 @@ class DiffusionTrainer:
 
         attn1 = None
         attn2 = None
-        if hasattr(self.model, "encode_style_tokens_full"):
+        site_tok1 = None
+        site_tok2 = None
+        low_tok1 = None
+        low_tok2 = None
+        mem_up16_1 = None
+        mem_up16_2 = None
+        mem_up32_1 = None
+        mem_up32_2 = None
+        if hasattr(self.model, "encode_style_pack_full"):
+            pack1, proxy1, attn1 = self.model.encode_style_pack_full(
+                style_img_v1,
+                style_ref_mask=style_ref_mask_v1,
+            )
+            pack2, proxy2, attn2 = self.model.encode_style_pack_full(
+                style_img_v2,
+                style_ref_mask=style_ref_mask_v2,
+            )
+            tok1 = pack1["tokens"]
+            tok2 = pack2["tokens"]
+            low_tok1 = pack1["t_low"]
+            low_tok2 = pack2["t_low"]
+            mem_up16_1 = pack1["memory_up_16"]
+            mem_up16_2 = pack2["memory_up_16"]
+            mem_up32_1 = pack1["memory_up_32"]
+            mem_up32_2 = pack2["memory_up_32"]
+            if hasattr(self.model, "stack_style_site_contexts_from_pack"):
+                site_tok1 = self.model.stack_style_site_contexts_from_pack(pack1)
+                site_tok2 = self.model.stack_style_site_contexts_from_pack(pack2)
+        elif hasattr(self.model, "encode_style_tokens_full"):
             tok1, proxy1, attn1 = self.model.encode_style_tokens_full(
                 style_img_v1,
                 style_ref_mask=style_ref_mask_v1,
@@ -727,8 +763,16 @@ class DiffusionTrainer:
                 proxy_band_loss(proxy1["pred_high"], proxy1["target_high"])
                 + proxy_band_loss(proxy2["pred_high"], proxy2["target_high"])
             )
-        z1 = F.normalize(tok1.mean(dim=1), dim=-1)
-        z2 = F.normalize(tok2.mean(dim=1), dim=-1)
+        z1_src = tok1.mean(dim=1)
+        z2_src = tok2.mean(dim=1)
+        if low_tok1 is not None and low_tok2 is not None and site_tok1 is not None and site_tok2 is not None:
+            z1_src = 0.5 * (low_tok1 + site_tok1[:, 1:].mean(dim=1))
+            z2_src = 0.5 * (low_tok2 + site_tok2[:, 1:].mean(dim=1))
+        elif site_tok1 is not None and site_tok2 is not None:
+            z1_src = 0.5 * (z1_src + site_tok1.mean(dim=1))
+            z2_src = 0.5 * (z2_src + site_tok2.mean(dim=1))
+        z1 = F.normalize(z1_src, dim=-1)
+        z2 = F.normalize(z2_src, dim=-1)
 
         font_ids = batch.get("font_ids", None)
         if font_ids is None:
@@ -738,11 +782,61 @@ class DiffusionTrainer:
             font_ids = font_ids.to(self.device, dtype=torch.long)
 
         out["loss_nce"] = info_nce_loss(z1, z2, font_ids=font_ids, temperature=self.nce_temperature)
-        out["loss_slot_nce"] = slotwise_info_nce_loss(tok1, tok2, font_ids=font_ids, temperature=self.nce_temperature)
         out["cos_same"], out["cos_diff"] = cosine_same_diff(z1, z2)
-        out["loss_cons"] = slot_consistency_loss(tok1, tok2)
-        out["loss_div"] = 0.5 * (token_diversity_loss(tok1) + token_diversity_loss(tok2))
-        out["token_collapse"] = 0.5 * (token_collapse_score(tok1) + token_collapse_score(tok2))
+        if (
+            site_tok1 is not None
+            and site_tok2 is not None
+            and mem_up16_1 is not None
+            and mem_up16_2 is not None
+            and mem_up32_1 is not None
+            and mem_up32_2 is not None
+        ):
+            out["loss_slot_nce"] = mean_tensor_loss(
+                [
+                    slotwise_info_nce_loss(site_tok1, site_tok2, font_ids=font_ids, temperature=self.nce_temperature),
+                    slotwise_info_nce_loss(mem_up16_1, mem_up16_2, font_ids=font_ids, temperature=self.nce_temperature),
+                    slotwise_info_nce_loss(mem_up32_1, mem_up32_2, font_ids=font_ids, temperature=self.nce_temperature),
+                ]
+            )
+            out["loss_cons"] = mean_tensor_loss(
+                [
+                    slot_consistency_loss(site_tok1, site_tok2),
+                    slot_consistency_loss(mem_up16_1, mem_up16_2),
+                    slot_consistency_loss(mem_up32_1, mem_up32_2),
+                ]
+            )
+            out["loss_div"] = mean_tensor_loss(
+                [
+                    token_diversity_loss(site_tok1),
+                    token_diversity_loss(site_tok2),
+                    token_diversity_loss(mem_up16_1),
+                    token_diversity_loss(mem_up16_2),
+                    token_diversity_loss(mem_up32_1),
+                    token_diversity_loss(mem_up32_2),
+                ]
+            )
+            out["token_collapse"] = mean_tensor_loss(
+                [
+                    token_collapse_score(site_tok1),
+                    token_collapse_score(site_tok2),
+                    token_collapse_score(mem_up16_1),
+                    token_collapse_score(mem_up16_2),
+                    token_collapse_score(mem_up32_1),
+                    token_collapse_score(mem_up32_2),
+                ]
+            )
+        else:
+            out["loss_slot_nce"] = slotwise_info_nce_loss(tok1, tok2, font_ids=font_ids, temperature=self.nce_temperature)
+            if site_tok1 is not None and site_tok2 is not None:
+                out["loss_slot_nce"] = 0.5 * (
+                    out["loss_slot_nce"]
+                    + slotwise_info_nce_loss(site_tok1, site_tok2, font_ids=font_ids, temperature=self.nce_temperature)
+                )
+            out["loss_cons"] = slot_consistency_loss(tok1, tok2)
+            if site_tok1 is not None and site_tok2 is not None:
+                out["loss_cons"] = 0.5 * (out["loss_cons"] + slot_consistency_loss(site_tok1, site_tok2))
+            out["loss_div"] = 0.5 * (token_diversity_loss(tok1) + token_diversity_loss(tok2))
+            out["token_collapse"] = 0.5 * (token_collapse_score(tok1) + token_collapse_score(tok2))
         if attn1 is not None and attn2 is not None:
             out["loss_attn_sep"] = 0.5 * (
                 attention_overlap_margin_loss(

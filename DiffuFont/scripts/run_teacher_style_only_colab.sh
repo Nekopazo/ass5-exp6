@@ -2,13 +2,14 @@
 set -euo pipefail
 
 ROOT="/scratch/yangximing/code/ass5-exp6/DiffuFont"
+PYTHON_BIN="/scratch/yangximing/miniconda3/envs/sg3/bin/python"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 RUN_MODE="daemon"
 LOG_FILE=""
 PID_FILE=""
 RESUME_CKPT=""
 SAVE_DIR_OVERRIDE=""
-PRETRAIN_STYLE_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/pretrain_style_only_site_dropout_20260308/style_encoder_pretrain.pt"
+PRETRAIN_STYLE_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/pretrain_style_only_lowpluslocal_16x16_20260309_112308/style_encoder_pretrain.pt"
 DEVICE_ARG="cuda:1"
 
 while [[ $# -gt 0 ]]; do
@@ -72,7 +73,7 @@ exec > >(tee -a "${LOG_FILE}") 2>&1
 echo "$$" > "${PID_FILE}"
 
 echo "[teacher_style_only] start $(date '+%Y-%m-%d %H:%M:%S')"
-echo "[teacher_style_only] root=${ROOT} pid=$$ device=${DEVICE_ARG} save_dir=${SAVE_DIR}"
+echo "[teacher_style_only] root=${ROOT} pid=$$ device=${DEVICE_ARG} python=${PYTHON_BIN} save_dir=${SAVE_DIR}"
 if [[ -n "${RESUME_CKPT}" ]]; then
   echo "[teacher_style_only] resume_ckpt=${RESUME_CKPT} (will continue from checkpoint step)"
 fi
@@ -98,7 +99,7 @@ else
   set --
 fi
 
-python -u train.py \
+"${PYTHON_BIN}" -u train.py \
   --teacher-line style_only \
   --trainer diffusion \
   --device "${DEVICE_ARG}" \
@@ -111,18 +112,9 @@ python -u train.py \
   --style-ref-count 12 \
   --style-ref-drop-prob 0.15 \
   --style-ref-drop-min-keep 4 \
-  --style-site-drop-prob 0.15 \
+  --style-site-drop-prob 0.10 \
   --style-site-drop-min-keep 1 \
   --aux-loss-warmup-steps 5000 \
-  --lambda-slot-nce 0.02 \
-  --lambda-cons 0.0 \
-  --lambda-div 0.0 \
-  --lambda-proxy-low 0.05 \
-  --lambda-proxy-mid 0.05 \
-  --lambda-proxy-high 0.05 \
-  --lambda-attn-sep 0.02 \
-  --lambda-attn-order 0.0 \
-  --lambda-attn-role 0.01 \
   --pretrained-style-encoder "${PRETRAIN_STYLE_CKPT}" \
   --num-workers 8 \
   --sample-every-steps 300 \

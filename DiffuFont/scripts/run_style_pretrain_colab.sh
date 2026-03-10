@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="/scratch/yangximing/code/ass5-exp6/DiffuFont"
+PYTHON_BIN="/scratch/yangximing/miniconda3/envs/sg3/bin/python"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 RUN_MODE="daemon"
 LOG_FILE=""
@@ -59,9 +60,9 @@ exec > >(tee -a "${LOG_FILE}") 2>&1
 echo "$$" > "${PID_FILE}"
 
 echo "[style_pretrain] start $(date '+%Y-%m-%d %H:%M:%S')"
-echo "[style_pretrain] root=${ROOT} pid=$$ device=${DEVICE_ARG} out=${OUT_PATH}"
+echo "[style_pretrain] root=${ROOT} pid=$$ device=${DEVICE_ARG} python=${PYTHON_BIN} out=${OUT_PATH}"
 
-python -u scripts/pretrain_style_encoder.py \
+"${PYTHON_BIN}" -u scripts/pretrain_style_encoder.py \
   --project-root "${ROOT}" \
   --out "${OUT_PATH}" \
   --log-file "${LOG_FILE}" \
@@ -71,15 +72,6 @@ python -u scripts/pretrain_style_encoder.py \
   --ref-per-style 12 \
   --p-ref-drop 0.15 \
   --min-keep 4 \
-  --lambda-slot-nce 0.02 \
-  --lambda-cons 0.0 \
-  --lambda-div 0.0 \
-  --lambda-proxy-low 0.05 \
-  --lambda-proxy-mid 0.05 \
-  --lambda-proxy-high 0.05 \
-  --lambda-attn-sep 0.02 \
-  --lambda-attn-order 0.0 \
-  --lambda-attn-role 0.0 \
   --device "$( [[ "${DEVICE_ARG}" == cuda:* ]] && echo cuda || echo "${DEVICE_ARG}" )" \
   --log-every 50
 

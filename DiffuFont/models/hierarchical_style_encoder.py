@@ -93,6 +93,49 @@ class CrossAttentionWithBias(nn.Module):
         return out, weights
 
 
+class QueryPoolingBlock(nn.Module):
+    """Pool a sequence of features into a small learned query set."""
+
+    def __init__(self, embed_dim: int, num_heads: int, num_queries: int):
+        super().__init__()
+        self.embed_dim = int(embed_dim)
+        self.num_queries = int(num_queries)
+        if self.num_queries <= 0:
+            raise ValueError(f"num_queries must be > 0, got {num_queries}")
+        self.query = nn.Parameter(torch.randn(self.num_queries, self.embed_dim) * 0.02)
+        self.attn = CrossAttentionWithBias(embed_dim=self.embed_dim, num_heads=int(num_heads))
+        self.norm = nn.LayerNorm(self.embed_dim)
+        self.ffn = nn.Sequential(
+            nn.LayerNorm(self.embed_dim),
+            nn.Linear(self.embed_dim, self.embed_dim * 4),
+            nn.SiLU(inplace=True),
+            nn.Linear(self.embed_dim * 4, self.embed_dim),
+        )
+        self.out_norm = nn.LayerNorm(self.embed_dim)
+
+    def forward(
+        self,
+        patch_tokens: torch.Tensor,
+        *,
+        key_padding_mask: Optional[torch.Tensor] = None,
+        need_weights: bool = False,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if patch_tokens.dim() != 3:
+            raise ValueError(f"patch_tokens must be 3D, got {tuple(patch_tokens.shape)}")
+        bsz = int(patch_tokens.size(0))
+        q = self.query.unsqueeze(0).expand(bsz, -1, -1)
+        out, weights = self.attn(
+            query=q,
+            key=patch_tokens,
+            value=patch_tokens,
+            key_padding_mask=key_padding_mask,
+            need_weights=need_weights,
+        )
+        out = self.norm(out + q)
+        out = self.out_norm(out + self.ffn(out))
+        return out, weights
+
+
 class HierarchicalStyleEncoderMixin:
     """Reusable low/mid/high token encoder for pretrain and generation."""
 
@@ -105,15 +148,27 @@ class HierarchicalStyleEncoderMixin:
         style_token_dim: int,
         style_token_count: int,
         local_token_count: int = 3,
+        style_memory_up16_count: int = 6,
+        style_memory_up32_count: int = 6,
+        style_memory_up16_pool_hw: int = 16,
+        style_memory_up32_pool_hw: int = 16,
     ) -> None:
         _ = local_token_count
         self.in_channels = int(in_channels)
         self.style_token_dim = int(style_token_dim)
         self.style_token_count = int(style_token_count)
+        self.style_memory_up16_count = int(style_memory_up16_count)
+        self.style_memory_up32_count = int(style_memory_up32_count)
+        self.style_memory_up16_pool_hw = int(style_memory_up16_pool_hw)
+        self.style_memory_up32_pool_hw = int(style_memory_up32_pool_hw)
         if self.style_token_dim <= 0:
             raise ValueError("style_token_dim must be > 0")
         if self.style_token_count != 3:
             raise ValueError(f"style_token_count must be 3 for low/mid/high routing, got {self.style_token_count}")
+        if self.style_memory_up16_count <= 0 or self.style_memory_up32_count <= 0:
+            raise ValueError("style memory token counts must be > 0")
+        if self.style_memory_up16_pool_hw <= 0 or self.style_memory_up32_pool_hw <= 0:
+            raise ValueError("style memory pool hw must be > 0")
 
         self.style_backbone = ResNet18FeaturePyramid(in_channels=self.in_channels)
 
@@ -176,6 +231,18 @@ class HierarchicalStyleEncoderMixin:
             nn.SiLU(inplace=True),
             nn.Linear(self.style_token_dim * 2, 64),
         )
+        self.memory_up16_feat_to_token = nn.Linear(128, self.style_token_dim)
+        self.memory_up32_feat_to_token = nn.Linear(64, self.style_token_dim)
+        self.memory_up16_pool = QueryPoolingBlock(
+            embed_dim=self.style_token_dim,
+            num_heads=heads,
+            num_queries=self.style_memory_up16_count,
+        )
+        self.memory_up32_pool = QueryPoolingBlock(
+            embed_dim=self.style_token_dim,
+            num_heads=heads,
+            num_queries=self.style_memory_up32_count,
+        )
 
     def iter_style_backbone_low_modules(self) -> tuple[nn.Module, ...]:
         return (
@@ -206,6 +273,33 @@ class HierarchicalStyleEncoderMixin:
         weights = weights / weights.sum(dim=1, keepdim=True).clamp_min(1.0)
         return (feat * weights.view(b, r, 1, 1, 1)).sum(dim=1).mean(dim=(2, 3))
 
+    def _build_key_padding_mask(
+        self,
+        feat: torch.Tensor,
+        *,
+        b: int,
+        r: int,
+        ref_mask: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
+        _, _, h, w = feat.shape
+        if ref_mask is None:
+            return None
+        valid = ref_mask.to(device=feat.device, dtype=torch.float32) > 0
+        return ~valid.unsqueeze(-1).expand(b, r, h * w).reshape(b, r * h * w)
+
+    def _flatten_projected_tokens(
+        self,
+        feat: torch.Tensor,
+        *,
+        b: int,
+        r: int,
+        projector: nn.Module,
+    ) -> torch.Tensor:
+        _, c, h, w = feat.shape
+        patch = feat.view(b * r, c, h * w).transpose(1, 2).contiguous()
+        patch = projector(patch)
+        return patch.view(b, r * h * w, self.style_token_dim)
+
     def _aggregate_scale_token(
         self,
         feat: torch.Tensor,
@@ -221,15 +315,14 @@ class HierarchicalStyleEncoderMixin:
         out_norm: nn.Module,
         return_attention: bool,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        _, c, h, w = feat.shape
-        patch = feat.view(b * r, c, h * w).transpose(1, 2).contiguous()
-        patch = projector(patch)
-        patch = patch.view(b, r * h * w, self.style_token_dim)
-
-        key_padding_mask = None
-        if ref_mask is not None:
-            valid = ref_mask.to(device=feat.device, dtype=torch.float32) > 0
-            key_padding_mask = ~valid.unsqueeze(-1).expand(b, r, h * w).reshape(b, r * h * w)
+        _, _, h, w = feat.shape
+        patch = self._flatten_projected_tokens(
+            feat,
+            b=b,
+            r=r,
+            projector=projector,
+        )
+        key_padding_mask = self._build_key_padding_mask(feat, b=b, r=r, ref_mask=ref_mask)
 
         q = query.unsqueeze(0).expand(b, -1, -1)
         out, weights = attn(
@@ -246,6 +339,30 @@ class HierarchicalStyleEncoderMixin:
             return tok, None
         attn_map = weights.view(b, 1, r, h, w).squeeze(1)
         return tok, attn_map
+
+    def _aggregate_style_memory(
+        self,
+        feat: torch.Tensor,
+        *,
+        b: int,
+        r: int,
+        ref_mask: Optional[torch.Tensor],
+        projector: nn.Module,
+        pooler: QueryPoolingBlock,
+    ) -> torch.Tensor:
+        patch = self._flatten_projected_tokens(
+            feat,
+            b=b,
+            r=r,
+            projector=projector,
+        )
+        key_padding_mask = self._build_key_padding_mask(feat, b=b, r=r, ref_mask=ref_mask)
+        memory, _ = pooler(
+            patch,
+            key_padding_mask=key_padding_mask,
+            need_weights=False,
+        )
+        return memory
 
     @staticmethod
     def _pool_to_token_grid(feat: torch.Tensor, target_hw: tuple[int, int]) -> torch.Tensor:
@@ -272,6 +389,14 @@ class HierarchicalStyleEncoderMixin:
         token_grid_hw = feat_low_raw.shape[-2:]
         feat_mid_tok_raw = self._pool_to_token_grid(feat_mid_raw, token_grid_hw)
         feat_high_tok_raw = self._pool_to_token_grid(feat_high_raw, token_grid_hw)
+        feat_mid_mem_raw = self._pool_to_token_grid(
+            feat_mid_raw,
+            (self.style_memory_up16_pool_hw, self.style_memory_up16_pool_hw),
+        )
+        feat_high_mem_raw = self._pool_to_token_grid(
+            feat_high_raw,
+            (self.style_memory_up32_pool_hw, self.style_memory_up32_pool_hw),
+        )
 
         t_low, attn_low = self._aggregate_scale_token(
             feat_low_raw,
@@ -314,7 +439,31 @@ class HierarchicalStyleEncoderMixin:
         )
 
         tokens = torch.stack([t_low, t_mid, t_high], dim=1)
-        out: dict[str, torch.Tensor] = {"tokens": tokens}
+        memory_up_16 = self._aggregate_style_memory(
+            feat_mid_mem_raw,
+            b=b,
+            r=r,
+            ref_mask=style_ref_mask,
+            projector=self.memory_up16_feat_to_token,
+            pooler=self.memory_up16_pool,
+        )
+        memory_up_32 = self._aggregate_style_memory(
+            feat_high_mem_raw,
+            b=b,
+            r=r,
+            ref_mask=style_ref_mask,
+            projector=self.memory_up32_feat_to_token,
+            pooler=self.memory_up32_pool,
+        )
+
+        out: dict[str, torch.Tensor] = {
+            "tokens": tokens,
+            "t_low": t_low,
+            "t_mid": t_mid,
+            "t_high": t_high,
+            "memory_up_16": memory_up_16,
+            "memory_up_32": memory_up_32,
+        }
 
         if return_token_attention:
             maps = []
@@ -331,9 +480,11 @@ class HierarchicalStyleEncoderMixin:
             out["token_attn"] = torch.stack(maps, dim=1)  # (B,3,R,32,32)
 
         if return_proxy:
+            # Keep low proxy on the coarse global token; supervise 16/32 through
+            # the memory pathway that actually feeds the routed style contexts.
             out["pred_low"] = self.t_low_proxy_head(t_low)
-            out["pred_mid"] = self.t_mid_proxy_head(t_mid)
-            out["pred_high"] = self.t_high_proxy_head(t_high)
+            out["pred_mid"] = self.t_mid_proxy_head(memory_up_16.mean(dim=1))
+            out["pred_high"] = self.t_high_proxy_head(memory_up_32.mean(dim=1))
             out["target_low"] = self._masked_ref_average(feat_low.detach(), style_ref_mask)
             out["target_mid"] = self._masked_ref_average(feat_mid.detach(), style_ref_mask)
             out["target_high"] = self._masked_ref_average(feat_high.detach(), style_ref_mask)
@@ -406,6 +557,47 @@ class HierarchicalStyleEncoderMixin:
             "target_high": out["target_high"],
         }
         return out["tokens"], proxy, out["token_attn"]
+
+    def encode_style_pack(
+        self,
+        style_img: torch.Tensor,
+        style_ref_mask: Optional[torch.Tensor] = None,
+    ) -> dict[str, torch.Tensor]:
+        return self._encode_style_impl(
+            style_img=style_img,
+            style_ref_mask=style_ref_mask,
+            return_token_attention=False,
+            return_proxy=False,
+        )
+
+    def encode_style_pack_full(
+        self,
+        style_img: torch.Tensor,
+        style_ref_mask: Optional[torch.Tensor] = None,
+    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], torch.Tensor]:
+        out = self._encode_style_impl(
+            style_img=style_img,
+            style_ref_mask=style_ref_mask,
+            return_token_attention=True,
+            return_proxy=True,
+        )
+        proxy = {
+            "pred_low": out["pred_low"],
+            "pred_mid": out["pred_mid"],
+            "pred_high": out["pred_high"],
+            "target_low": out["target_low"],
+            "target_mid": out["target_mid"],
+            "target_high": out["target_high"],
+        }
+        pack = {
+            "tokens": out["tokens"],
+            "t_low": out["t_low"],
+            "t_mid": out["t_mid"],
+            "t_high": out["t_high"],
+            "memory_up_16": out["memory_up_16"],
+            "memory_up_32": out["memory_up_32"],
+        }
+        return pack, proxy, out["token_attn"]
 
     def encode_style_embedding(
         self,

@@ -31,25 +31,31 @@ from style_augment import build_base_glyph_transform, build_style_reference_tran
 
 
 STYLE_ONLY_MAIN_DEFAULTS: Dict[str, float | int] = {
-    "lambda_nce": 0.0,
+    "lambda_nce": 0.05,
     "aux_loss_warmup_steps": 5000,
-    "lambda_slot_nce": 0.02,
-    "lambda_cons": 0.0,
-    "lambda_div": 0.0,
+    "lambda_slot_nce": 0.03,
+    "lambda_cons": 0.02,
+    "lambda_div": 0.01,
     "lambda_proxy_low": 0.05,
     "lambda_proxy_mid": 0.05,
     "lambda_proxy_high": 0.05,
-    "lambda_attn_sep": 0.02,
+    "lambda_attn_sep": 0.01,
     "lambda_attn_order": 0.0,
-    "lambda_attn_role": 0.01,
-    "attn_overlap_margin": 0.80,
+    "lambda_attn_role": 0.0,
+    "attn_overlap_margin": 0.70,
     "attn_entropy_gap": 0.03,
     "style_ref_drop_prob": 0.15,
     "style_ref_drop_min_keep": 4,
-    "style_site_drop_prob": 0.15,
+    "style_site_drop_prob": 0.10,
     "style_site_drop_min_keep": 1,
     "freeze_style_backbone_steps": 5000,
     "style_backbone_lr_scale": 0.1,
+    "style_memory_up16_count": 6,
+    "style_memory_up32_count": 6,
+    "style_memory_up16_pool_hw": 16,
+    "style_memory_up32_pool_hw": 16,
+    "content_query_up16_count": 2,
+    "content_query_up32_count": 4,
 }
 
 
@@ -367,6 +373,36 @@ def main() -> None:
     parser.add_argument("--aux-loss-warmup-steps", type=int, default=int(STYLE_ONLY_MAIN_DEFAULTS["aux_loss_warmup_steps"]))
     parser.add_argument("--attn-overlap-margin", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["attn_overlap_margin"]))
     parser.add_argument("--attn-entropy-gap", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["attn_entropy_gap"]))
+    parser.add_argument(
+        "--style-memory-up16-count",
+        type=int,
+        default=int(STYLE_ONLY_MAIN_DEFAULTS["style_memory_up16_count"]),
+    )
+    parser.add_argument(
+        "--style-memory-up32-count",
+        type=int,
+        default=int(STYLE_ONLY_MAIN_DEFAULTS["style_memory_up32_count"]),
+    )
+    parser.add_argument(
+        "--style-memory-up16-pool-hw",
+        type=int,
+        default=int(STYLE_ONLY_MAIN_DEFAULTS["style_memory_up16_pool_hw"]),
+    )
+    parser.add_argument(
+        "--style-memory-up32-pool-hw",
+        type=int,
+        default=int(STYLE_ONLY_MAIN_DEFAULTS["style_memory_up32_pool_hw"]),
+    )
+    parser.add_argument(
+        "--content-query-up16-count",
+        type=int,
+        default=int(STYLE_ONLY_MAIN_DEFAULTS["content_query_up16_count"]),
+    )
+    parser.add_argument(
+        "--content-query-up32-count",
+        type=int,
+        default=int(STYLE_ONLY_MAIN_DEFAULTS["content_query_up32_count"]),
+    )
     parser.add_argument("--diffusion-steps", type=int, default=1000)
     parser.add_argument(
         "--total-steps",
@@ -604,6 +640,8 @@ def main() -> None:
         "[train] "
         f"mode={active_mode} style_attn={FIXED_STYLE_TRANSFORMER_SCALES} "
         f"style_local_mod={FIXED_STYLE_LOCAL_MOD_SCALES} "
+        f"style_memory=(up16:{int(args.style_memory_up16_count)},up32:{int(args.style_memory_up32_count)}) "
+        f"content_queries=(up16:{int(args.content_query_up16_count)},up32:{int(args.content_query_up32_count)}) "
         f"steps_per_epoch={steps_per_epoch} total_steps={total_steps} grad_accum={args.grad_accum}"
     )
 
@@ -618,6 +656,12 @@ def main() -> None:
         conditioning_profile=active_mode,
         style_token_dim=int(args.style_token_dim),
         style_token_count=int(args.style_token_count),
+        style_memory_up16_count=int(args.style_memory_up16_count),
+        style_memory_up32_count=int(args.style_memory_up32_count),
+        style_memory_up16_pool_hw=int(args.style_memory_up16_pool_hw),
+        style_memory_up32_pool_hw=int(args.style_memory_up32_pool_hw),
+        content_query_up16_count=int(args.content_query_up16_count),
+        content_query_up32_count=int(args.content_query_up32_count),
     )
 
     _try_enable_xformers(model)

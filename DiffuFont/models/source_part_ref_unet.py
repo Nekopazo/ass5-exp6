@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .hierarchical_style_encoder import HierarchicalStyleEncoderMixin
+from .hierarchical_style_encoder import CrossAttentionWithBias, HierarchicalStyleEncoderMixin
 from .source_fontdiffuser import ContentEncoder, UNet
 
 
@@ -22,11 +22,83 @@ FIXED_STYLE_TOKEN_CONSUMER_MAP = {
 }
 FIXED_STYLE_SITE_ARCH = {
     "mid": "transformer_cross_attn",
-    "up_16": "transformer_cross_attn",
-    "up_32": "transformer_cross_attn",
+    "up_16": "transformer_cross_attn_content_guided_tokens",
+    "up_32": "transformer_cross_attn_content_guided_tokens",
     "up_64": "self_attention_only",
 }
 ACTIVE_STYLE_SITES = ("mid", "up_16", "up_32")
+
+
+class ContentQueryPool(nn.Module):
+    """Pool a content feature map into a small set of learned queries."""
+
+    def __init__(self, in_channels: int, token_dim: int, num_queries: int, num_heads: int):
+        super().__init__()
+        self.token_dim = int(token_dim)
+        self.num_queries = int(num_queries)
+        if self.num_queries <= 0:
+            raise ValueError(f"num_queries must be > 0, got {num_queries}")
+        self.proj = nn.Conv2d(int(in_channels), self.token_dim, kernel_size=1)
+        self.query = nn.Parameter(torch.randn(self.num_queries, self.token_dim) * 0.02)
+        self.attn = CrossAttentionWithBias(embed_dim=self.token_dim, num_heads=int(num_heads))
+        self.norm = nn.LayerNorm(self.token_dim)
+        self.ffn = nn.Sequential(
+            nn.LayerNorm(self.token_dim),
+            nn.Linear(self.token_dim, self.token_dim * 4),
+            nn.SiLU(inplace=True),
+            nn.Linear(self.token_dim * 4, self.token_dim),
+        )
+        self.out_norm = nn.LayerNorm(self.token_dim)
+
+    def forward(self, feat: torch.Tensor) -> torch.Tensor:
+        if feat.dim() != 4:
+            raise ValueError(f"content feature must be 4D, got {tuple(feat.shape)}")
+        x = self.proj(feat).flatten(2).transpose(1, 2).contiguous()
+        q = self.query.unsqueeze(0).expand(int(x.size(0)), -1, -1)
+        out, _ = self.attn(
+            query=q,
+            key=x,
+            value=x,
+            key_padding_mask=None,
+            need_weights=False,
+        )
+        out = self.norm(out + q)
+        out = self.out_norm(out + self.ffn(out))
+        return out
+
+
+class ContentGuidedRetriever(nn.Module):
+    """Retrieve style tokens from style memory using content queries."""
+
+    def __init__(self, token_dim: int, num_heads: int):
+        super().__init__()
+        self.token_dim = int(token_dim)
+        self.attn = CrossAttentionWithBias(embed_dim=self.token_dim, num_heads=int(num_heads))
+        self.norm = nn.LayerNorm(self.token_dim)
+        self.ffn = nn.Sequential(
+            nn.LayerNorm(self.token_dim),
+            nn.Linear(self.token_dim, self.token_dim * 4),
+            nn.SiLU(inplace=True),
+            nn.Linear(self.token_dim * 4, self.token_dim),
+        )
+        self.out_norm = nn.LayerNorm(self.token_dim)
+        self.gate = nn.Parameter(torch.zeros(1))
+
+    def forward(self, content_queries: torch.Tensor, style_memory: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if content_queries.dim() != 3 or style_memory.dim() != 3:
+            raise ValueError(
+                f"content_queries/style_memory must be 3D, got {tuple(content_queries.shape)} and {tuple(style_memory.shape)}"
+            )
+        out, weights = self.attn(
+            query=content_queries,
+            key=style_memory,
+            value=style_memory,
+            key_padding_mask=None,
+            need_weights=True,
+        )
+        out = self.norm(out + content_queries)
+        out = self.out_norm(out + self.ffn(out))
+        return self.gate.tanh() * out, weights
 
 
 class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
@@ -48,6 +120,12 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         style_token_dim: int = 256,
         style_token_count: int = 3,
         local_token_count: int = 3,
+        style_memory_up16_count: int = 6,
+        style_memory_up32_count: int = 6,
+        style_memory_up16_pool_hw: int = 16,
+        style_memory_up32_pool_hw: int = 16,
+        content_query_up16_count: int = 2,
+        content_query_up32_count: int = 4,
     ):
         super().__init__()
         _ = local_token_count
@@ -60,6 +138,8 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         self.content_encoder_downsample_size = int(content_encoder_downsample_size)
         self.style_token_dim = int(style_token_dim)
         self.style_token_count = int(style_token_count)
+        self.content_query_up16_count = int(content_query_up16_count)
+        self.content_query_up32_count = int(content_query_up32_count)
         if self.style_token_dim <= 0:
             raise ValueError("style_token_dim must be > 0")
         if self.style_token_count != 3:
@@ -79,11 +159,41 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
             style_token_dim=self.style_token_dim,
             style_token_count=self.style_token_count,
             local_token_count=3,
+            style_memory_up16_count=int(style_memory_up16_count),
+            style_memory_up32_count=int(style_memory_up32_count),
+            style_memory_up16_pool_hw=int(style_memory_up16_pool_hw),
+            style_memory_up32_pool_hw=int(style_memory_up32_pool_hw),
         )
 
         self.inject_mid = self._build_inject_head()
         self.inject_up16 = self._build_inject_head()
         self.inject_up32 = self._build_inject_head()
+
+        heads = 8 if (self.style_token_dim % 8 == 0) else (4 if (self.style_token_dim % 4 == 0) else 1)
+        content_query_up16_channels = int(content_start_channel) * 4
+        content_query_up32_channels = int(content_start_channel) * 2
+        self.content_query_up16 = (
+            ContentQueryPool(
+                in_channels=content_query_up16_channels,
+                token_dim=self.style_token_dim,
+                num_queries=self.content_query_up16_count,
+                num_heads=heads,
+            )
+            if self.content_query_up16_count > 0
+            else None
+        )
+        self.content_query_up32 = (
+            ContentQueryPool(
+                in_channels=content_query_up32_channels,
+                token_dim=self.style_token_dim,
+                num_queries=self.content_query_up32_count,
+                num_heads=heads,
+            )
+            if self.content_query_up32_count > 0
+            else None
+        )
+        self.retriever_up16 = ContentGuidedRetriever(self.style_token_dim, heads) if self.content_query_up16 is not None else None
+        self.retriever_up32 = ContentGuidedRetriever(self.style_token_dim, heads) if self.content_query_up32 is not None else None
 
         self.unet = UNet(
             sample_size=self.unet_input_size,
@@ -130,6 +240,43 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
             nn.SiLU(inplace=True),
             nn.Linear(self.style_token_dim, self.style_token_dim),
         )
+
+    def project_style_sites(self, style_tokens: torch.Tensor) -> dict[str, torch.Tensor]:
+        if style_tokens.dim() != 3 or int(style_tokens.size(1)) != 3:
+            raise ValueError(f"style_tokens must be (B,3,D), got {tuple(style_tokens.shape)}")
+        t_low = style_tokens[:, 0]
+        t_mid = style_tokens[:, 1]
+        t_high = style_tokens[:, 2]
+        return {
+            "mid": self.inject_mid(t_low),
+            "up_16": self.inject_up16(t_mid),
+            "up_32": self.inject_up32(t_high),
+        }
+
+    def project_style_sites_from_pack(self, style_pack: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        if "t_low" not in style_pack:
+            if "tokens" not in style_pack:
+                raise ValueError("style_pack must contain either t_low or tokens")
+            return self.project_style_sites(style_pack["tokens"])
+        memory_up16 = style_pack.get("memory_up_16", None)
+        memory_up32 = style_pack.get("memory_up_32", None)
+        if memory_up16 is None or memory_up32 is None:
+            if "tokens" not in style_pack:
+                raise ValueError("style_pack missing memory tensors and tokens fallback")
+            return self.project_style_sites(style_pack["tokens"])
+        return {
+            "mid": self.inject_mid(style_pack["t_low"]),
+            "up_16": self.inject_up16(memory_up16.mean(dim=1)),
+            "up_32": self.inject_up32(memory_up32.mean(dim=1)),
+        }
+
+    def stack_style_site_contexts(self, style_tokens: torch.Tensor) -> torch.Tensor:
+        site_contexts = self.project_style_sites(style_tokens)
+        return torch.stack([site_contexts[name] for name in ACTIVE_STYLE_SITES], dim=1)
+
+    def stack_style_site_contexts_from_pack(self, style_pack: dict[str, torch.Tensor]) -> torch.Tensor:
+        site_contexts = self.project_style_sites_from_pack(style_pack)
+        return torch.stack([site_contexts[name] for name in ACTIVE_STYLE_SITES], dim=1)
 
     def load_style_pretrained(self, ckpt_path: str) -> None:
         obj = torch.load(ckpt_path, map_location="cpu")
@@ -226,14 +373,34 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
             content_residual_features[3],
         ]
 
-    def _build_style_site_contexts(self, style_tokens: torch.Tensor) -> dict[str, torch.Tensor]:
-        t_low = style_tokens[:, 0]
-        t_mid = style_tokens[:, 1]
-        t_high = style_tokens[:, 2]
+    def _build_content_guided_style_contexts(
+        self,
+        style_pack: dict[str, torch.Tensor],
+        content_residual_features: list[torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        mid_ctx = self.inject_mid(style_pack["t_low"]).unsqueeze(1)
+
+        memory_up16 = style_pack["memory_up_16"]
+        memory_up32 = style_pack["memory_up_32"]
+        up16_ctx = self.inject_up16(memory_up16.mean(dim=1)).unsqueeze(1)
+        up32_ctx = self.inject_up32(memory_up32.mean(dim=1)).unsqueeze(1)
+
+        if self.content_query_up16 is not None and self.retriever_up16 is not None:
+            content_feat_up16 = content_residual_features[3]
+            guided_q_up16 = self.content_query_up16(content_feat_up16)
+            guided_up16, _ = self.retriever_up16(guided_q_up16, memory_up16)
+            up16_ctx = self.inject_up16(guided_up16)
+
+        if self.content_query_up32 is not None and self.retriever_up32 is not None:
+            content_feat_up32 = content_residual_features[2]
+            guided_q_up32 = self.content_query_up32(content_feat_up32)
+            guided_up32, _ = self.retriever_up32(guided_q_up32, memory_up32)
+            up32_ctx = self.inject_up32(guided_up32)
+
         style_contexts = {
-            "mid": self.inject_mid(t_low).unsqueeze(1),
-            "up_16": self.inject_up16(t_mid).unsqueeze(1),
-            "up_32": self.inject_up32(t_high).unsqueeze(1),
+            "mid": mid_ctx,
+            "up_16": up16_ctx,
+            "up_32": up32_ctx,
         }
         style_contexts = self._apply_style_site_dropout(style_contexts)
         style_contexts = self._apply_style_site_force_mask(style_contexts)
@@ -275,13 +442,22 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         mode: str,
         style_img: Optional[torch.Tensor],
         style_ref_mask: Optional[torch.Tensor],
+        content_residual_features: list[torch.Tensor],
     ) -> Optional[dict[str, torch.Tensor]]:
         mode_norm = self._normalize_conditioning_mode(mode)
         if mode_norm == "baseline" or style_img is None:
             return None
 
-        tokens = self.encode_style_tokens(style_img, style_ref_mask=style_ref_mask)
-        return self._build_style_site_contexts(tokens)
+        style_pack = self.encode_style_pack(style_img, style_ref_mask=style_ref_mask)
+        return self._build_content_guided_style_contexts(style_pack, content_residual_features)
+
+    def get_content_guided_gate_values(self) -> dict[str, float]:
+        out: dict[str, float] = {}
+        if self.retriever_up16 is not None:
+            out["gate_up_16"] = float(self.retriever_up16.gate.detach().tanh().item())
+        if self.retriever_up32 is not None:
+            out["gate_up_32"] = float(self.retriever_up32.gate.detach().tanh().item())
+        return out
 
     def encode_to_latent(self, x_pixel: torch.Tensor) -> torch.Tensor:
         return F.interpolate(x_pixel, size=self.unet_input_size, mode="bilinear", align_corners=False)
@@ -310,6 +486,7 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
             mode,
             style_img,
             style_ref_mask=style_ref_mask,
+            content_residual_features=content_residual_features,
         )
 
         encoder_hidden_states = [
