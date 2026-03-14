@@ -133,8 +133,10 @@ class StyleEncoderModule(nn.Module, HierarchicalStyleEncoderMixin):
         style_token_dim: int = 256,
         style_token_count: int = 3,
         local_token_count: int = 3,
+        style_memory_mid_count: int = 4,
         style_memory_up16_count: int = 6,
         style_memory_up32_count: int = 6,
+        style_memory_mid_pool_hw: int = 8,
         style_memory_up16_pool_hw: int = 16,
         style_memory_up32_pool_hw: int = 16,
     ):
@@ -145,8 +147,10 @@ class StyleEncoderModule(nn.Module, HierarchicalStyleEncoderMixin):
             style_token_dim=int(style_token_dim),
             style_token_count=int(style_token_count),
             local_token_count=int(local_token_count),
+            style_memory_mid_count=int(style_memory_mid_count),
             style_memory_up16_count=int(style_memory_up16_count),
             style_memory_up32_count=int(style_memory_up32_count),
+            style_memory_mid_pool_hw=int(style_memory_mid_pool_hw),
             style_memory_up16_pool_hw=int(style_memory_up16_pool_hw),
             style_memory_up32_pool_hw=int(style_memory_up32_pool_hw),
         )
@@ -180,12 +184,13 @@ class StyleEncoderModule(nn.Module, HierarchicalStyleEncoderMixin):
         return torch.stack([site_contexts[name] for name in ordered_sites], dim=1)
 
     def project_style_sites_from_pack(self, style_pack: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        memory_mid = style_pack.get("memory_mid_8", None)
         memory_up16 = style_pack.get("memory_up_16", None)
         memory_up32 = style_pack.get("memory_up_32", None)
-        if memory_up16 is None or memory_up32 is None:
+        if memory_mid is None or memory_up16 is None or memory_up32 is None:
             return self.project_style_sites(style_pack["tokens"])
         return {
-            "mid": self.inject_mid(style_pack["t_low"]),
+            "mid": self.inject_mid(memory_mid.mean(dim=1)),
             "up_16": self.inject_up16(memory_up16.mean(dim=1)),
             "up_32": self.inject_up32(memory_up32.mean(dim=1)),
         }
@@ -614,13 +619,15 @@ def mean_tensor_loss(terms: List[torch.Tensor]) -> torch.Tensor:
 def build_style_supervision_views(encoder: StyleEncoderModule, style_pack: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
     site_tok = encoder.stack_style_site_contexts_from_pack(style_pack)
     local_site_tok = site_tok[:, 1:] if int(site_tok.size(1)) > 1 else site_tok
+    memory_mid = style_pack["memory_mid_8"]
     return {
-        "global_low": style_pack["t_low"],
+        "global_low": memory_mid.mean(dim=1),
         "site_tok": site_tok,
         "local_site_tok": local_site_tok,
+        "memory_mid": memory_mid,
         "memory_up16": style_pack["memory_up_16"],
         "memory_up32": style_pack["memory_up_32"],
-        "contrastive_embed": 0.5 * (style_pack["t_low"] + local_site_tok.mean(dim=1)),
+        "contrastive_embed": 0.5 * (memory_mid.mean(dim=1) + local_site_tok.mean(dim=1)),
     }
 
 
@@ -682,8 +689,10 @@ def main() -> None:
     parser.add_argument("--lambda-attn-role", type=float, default=0.0)
     parser.add_argument("--attn-overlap-margin", type=float, default=0.70)
     parser.add_argument("--attn-entropy-gap", type=float, default=0.03)
+    parser.add_argument("--style-memory-mid-count", type=int, default=4)
     parser.add_argument("--style-memory-up16-count", type=int, default=6)
     parser.add_argument("--style-memory-up32-count", type=int, default=6)
+    parser.add_argument("--style-memory-mid-pool-hw", type=int, default=8)
     parser.add_argument("--style-memory-up16-pool-hw", type=int, default=16)
     parser.add_argument("--style-memory-up32-pool-hw", type=int, default=16)
     parser.add_argument("--image-size", type=int, default=128)
@@ -757,8 +766,10 @@ def main() -> None:
         style_token_dim=int(args.style_token_dim),
         style_token_count=int(args.style_token_count),
         local_token_count=int(args.local_token_count),
+        style_memory_mid_count=int(args.style_memory_mid_count),
         style_memory_up16_count=int(args.style_memory_up16_count),
         style_memory_up32_count=int(args.style_memory_up32_count),
+        style_memory_mid_pool_hw=int(args.style_memory_mid_pool_hw),
         style_memory_up16_pool_hw=int(args.style_memory_up16_pool_hw),
         style_memory_up32_pool_hw=int(args.style_memory_up32_pool_hw),
     ).to(device)
@@ -791,10 +802,31 @@ def main() -> None:
             "inject_up32.1.bias",
             "inject_up32.3.weight",
             "inject_up32.3.bias",
+            "memory_mid_feat_to_token.weight",
+            "memory_mid_feat_to_token.bias",
             "memory_up16_feat_to_token.weight",
             "memory_up16_feat_to_token.bias",
             "memory_up32_feat_to_token.weight",
             "memory_up32_feat_to_token.bias",
+            "memory_mid_pool.query",
+            "memory_mid_pool.attn.q_proj.weight",
+            "memory_mid_pool.attn.q_proj.bias",
+            "memory_mid_pool.attn.k_proj.weight",
+            "memory_mid_pool.attn.k_proj.bias",
+            "memory_mid_pool.attn.v_proj.weight",
+            "memory_mid_pool.attn.v_proj.bias",
+            "memory_mid_pool.attn.out_proj.weight",
+            "memory_mid_pool.attn.out_proj.bias",
+            "memory_mid_pool.norm.weight",
+            "memory_mid_pool.norm.bias",
+            "memory_mid_pool.ffn.0.weight",
+            "memory_mid_pool.ffn.0.bias",
+            "memory_mid_pool.ffn.1.weight",
+            "memory_mid_pool.ffn.1.bias",
+            "memory_mid_pool.ffn.3.weight",
+            "memory_mid_pool.ffn.3.bias",
+            "memory_mid_pool.out_norm.weight",
+            "memory_mid_pool.out_norm.bias",
             "memory_up16_pool.query",
             "memory_up16_pool.attn.q_proj.weight",
             "memory_up16_pool.attn.q_proj.bias",
@@ -904,7 +936,7 @@ def main() -> None:
     log(
         f"device={device} train_fonts={len(train_fonts)} val_fonts={len(val_fonts)} "
         f"steps={int(args.steps)} batch={int(args.batch_size)} ref={int(args.ref_per_style)} "
-        f"style_memory=(up16:{int(args.style_memory_up16_count)},up32:{int(args.style_memory_up32_count)}) "
+        f"style_memory=(mid:{int(args.style_memory_mid_count)},up16:{int(args.style_memory_up16_count)},up32:{int(args.style_memory_up32_count)}) "
         f"lambda_slot_nce={float(args.lambda_slot_nce):g} "
         f"lambda_cons={float(args.lambda_cons):g} lambda_div={float(args.lambda_div):g} "
         f"lambda_proxy_low={float(args.lambda_proxy_low):g} "
@@ -932,6 +964,8 @@ def main() -> None:
             sup2 = build_style_supervision_views(encoder, pack2)
             site_tok1 = sup1["site_tok"]
             site_tok2 = sup2["site_tok"]
+            mem_mid_1 = sup1["memory_mid"]
+            mem_mid_2 = sup2["memory_mid"]
             mem_up16_1 = sup1["memory_up16"]
             mem_up16_2 = sup2["memory_up16"]
             mem_up32_1 = sup1["memory_up32"]
@@ -943,18 +977,22 @@ def main() -> None:
             loss_slot_nce = mean_tensor_loss(
                 [
                     slotwise_info_nce_loss(site_tok1, site_tok2, temperature=float(args.tau)),
+                    slotwise_info_nce_loss(mem_mid_1, mem_mid_2, temperature=float(args.tau)),
                     slotwise_info_nce_loss(mem_up16_1, mem_up16_2, temperature=float(args.tau)),
                     slotwise_info_nce_loss(mem_up32_1, mem_up32_2, temperature=float(args.tau)),
                 ]
             )
             loss_cons_site = slot_consistency_loss(site_tok1, site_tok2)
+            loss_cons_mem_mid = slot_consistency_loss(mem_mid_1, mem_mid_2)
             loss_cons_mem_up16 = slot_consistency_loss(mem_up16_1, mem_up16_2)
             loss_cons_mem_up32 = slot_consistency_loss(mem_up32_1, mem_up32_2)
-            loss_cons = mean_tensor_loss([loss_cons_site, loss_cons_mem_up16, loss_cons_mem_up32])
+            loss_cons = mean_tensor_loss([loss_cons_site, loss_cons_mem_mid, loss_cons_mem_up16, loss_cons_mem_up32])
             loss_div = mean_tensor_loss(
                 [
                     token_diversity_loss(site_tok1),
                     token_diversity_loss(site_tok2),
+                    token_diversity_loss(mem_mid_1),
+                    token_diversity_loss(mem_mid_2),
                     token_diversity_loss(mem_up16_1),
                     token_diversity_loss(mem_up16_2),
                     token_diversity_loss(mem_up32_1),
@@ -965,6 +1003,8 @@ def main() -> None:
                 [
                     token_collapse_score(site_tok1),
                     token_collapse_score(site_tok2),
+                    token_collapse_score(mem_mid_1),
+                    token_collapse_score(mem_mid_2),
                     token_collapse_score(mem_up16_1),
                     token_collapse_score(mem_up16_2),
                     token_collapse_score(mem_up32_1),
@@ -1050,6 +1090,8 @@ def main() -> None:
                         esup2 = build_style_supervision_views(encoder, epack2)
                         esite1 = esup1["site_tok"]
                         esite2 = esup2["site_tok"]
+                        emem_mid_1 = esup1["memory_mid"]
+                        emem_mid_2 = esup2["memory_mid"]
                         emem_up16_1 = esup1["memory_up16"]
                         emem_up16_2 = esup2["memory_up16"]
                         emem_up32_1 = esup1["memory_up32"]
@@ -1061,18 +1103,22 @@ def main() -> None:
                         el_slot_nce = mean_tensor_loss(
                             [
                                 slotwise_info_nce_loss(esite1, esite2, temperature=float(args.tau)),
+                                slotwise_info_nce_loss(emem_mid_1, emem_mid_2, temperature=float(args.tau)),
                                 slotwise_info_nce_loss(emem_up16_1, emem_up16_2, temperature=float(args.tau)),
                                 slotwise_info_nce_loss(emem_up32_1, emem_up32_2, temperature=float(args.tau)),
                             ]
                         )
                         el_cons_site = slot_consistency_loss(esite1, esite2)
+                        el_cons_mem_mid = slot_consistency_loss(emem_mid_1, emem_mid_2)
                         el_cons_mem_up16 = slot_consistency_loss(emem_up16_1, emem_up16_2)
                         el_cons_mem_up32 = slot_consistency_loss(emem_up32_1, emem_up32_2)
-                        el_cons = mean_tensor_loss([el_cons_site, el_cons_mem_up16, el_cons_mem_up32])
+                        el_cons = mean_tensor_loss([el_cons_site, el_cons_mem_mid, el_cons_mem_up16, el_cons_mem_up32])
                         el_div = mean_tensor_loss(
                             [
                                 token_diversity_loss(esite1),
                                 token_diversity_loss(esite2),
+                                token_diversity_loss(emem_mid_1),
+                                token_diversity_loss(emem_mid_2),
                                 token_diversity_loss(emem_up16_1),
                                 token_diversity_loss(emem_up16_2),
                                 token_diversity_loss(emem_up32_1),
@@ -1083,6 +1129,8 @@ def main() -> None:
                             [
                                 token_collapse_score(esite1),
                                 token_collapse_score(esite2),
+                                token_collapse_score(emem_mid_1),
+                                token_collapse_score(emem_mid_2),
                                 token_collapse_score(emem_up16_1),
                                 token_collapse_score(emem_up16_2),
                                 token_collapse_score(emem_up32_1),
@@ -1155,6 +1203,7 @@ def main() -> None:
                                 "val_loss_slot_nce": float(el_slot_nce.item()),
                                 "val_loss_cons": float(el_cons.item()),
                                 "val_loss_cons_site": float(el_cons_site.item()),
+                                "val_loss_cons_mem_mid": float(el_cons_mem_mid.item()),
                                 "val_loss_cons_mem_up16": float(el_cons_mem_up16.item()),
                                 "val_loss_cons_mem_up32": float(el_cons_mem_up32.item()),
                                 "val_loss_div": float(el_div.item()),
@@ -1192,6 +1241,7 @@ def main() -> None:
                 "loss_slot_nce": float(loss_slot_nce.item()),
                 "loss_cons": float(loss_cons.item()),
                 "loss_cons_site": float(loss_cons_site.item()),
+                "loss_cons_mem_mid": float(loss_cons_mem_mid.item()),
                 "loss_cons_mem_up16": float(loss_cons_mem_up16.item()),
                 "loss_cons_mem_up32": float(loss_cons_mem_up32.item()),
                 "loss_div": float(loss_div.item()),
@@ -1222,7 +1272,7 @@ def main() -> None:
                 f"step={step}/{int(args.steps)} loss={loss.item():.4f} "
                 f"nce={loss_nce.item():.4f} slot_nce={loss_slot_nce.item():.4f} "
                 f"cons={loss_cons.item():.4f} "
-                f"(site={loss_cons_site.item():.4f},mem16={loss_cons_mem_up16.item():.4f},mem32={loss_cons_mem_up32.item():.4f}) "
+                f"(site={loss_cons_site.item():.4f},mem8={loss_cons_mem_mid.item():.4f},mem16={loss_cons_mem_up16.item():.4f},mem32={loss_cons_mem_up32.item():.4f}) "
                 f"div={loss_div.item():.4f} "
                 f"proxy_low={loss_proxy_low.item():.4f} proxy_mid={loss_proxy_mid.item():.4f} proxy_high={loss_proxy_high.item():.4f} "
                 f"attn_sep={loss_attn_sep.item():.4f} attn_ord={loss_attn_order.item():.4f} "

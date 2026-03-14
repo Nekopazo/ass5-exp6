@@ -50,10 +50,13 @@ STYLE_ONLY_MAIN_DEFAULTS: Dict[str, float | int] = {
     "style_site_drop_min_keep": 1,
     "freeze_style_backbone_steps": 5000,
     "style_backbone_lr_scale": 0.1,
+    "style_memory_mid_count": 4,
     "style_memory_up16_count": 6,
     "style_memory_up32_count": 6,
+    "style_memory_mid_pool_hw": 8,
     "style_memory_up16_pool_hw": 16,
     "style_memory_up32_pool_hw": 16,
+    "content_query_mid_count": 2,
     "content_query_up16_count": 2,
     "content_query_up32_count": 4,
 }
@@ -347,7 +350,6 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--prefetch-factor", type=int, default=2)
     parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--precision", type=str, default="fp32", choices=["fp32", "bf16", "fp16"])
     parser.add_argument(
         "--gradient-checkpointing",
         action=argparse.BooleanOptionalAction,
@@ -374,6 +376,11 @@ def main() -> None:
     parser.add_argument("--attn-overlap-margin", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["attn_overlap_margin"]))
     parser.add_argument("--attn-entropy-gap", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["attn_entropy_gap"]))
     parser.add_argument(
+        "--style-memory-mid-count",
+        type=int,
+        default=int(STYLE_ONLY_MAIN_DEFAULTS["style_memory_mid_count"]),
+    )
+    parser.add_argument(
         "--style-memory-up16-count",
         type=int,
         default=int(STYLE_ONLY_MAIN_DEFAULTS["style_memory_up16_count"]),
@@ -384,6 +391,11 @@ def main() -> None:
         default=int(STYLE_ONLY_MAIN_DEFAULTS["style_memory_up32_count"]),
     )
     parser.add_argument(
+        "--style-memory-mid-pool-hw",
+        type=int,
+        default=int(STYLE_ONLY_MAIN_DEFAULTS["style_memory_mid_pool_hw"]),
+    )
+    parser.add_argument(
         "--style-memory-up16-pool-hw",
         type=int,
         default=int(STYLE_ONLY_MAIN_DEFAULTS["style_memory_up16_pool_hw"]),
@@ -392,6 +404,11 @@ def main() -> None:
         "--style-memory-up32-pool-hw",
         type=int,
         default=int(STYLE_ONLY_MAIN_DEFAULTS["style_memory_up32_pool_hw"]),
+    )
+    parser.add_argument(
+        "--content-query-mid-count",
+        type=int,
+        default=int(STYLE_ONLY_MAIN_DEFAULTS["content_query_mid_count"]),
     )
     parser.add_argument(
         "--content-query-up16-count",
@@ -408,7 +425,19 @@ def main() -> None:
         "--total-steps",
         type=int,
         default=0,
-        help="Total training steps for OneCycleLR. <=0 means epochs*steps_per_epoch.",
+        help="Total optimizer-update steps for LR scheduling. <=0 means epochs*steps_per_epoch/grad_accum.",
+    )
+    parser.add_argument(
+        "--lr-warmup-steps",
+        type=int,
+        default=5000,
+        help="Linear warmup steps before cosine decay.",
+    )
+    parser.add_argument(
+        "--lr-min-scale",
+        type=float,
+        default=1e-3,
+        help="Minimum LR multiplier at the end of cosine decay.",
     )
 
     parser.add_argument("--max-fonts", type=int, default=0)
@@ -509,7 +538,7 @@ def main() -> None:
 
     set_global_seed(int(args.seed))
     device = resolve_device(args.device)
-    print(f"[train] device={device} precision={args.precision} seed={int(args.seed)}")
+    print(f"[train] device={device} precision=bf16 seed={int(args.seed)}")
 
     run_cfg: Dict[str, Any] = {k: _to_jsonable(v) for k, v in vars(args).items()}
     run_cfg.update(
@@ -640,9 +669,10 @@ def main() -> None:
         "[train] "
         f"mode={active_mode} style_attn={FIXED_STYLE_TRANSFORMER_SCALES} "
         f"style_local_mod={FIXED_STYLE_LOCAL_MOD_SCALES} "
-        f"style_memory=(up16:{int(args.style_memory_up16_count)},up32:{int(args.style_memory_up32_count)}) "
-        f"content_queries=(up16:{int(args.content_query_up16_count)},up32:{int(args.content_query_up32_count)}) "
-        f"steps_per_epoch={steps_per_epoch} total_steps={total_steps} grad_accum={args.grad_accum}"
+        f"style_memory=(mid:{int(args.style_memory_mid_count)},up16:{int(args.style_memory_up16_count)},up32:{int(args.style_memory_up32_count)}) "
+        f"content_queries=(mid:{int(args.content_query_mid_count)},up16:{int(args.content_query_up16_count)},up32:{int(args.content_query_up32_count)}) "
+        f"steps_per_epoch={steps_per_epoch} total_steps={total_steps} grad_accum={args.grad_accum} "
+        f"lr_warmup_steps={int(args.lr_warmup_steps)} lr_min_scale={float(args.lr_min_scale):g}"
     )
 
     model = SourcePartRefUNet(
@@ -656,10 +686,13 @@ def main() -> None:
         conditioning_profile=active_mode,
         style_token_dim=int(args.style_token_dim),
         style_token_count=int(args.style_token_count),
+        style_memory_mid_count=int(args.style_memory_mid_count),
         style_memory_up16_count=int(args.style_memory_up16_count),
         style_memory_up32_count=int(args.style_memory_up32_count),
+        style_memory_mid_pool_hw=int(args.style_memory_mid_pool_hw),
         style_memory_up16_pool_hw=int(args.style_memory_up16_pool_hw),
         style_memory_up32_pool_hw=int(args.style_memory_up32_pool_hw),
+        content_query_mid_count=int(args.content_query_mid_count),
         content_query_up16_count=int(args.content_query_up16_count),
         content_query_up32_count=int(args.content_query_up32_count),
     )
@@ -725,7 +758,8 @@ def main() -> None:
         "attn_entropy_gap": float(args.attn_entropy_gap),
         "T": args.diffusion_steps,
         "total_steps": total_steps,
-        "precision": args.precision,
+        "lr_warmup_steps": int(args.lr_warmup_steps),
+        "lr_min_scale": float(args.lr_min_scale),
         "save_every_steps": (args.save_every_steps if args.save_every_steps > 0 else None),
         "log_every_steps": (args.log_every_steps if args.log_every_steps > 0 else None),
         "detailed_log": args.detailed_log,

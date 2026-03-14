@@ -21,7 +21,7 @@ FIXED_STYLE_TOKEN_CONSUMER_MAP = {
     "t_high": ("up_32",),
 }
 FIXED_STYLE_SITE_ARCH = {
-    "mid": "transformer_cross_attn",
+    "mid": "transformer_cross_attn_content_guided_tokens",
     "up_16": "transformer_cross_attn_content_guided_tokens",
     "up_32": "transformer_cross_attn_content_guided_tokens",
     "up_64": "self_attention_only",
@@ -120,10 +120,13 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         style_token_dim: int = 256,
         style_token_count: int = 3,
         local_token_count: int = 3,
+        style_memory_mid_count: int = 4,
         style_memory_up16_count: int = 6,
         style_memory_up32_count: int = 6,
+        style_memory_mid_pool_hw: int = 8,
         style_memory_up16_pool_hw: int = 16,
         style_memory_up32_pool_hw: int = 16,
+        content_query_mid_count: int = 2,
         content_query_up16_count: int = 2,
         content_query_up32_count: int = 4,
     ):
@@ -138,6 +141,7 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         self.content_encoder_downsample_size = int(content_encoder_downsample_size)
         self.style_token_dim = int(style_token_dim)
         self.style_token_count = int(style_token_count)
+        self.content_query_mid_count = int(content_query_mid_count)
         self.content_query_up16_count = int(content_query_up16_count)
         self.content_query_up32_count = int(content_query_up32_count)
         if self.style_token_dim <= 0:
@@ -159,8 +163,10 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
             style_token_dim=self.style_token_dim,
             style_token_count=self.style_token_count,
             local_token_count=3,
+            style_memory_mid_count=int(style_memory_mid_count),
             style_memory_up16_count=int(style_memory_up16_count),
             style_memory_up32_count=int(style_memory_up32_count),
+            style_memory_mid_pool_hw=int(style_memory_mid_pool_hw),
             style_memory_up16_pool_hw=int(style_memory_up16_pool_hw),
             style_memory_up32_pool_hw=int(style_memory_up32_pool_hw),
         )
@@ -170,8 +176,19 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         self.inject_up32 = self._build_inject_head()
 
         heads = 8 if (self.style_token_dim % 8 == 0) else (4 if (self.style_token_dim % 4 == 0) else 1)
+        content_query_mid_channels = int(content_start_channel) * 8
         content_query_up16_channels = int(content_start_channel) * 4
         content_query_up32_channels = int(content_start_channel) * 2
+        self.content_query_mid = (
+            ContentQueryPool(
+                in_channels=content_query_mid_channels,
+                token_dim=self.style_token_dim,
+                num_queries=self.content_query_mid_count,
+                num_heads=heads,
+            )
+            if self.content_query_mid_count > 0
+            else None
+        )
         self.content_query_up16 = (
             ContentQueryPool(
                 in_channels=content_query_up16_channels,
@@ -192,6 +209,7 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
             if self.content_query_up32_count > 0
             else None
         )
+        self.retriever_mid = ContentGuidedRetriever(self.style_token_dim, heads) if self.content_query_mid is not None else None
         self.retriever_up16 = ContentGuidedRetriever(self.style_token_dim, heads) if self.content_query_up16 is not None else None
         self.retriever_up32 = ContentGuidedRetriever(self.style_token_dim, heads) if self.content_query_up32 is not None else None
 
@@ -260,12 +278,13 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
             return self.project_style_sites(style_pack["tokens"])
         memory_up16 = style_pack.get("memory_up_16", None)
         memory_up32 = style_pack.get("memory_up_32", None)
-        if memory_up16 is None or memory_up32 is None:
+        memory_mid = style_pack.get("memory_mid_8", None)
+        if memory_mid is None or memory_up16 is None or memory_up32 is None:
             if "tokens" not in style_pack:
                 raise ValueError("style_pack missing memory tensors and tokens fallback")
             return self.project_style_sites(style_pack["tokens"])
         return {
-            "mid": self.inject_mid(style_pack["t_low"]),
+            "mid": self.inject_mid(memory_mid.mean(dim=1)),
             "up_16": self.inject_up16(memory_up16.mean(dim=1)),
             "up_32": self.inject_up32(memory_up32.mean(dim=1)),
         }
@@ -371,6 +390,7 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
             content_residual_features[1],
             content_residual_features[2],
             content_residual_features[3],
+            content_residual_features[4],
         ]
 
     def _build_content_guided_style_contexts(
@@ -378,12 +398,18 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         style_pack: dict[str, torch.Tensor],
         content_residual_features: list[torch.Tensor],
     ) -> dict[str, torch.Tensor]:
-        mid_ctx = self.inject_mid(style_pack["t_low"]).unsqueeze(1)
-
+        memory_mid = style_pack["memory_mid_8"]
         memory_up16 = style_pack["memory_up_16"]
         memory_up32 = style_pack["memory_up_32"]
+        mid_ctx = self.inject_mid(memory_mid.mean(dim=1)).unsqueeze(1)
         up16_ctx = self.inject_up16(memory_up16.mean(dim=1)).unsqueeze(1)
         up32_ctx = self.inject_up32(memory_up32.mean(dim=1)).unsqueeze(1)
+
+        if self.content_query_mid is not None and self.retriever_mid is not None:
+            content_feat_mid = content_residual_features[4]
+            guided_q_mid = self.content_query_mid(content_feat_mid)
+            guided_mid, _ = self.retriever_mid(guided_q_mid, memory_mid)
+            mid_ctx = self.inject_mid(guided_mid)
 
         if self.content_query_up16 is not None and self.retriever_up16 is not None:
             content_feat_up16 = content_residual_features[3]
@@ -453,6 +479,8 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
 
     def get_content_guided_gate_values(self) -> dict[str, float]:
         out: dict[str, float] = {}
+        if self.retriever_mid is not None:
+            out["gate_mid"] = float(self.retriever_mid.gate.detach().tanh().item())
         if self.retriever_up16 is not None:
             out["gate_up_16"] = float(self.retriever_up16.gate.detach().tanh().item())
         if self.retriever_up32 is not None:

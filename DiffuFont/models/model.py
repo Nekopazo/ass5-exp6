@@ -4,7 +4,7 @@ Training utilities for DiffuFont – Diffusion & Flow-Matching trainers.
 
 Key changes from prior version
 -------------------------------
-* LR scheduler → OneCycleLR (per-step, built-in warmup).
+* LR scheduler → linear warmup + cosine decay (per-step).
 * InfoNCE contrastive loss on dual part-set views (lambda_nce).
 * FlowMatchingTrainer overrides DDPM sampling methods to prevent misuse.
 * CFG removed — model always sees full conditions during training.
@@ -13,6 +13,7 @@ Key changes from prior version
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 import shutil
 import time
@@ -215,8 +216,9 @@ class DiffusionTrainer:
         attn_entropy_gap: float = 0.03,
         T: int = 1000,
         total_steps: int = 100_000,
+        lr_warmup_steps: int = 0,
+        lr_min_scale: float = 1e-3,
         sample_every_steps: int | None = None,
-        precision: str = "fp32",
         save_every_steps: int | None = None,
         log_every_steps: int | None = None,
         detailed_log: bool = True,
@@ -275,21 +277,22 @@ class DiffusionTrainer:
             raise ValueError(f"Diffusion timestep T must be > 0, got {T}")
         self.diffusion_steps = int(T)
         self.total_steps = max(1, int(total_steps))
+        self.lr_warmup_steps = max(0, min(int(lr_warmup_steps), self.total_steps - 1))
+        self.lr_min_scale = float(max(0.0, min(1.0, float(lr_min_scale))))
 
-        # OneCycleLR — per-step, built-in warmup + cosine annealing.
-        self.lr_schedule = torch.optim.lr_scheduler.OneCycleLR(
-            self.opt,
-            max_lr=(
-                [lr, lr * self.style_backbone_lr_scale]
-                if len(self.opt.param_groups) > 1
-                else lr
-            ),
-            total_steps=self.total_steps,
-            pct_start=0.05,          # 5 % warmup (~5k steps for 100k total)
-            anneal_strategy="cos",
-            div_factor=25.0,         # initial_lr = max_lr / 25
-            final_div_factor=1e3,    # final_lr  = initial_lr / 1e3 ≈ 8e-9
-        )
+        # Per-step linear warmup followed by cosine decay.
+        def _lr_lambda(step: int) -> float:
+            step_i = max(0, min(int(step), self.total_steps))
+            if self.lr_warmup_steps > 0 and step_i < self.lr_warmup_steps:
+                return float(step_i + 1) / float(self.lr_warmup_steps)
+            if self.total_steps <= self.lr_warmup_steps:
+                return 1.0
+            progress = float(step_i - self.lr_warmup_steps) / float(self.total_steps - self.lr_warmup_steps)
+            progress = max(0.0, min(1.0, progress))
+            cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+            return self.lr_min_scale + (1.0 - self.lr_min_scale) * cosine
+
+        self.lr_schedule = torch.optim.lr_scheduler.LambdaLR(self.opt, lr_lambda=_lr_lambda)
 
         self.scheduler = NoiseScheduler(self.diffusion_steps).to(device)
         self.lambda_mse = float(lambda_mse)
@@ -329,42 +332,10 @@ class DiffusionTrainer:
         self.sample_inference_steps: int = 20
         self.save_split_components: bool = False
 
-        # Precision / AMP
-        precision_key = str(precision).strip().lower()
-        self.precision = precision_key
-        self.use_amp = False
-        self.amp_dtype: torch.dtype | None = None
-        if precision_key in {"bf16", "bfloat16"}:
-            # Avoid torch.cuda.is_bf16_supported() — it can trigger NVML internally.
-            # On Ampere+ (sm_80+) bf16 is always available; fall back to a simple test.
-            _bf16_ok = False
-            if self.device.type == "cuda":
-                try:
-                    _cap = torch.cuda.get_device_capability(self.device)
-                    _bf16_ok = _cap[0] >= 8
-                except Exception:
-                    pass
-            if _bf16_ok:
-                self.use_amp = True
-                self.amp_dtype = torch.bfloat16
-            else:
-                raise ValueError("bf16 requested but unavailable on current device.")
-        elif precision_key in {"fp16", "float16", "half"}:
-            if self.device.type == "cuda":
-                self.use_amp = True
-                self.amp_dtype = torch.float16
-            else:
-                raise ValueError("fp16 requested on non-cuda device.")
-        elif precision_key in {"fp32", "float32", "32"}:
-            pass
-        else:
-            raise ValueError(f"Unsupported precision: {precision}")
-
-        self.use_grad_scaler = bool(self.use_amp and self.amp_dtype == torch.float16 and self.device.type == "cuda")
-        if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
-            self.grad_scaler = torch.amp.GradScaler("cuda", enabled=self.use_grad_scaler)
-        else:
-            self.grad_scaler = torch.cuda.amp.GradScaler(enabled=self.use_grad_scaler)
+        # Fixed mixed precision path: always use bf16 autocast on CUDA.
+        if self.device.type != "cuda":
+            raise ValueError("DiffuFont training now requires CUDA because precision is fixed to bf16.")
+        self.precision = "bf16"
 
         if self.freeze_part_encoder_steps > 0:
             frozen_params = self._set_part_encoder_requires_grad(False)
@@ -482,7 +453,7 @@ class DiffusionTrainer:
     # ------------------------------------------------------------------ #
     def _do_optimizer_update(
         self, loss: torch.Tensor, grad_clip: float | None
-    ) -> tuple[bool, float | None]:
+    ) -> tuple[bool, float | None, Dict[str, float]]:
         """Scale loss, backward, and conditionally step optimizer.
 
         Returns (did_update, grad_norm).
@@ -493,36 +464,45 @@ class DiffusionTrainer:
 
         # zero_grad at the start of each accumulation cycle
         if self._accum_step == 0:
+            _t_zero0 = time.perf_counter()
             self.opt.zero_grad(set_to_none=True)
-
-        if self.use_grad_scaler:
-            self.grad_scaler.scale(scaled_loss).backward()
+            time_zero_grad = float(time.perf_counter() - _t_zero0)
         else:
-            scaled_loss.backward()
+            time_zero_grad = 0.0
+
+        _t_backward0 = time.perf_counter()
+        scaled_loss.backward()
+        time_backward = float(time.perf_counter() - _t_backward0)
 
         self._accum_step += 1
         if self._accum_step < self.grad_accum_steps:
             # Not yet time to step
-            return False, None
+            return False, None, {
+                "time_backward": time_backward,
+                "time_grad_clip": 0.0,
+                "time_optimizer_step": 0.0,
+                "time_zero_grad": time_zero_grad,
+            }
 
         # Complete cycle: perform optimizer step
         self._accum_step = 0
         grad_norm: float | None = None
-        if self.use_grad_scaler:
-            if grad_clip is not None:
-                self.grad_scaler.unscale_(self.opt)
-                grad_norm = float(
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip).item()
-                )
-            self.grad_scaler.step(self.opt)
-            self.grad_scaler.update()
-        else:
-            if grad_clip is not None:
-                grad_norm = float(
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip).item()
-                )
-            self.opt.step()
-        return True, grad_norm
+        timing = {
+            "time_backward": time_backward,
+            "time_grad_clip": 0.0,
+            "time_optimizer_step": 0.0,
+            "time_zero_grad": time_zero_grad,
+        }
+        if grad_clip is not None:
+            _t_clip0 = time.perf_counter()
+            grad_norm = float(
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip).item()
+            )
+            timing["time_grad_clip"] = float(time.perf_counter() - _t_clip0)
+        _t_step0 = time.perf_counter()
+        self.opt.step()
+        timing["time_optimizer_step"] = float(time.perf_counter() - _t_step0)
+        return True, grad_norm, timing
 
     def _flush_accumulated_grads(self, grad_clip: float | None = 1.0) -> None:
         """Flush any remaining accumulated gradients at epoch end.
@@ -535,16 +515,9 @@ class DiffusionTrainer:
         if self._accum_step == 0:
             return
         self._accum_step = 0
-        if self.use_grad_scaler:
-            if grad_clip is not None:
-                self.grad_scaler.unscale_(self.opt)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
-            self.grad_scaler.step(self.opt)
-            self.grad_scaler.update()
-        else:
-            if grad_clip is not None:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
-            self.opt.step()
+        if grad_clip is not None:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
+        self.opt.step()
         self.opt.zero_grad(set_to_none=True)
 
     # ------------------------------------------------------------------ #
@@ -697,8 +670,8 @@ class DiffusionTrainer:
         attn2 = None
         site_tok1 = None
         site_tok2 = None
-        low_tok1 = None
-        low_tok2 = None
+        mem_mid_1 = None
+        mem_mid_2 = None
         mem_up16_1 = None
         mem_up16_2 = None
         mem_up32_1 = None
@@ -714,8 +687,8 @@ class DiffusionTrainer:
             )
             tok1 = pack1["tokens"]
             tok2 = pack2["tokens"]
-            low_tok1 = pack1["t_low"]
-            low_tok2 = pack2["t_low"]
+            mem_mid_1 = pack1.get("memory_mid_8", None)
+            mem_mid_2 = pack2.get("memory_mid_8", None)
             mem_up16_1 = pack1["memory_up_16"]
             mem_up16_2 = pack2["memory_up_16"]
             mem_up32_1 = pack1["memory_up_32"]
@@ -765,9 +738,9 @@ class DiffusionTrainer:
             )
         z1_src = tok1.mean(dim=1)
         z2_src = tok2.mean(dim=1)
-        if low_tok1 is not None and low_tok2 is not None and site_tok1 is not None and site_tok2 is not None:
-            z1_src = 0.5 * (low_tok1 + site_tok1[:, 1:].mean(dim=1))
-            z2_src = 0.5 * (low_tok2 + site_tok2[:, 1:].mean(dim=1))
+        if mem_mid_1 is not None and mem_mid_2 is not None and site_tok1 is not None and site_tok2 is not None:
+            z1_src = 0.5 * (mem_mid_1.mean(dim=1) + site_tok1[:, 1:].mean(dim=1))
+            z2_src = 0.5 * (mem_mid_2.mean(dim=1) + site_tok2[:, 1:].mean(dim=1))
         elif site_tok1 is not None and site_tok2 is not None:
             z1_src = 0.5 * (z1_src + site_tok1.mean(dim=1))
             z2_src = 0.5 * (z2_src + site_tok2.mean(dim=1))
@@ -786,6 +759,8 @@ class DiffusionTrainer:
         if (
             site_tok1 is not None
             and site_tok2 is not None
+            and mem_mid_1 is not None
+            and mem_mid_2 is not None
             and mem_up16_1 is not None
             and mem_up16_2 is not None
             and mem_up32_1 is not None
@@ -794,6 +769,7 @@ class DiffusionTrainer:
             out["loss_slot_nce"] = mean_tensor_loss(
                 [
                     slotwise_info_nce_loss(site_tok1, site_tok2, font_ids=font_ids, temperature=self.nce_temperature),
+                    slotwise_info_nce_loss(mem_mid_1, mem_mid_2, font_ids=font_ids, temperature=self.nce_temperature),
                     slotwise_info_nce_loss(mem_up16_1, mem_up16_2, font_ids=font_ids, temperature=self.nce_temperature),
                     slotwise_info_nce_loss(mem_up32_1, mem_up32_2, font_ids=font_ids, temperature=self.nce_temperature),
                 ]
@@ -801,6 +777,7 @@ class DiffusionTrainer:
             out["loss_cons"] = mean_tensor_loss(
                 [
                     slot_consistency_loss(site_tok1, site_tok2),
+                    slot_consistency_loss(mem_mid_1, mem_mid_2),
                     slot_consistency_loss(mem_up16_1, mem_up16_2),
                     slot_consistency_loss(mem_up32_1, mem_up32_2),
                 ]
@@ -809,6 +786,8 @@ class DiffusionTrainer:
                 [
                     token_diversity_loss(site_tok1),
                     token_diversity_loss(site_tok2),
+                    token_diversity_loss(mem_mid_1),
+                    token_diversity_loss(mem_mid_2),
                     token_diversity_loss(mem_up16_1),
                     token_diversity_loss(mem_up16_2),
                     token_diversity_loss(mem_up32_1),
@@ -819,6 +798,8 @@ class DiffusionTrainer:
                 [
                     token_collapse_score(site_tok1),
                     token_collapse_score(site_tok2),
+                    token_collapse_score(mem_mid_1),
+                    token_collapse_score(mem_mid_2),
                     token_collapse_score(mem_up16_1),
                     token_collapse_score(mem_up16_2),
                     token_collapse_score(mem_up32_1),
@@ -891,6 +872,10 @@ class DiffusionTrainer:
     # ------------------------------------------------------------------ #
     def train_step(self, batch: Dict[str, torch.Tensor], grad_clip: float | None = 1.0):
         _train_t0 = time.perf_counter()
+        timing_main_forward = 0.0
+        timing_style_losses = 0.0
+        timing_counterfactual = 0.0
+        timing_opt_step = 0.0
         self.model.train()
         self._maybe_unfreeze_part_encoder()
         self._maybe_unfreeze_style_backbone()
@@ -924,12 +909,9 @@ class DiffusionTrainer:
         with torch.no_grad():
             x0_latent = self.model.encode_to_latent(x0)     # (B,1,128,128) → (B,1,128,128) no-op (dataset already resized)
 
-        with torch.autocast(
-            device_type=self.device.type,
-            dtype=self.amp_dtype,
-            enabled=self.use_amp,
-        ):
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             x_t_latent, eps_latent = self.scheduler.add_noise(x0_latent, t)
+            _t_main0 = time.perf_counter()
             eps_hat_latent = self.model(
                 x_t_latent, t, content,
                 style_img=style_img,
@@ -939,7 +921,10 @@ class DiffusionTrainer:
                 style_ref_mask=style_ref_mask,
             )
             loss_mse = F.mse_loss(eps_hat_latent, eps_latent)
+            timing_main_forward += float(time.perf_counter() - _t_main0)
+            _t_style0 = time.perf_counter()
             style_losses = self._compute_style_losses(batch)
+            timing_style_losses += float(time.perf_counter() - _t_style0)
             loss_nce = style_losses["loss_nce"]
             loss_slot_nce = style_losses["loss_slot_nce"]
             loss_cons = style_losses["loss_cons"]
@@ -990,11 +975,8 @@ class DiffusionTrainer:
             self.log_every_steps and ((self.global_step + 1) % self.log_every_steps == 0)
         )
         if should_log_counterfactual and style_img is not None and self._mode_uses_style(self.conditioning_mode):
-            with torch.no_grad(), torch.autocast(
-                device_type=self.device.type,
-                dtype=self.amp_dtype,
-                enabled=self.use_amp,
-            ):
+            _t_cf0 = time.perf_counter()
+            with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 if part_imgs is not None and self._mode_uses_parts(self.conditioning_mode):
                     eps_hat_part_only = self.model(
                         x_t_latent, t, content,
@@ -1035,6 +1017,7 @@ class DiffusionTrainer:
                             solo_site_losses[stat_key] = float(F.mse_loss(eps_hat_solo, eps_latent).item())
                     finally:
                         self._set_style_site_force_keep(None)
+            timing_counterfactual += float(time.perf_counter() - _t_cf0)
             base = float(loss_mse.detach().item())
             lp = float(cf_loss_part_only.item())
             ls = float(cf_loss_style_only.item())
@@ -1053,7 +1036,13 @@ class DiffusionTrainer:
                 counterfactual_stats["cf_delta_style_up16_only"] = solo_site_losses["cf_loss_style_up16_only"] - base
                 counterfactual_stats["cf_delta_style_up32_only"] = solo_site_losses["cf_loss_style_up32_only"] - base
 
-        did_update, grad_norm = self._do_optimizer_update(loss, grad_clip)
+        did_update, grad_norm, opt_timing = self._do_optimizer_update(loss, grad_clip)
+        timing_opt_step += float(
+            opt_timing["time_backward"]
+            + opt_timing["time_grad_clip"]
+            + opt_timing["time_optimizer_step"]
+            + opt_timing["time_zero_grad"]
+        )
         # For micro-steps (not yet an optimizer update), return early with metrics
         if not did_update:
             out = {
@@ -1082,18 +1071,22 @@ class DiffusionTrainer:
                 "lr": float(self.lr_schedule.get_last_lr()[0]),
                 "data_time": float(self._step_data_time),
                 "train_time": float(time.perf_counter() - _train_t0),
+                "time_main_forward": float(timing_main_forward),
+                "time_style_losses": float(timing_style_losses),
+                "time_counterfactual": float(timing_counterfactual),
+                "time_opt_step": float(timing_opt_step),
+                "time_backward": float(opt_timing["time_backward"]),
+                "time_grad_clip": float(opt_timing["time_grad_clip"]),
+                "time_optimizer_step": float(opt_timing["time_optimizer_step"]),
+                "time_zero_grad": float(opt_timing["time_zero_grad"]),
             }
             out.update(self._style_backbone_status())
             out.update(counterfactual_stats)
             return out
 
-        # OneCycleLR steps per optimizer update.
-        # Guard against overshooting total_steps (e.g. after resume near end of training).
+        # LR scheduler steps once per optimizer update.
         if self.global_step < self.total_steps:
-            try:
-                self.lr_schedule.step()
-            except ValueError:
-                pass  # OneCycleLR exceeded total_steps; keep last LR
+            self.lr_schedule.step()
 
         self.global_step += 1
         self.local_step += 1
@@ -1156,6 +1149,14 @@ class DiffusionTrainer:
                 "train_time": float(self._step_train_time),
                 "data_time_ema": float(self._step_data_time_ema),
                 "train_time_ema": float(self._step_train_time_ema),
+                "time_main_forward": float(timing_main_forward),
+                "time_style_losses": float(timing_style_losses),
+                "time_counterfactual": float(timing_counterfactual),
+                "time_opt_step": float(timing_opt_step),
+                "time_backward": float(opt_timing["time_backward"]),
+                "time_grad_clip": float(opt_timing["time_grad_clip"]),
+                "time_optimizer_step": float(opt_timing["time_optimizer_step"]),
+                "time_zero_grad": float(opt_timing["time_zero_grad"]),
             }
             log_row.update(self._style_backbone_status())
             if grad_norm is not None:
@@ -1178,6 +1179,8 @@ class DiffusionTrainer:
                 f"λnce={eff_lnce:.4f} λslot={eff_lslot:.4f} λaux={eff_aux:.4f} "
                 f"lr={self.lr_schedule.get_last_lr()[0]:.6e} "
                 f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s "
+                f"split_t=(main:{timing_main_forward:.3f},style:{timing_style_losses:.3f},cf:{timing_counterfactual:.3f},opt:{timing_opt_step:.3f},"
+                f"bw:{opt_timing['time_backward']:.3f},clip:{opt_timing['time_grad_clip']:.3f},step:{opt_timing['time_optimizer_step']:.3f},zero:{opt_timing['time_zero_grad']:.3f}) "
                 f"style_bb={self._style_backbone_phase()}"
             )
             if grad_norm is not None:
@@ -1272,16 +1275,12 @@ class DiffusionTrainer:
         dpm.set_timesteps(int(num_inference_steps), device=device)
 
         # Keep sampling dtype aligned with training precision to avoid large fp32 cache growth.
-        sample_dtype = self.amp_dtype if self.use_amp else content_img.dtype
+        sample_dtype = torch.bfloat16
         x_t = torch.randn((bsz, latent_ch, latent_h, latent_w), device=device, dtype=sample_dtype)
 
         for t in dpm.timesteps:
             t_cond = torch.full((bsz,), int(t.item()), device=device, dtype=torch.long)
-            with torch.autocast(
-                device_type=self.device.type,
-                dtype=self.amp_dtype,
-                enabled=self.use_amp,
-            ):
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 eps_hat = self.model(
                     x_t, t_cond, content_img,
                     style_img=style_img,
@@ -1309,8 +1308,6 @@ class DiffusionTrainer:
             "total_steps": self.total_steps,
             "precision": self.precision,
         }
-        if self.use_grad_scaler:
-            chkpt["grad_scaler_state"] = self.grad_scaler.state_dict()
         save_path = Path(path)
         torch.save(chkpt, save_path)
         self._save_split_components(save_path, model_state)
@@ -1328,9 +1325,14 @@ class DiffusionTrainer:
         self.current_epoch = chkpt.get("epoch", 0)
         self.local_step = chkpt.get("local_step", 0)
         if "lr_schedule_state" in chkpt:
-            self.lr_schedule.load_state_dict(chkpt["lr_schedule_state"])
-        if self.use_grad_scaler and "grad_scaler_state" in chkpt:
-            self.grad_scaler.load_state_dict(chkpt["grad_scaler_state"])
+            try:
+                self.lr_schedule.load_state_dict(chkpt["lr_schedule_state"])
+            except Exception as e:
+                print(
+                    "[trainer.load] warning: failed to restore lr scheduler state "
+                    f"({type(e).__name__}: {e}); rebuilding scheduler from current config.",
+                    flush=True,
+                )
 
     def _save_split_components(self, path: Path, model_state: Dict[str, torch.Tensor]) -> None:
         if not self.save_split_components:
@@ -1558,8 +1560,9 @@ class FlowMatchingTrainer(DiffusionTrainer):
         attn_entropy_gap: float = 0.03,
         T: int = 1000,
         total_steps: int = 100_000,
+        lr_warmup_steps: int = 0,
+        lr_min_scale: float = 1e-3,
         sample_every_steps: int | None = None,
-        precision: str = "fp32",
         save_every_steps: int | None = None,
         log_every_steps: int | None = None,
         detailed_log: bool = True,
@@ -1593,7 +1596,9 @@ class FlowMatchingTrainer(DiffusionTrainer):
             attn_overlap_margin=attn_overlap_margin,
             attn_entropy_gap=attn_entropy_gap,
             T=T, total_steps=total_steps,
-            sample_every_steps=sample_every_steps, precision=precision,
+            lr_warmup_steps=lr_warmup_steps,
+            lr_min_scale=lr_min_scale,
+            sample_every_steps=sample_every_steps,
             save_every_steps=save_every_steps, log_every_steps=log_every_steps,
             detailed_log=detailed_log,
             grad_accum_steps=grad_accum_steps,
@@ -1625,6 +1630,10 @@ class FlowMatchingTrainer(DiffusionTrainer):
     # ---- train_step (velocity target) ---- #
     def train_step(self, batch: Dict[str, torch.Tensor], grad_clip: float | None = 1.0):
         _train_t0 = time.perf_counter()
+        timing_main_forward = 0.0
+        timing_style_losses = 0.0
+        timing_counterfactual = 0.0
+        timing_opt_step = 0.0
         self.model.train()
         self._maybe_unfreeze_part_encoder()
         self._maybe_unfreeze_style_backbone()
@@ -1664,11 +1673,8 @@ class FlowMatchingTrainer(DiffusionTrainer):
                     part_mask = part_mask.clone()
                     part_mask[part_drop_mask] = 0.0
 
-        with torch.autocast(
-            device_type=self.device.type,
-            dtype=self.amp_dtype,
-            enabled=self.use_amp,
-        ):
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            _t_main0 = time.perf_counter()
             v_hat = self.model(
                 x_t_latent, t_idx, content,
                 style_img=style_img,
@@ -1677,7 +1683,10 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 style_ref_mask=style_ref_mask,
             )
             loss_fm = F.mse_loss(v_hat, v_target)
+            timing_main_forward += float(time.perf_counter() - _t_main0)
+            _t_style0 = time.perf_counter()
             style_losses = self._compute_style_losses(batch)
+            timing_style_losses += float(time.perf_counter() - _t_style0)
             loss_nce = style_losses["loss_nce"]
             loss_slot_nce = style_losses["loss_slot_nce"]
             loss_cons = style_losses["loss_cons"]
@@ -1728,11 +1737,8 @@ class FlowMatchingTrainer(DiffusionTrainer):
             self.log_every_steps and ((self.global_step + 1) % self.log_every_steps == 0)
         )
         if should_log_counterfactual and style_img is not None and self._mode_uses_style(self.conditioning_mode):
-            with torch.no_grad(), torch.autocast(
-                device_type=self.device.type,
-                dtype=self.amp_dtype,
-                enabled=self.use_amp,
-            ):
+            _t_cf0 = time.perf_counter()
+            with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 if part_imgs is not None and self._mode_uses_parts(self.conditioning_mode):
                     v_hat_part_only = self.model(
                         x_t_latent, t_idx, content,
@@ -1773,6 +1779,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
                             solo_site_losses[stat_key] = float(F.mse_loss(v_hat_solo, v_target).item())
                     finally:
                         self._set_style_site_force_keep(None)
+            timing_counterfactual += float(time.perf_counter() - _t_cf0)
             base = float(loss_fm.detach().item())
             lp = float(cf_loss_part_only.item())
             ls = float(cf_loss_style_only.item())
@@ -1789,7 +1796,13 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 counterfactual_stats["cf_delta_style_up16_only"] = solo_site_losses["cf_loss_style_up16_only"] - base
                 counterfactual_stats["cf_delta_style_up32_only"] = solo_site_losses["cf_loss_style_up32_only"] - base
 
-        did_update, grad_norm = self._do_optimizer_update(loss, grad_clip)
+        did_update, grad_norm, opt_timing = self._do_optimizer_update(loss, grad_clip)
+        timing_opt_step += float(
+            opt_timing["time_backward"]
+            + opt_timing["time_grad_clip"]
+            + opt_timing["time_optimizer_step"]
+            + opt_timing["time_zero_grad"]
+        )
         if not did_update:
             out = {
                 "loss": loss.item(),
@@ -1817,16 +1830,21 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 "lr": float(self.lr_schedule.get_last_lr()[0]),
                 "data_time": float(self._step_data_time),
                 "train_time": float(time.perf_counter() - _train_t0),
+                "time_main_forward": float(timing_main_forward),
+                "time_style_losses": float(timing_style_losses),
+                "time_counterfactual": float(timing_counterfactual),
+                "time_opt_step": float(timing_opt_step),
+                "time_backward": float(opt_timing["time_backward"]),
+                "time_grad_clip": float(opt_timing["time_grad_clip"]),
+                "time_optimizer_step": float(opt_timing["time_optimizer_step"]),
+                "time_zero_grad": float(opt_timing["time_zero_grad"]),
             }
             out.update(self._style_backbone_status())
             out.update(counterfactual_stats)
             return out
 
         if self.global_step < self.total_steps:
-            try:
-                self.lr_schedule.step()
-            except ValueError:
-                pass  # OneCycleLR exceeded total_steps; keep last LR
+            self.lr_schedule.step()
 
         self.global_step += 1
         self.local_step += 1
@@ -1885,6 +1903,14 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 "lr": float(self.lr_schedule.get_last_lr()[0]),
                 "data_time": float(self._step_data_time),
                 "train_time": float(self._step_train_time),
+                "time_main_forward": float(timing_main_forward),
+                "time_style_losses": float(timing_style_losses),
+                "time_counterfactual": float(timing_counterfactual),
+                "time_opt_step": float(timing_opt_step),
+                "time_backward": float(opt_timing["time_backward"]),
+                "time_grad_clip": float(opt_timing["time_grad_clip"]),
+                "time_optimizer_step": float(opt_timing["time_optimizer_step"]),
+                "time_zero_grad": float(opt_timing["time_zero_grad"]),
             }
             log_row.update(self._style_backbone_status())
             if grad_norm is not None:
@@ -1907,6 +1933,8 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 f"λnce={eff_lnce:.4f} λslot={eff_lslot:.4f} λaux={eff_aux:.4f} "
                 f"lr={self.lr_schedule.get_last_lr()[0]:.6e} "
                 f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s "
+                f"split_t=(main:{timing_main_forward:.3f},style:{timing_style_losses:.3f},cf:{timing_counterfactual:.3f},opt:{timing_opt_step:.3f},"
+                f"bw:{opt_timing['time_backward']:.3f},clip:{opt_timing['time_grad_clip']:.3f},step:{opt_timing['time_optimizer_step']:.3f},zero:{opt_timing['time_zero_grad']:.3f}) "
                 f"style_bb={self._style_backbone_phase()}"
             )
             if grad_norm is not None:

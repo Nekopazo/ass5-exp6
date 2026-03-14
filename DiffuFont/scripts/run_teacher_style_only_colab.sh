@@ -9,7 +9,7 @@ LOG_FILE=""
 PID_FILE=""
 RESUME_CKPT=""
 SAVE_DIR_OVERRIDE=""
-PRETRAIN_STYLE_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/pretrain_style_only_lowpluslocal_16x16_20260309_112308/style_encoder_pretrain.pt"
+PRETRAIN_STYLE_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/style_encoder_pretrain_midmem_5000.pt"
 DEVICE_ARG="cuda:1"
 
 while [[ $# -gt 0 ]]; do
@@ -92,7 +92,7 @@ fi
 echo "[teacher_style_only] pretrained_style_ckpt=${PRETRAIN_STYLE_CKPT}"
 
 
-TARGET_STEPS=60000
+TARGET_STEPS=100000
 if [[ -n "${RESUME_CKPT}" ]]; then
   set -- --resume "${RESUME_CKPT}"
 else
@@ -103,7 +103,6 @@ fi
   --teacher-line style_only \
   --trainer diffusion \
   --device "${DEVICE_ARG}" \
-  --precision bf16 \
   --batch 32 \
   --grad-accum 1 \
   --lr 2e-4 \
@@ -115,6 +114,8 @@ fi
   --style-site-drop-prob 0.10 \
   --style-site-drop-min-keep 1 \
   --aux-loss-warmup-steps 5000 \
+  --lambda-proxy-mid 0.10 \
+  --lambda-attn-role 0.05 \
   --pretrained-style-encoder "${PRETRAIN_STYLE_CKPT}" \
   --num-workers 8 \
   --sample-every-steps 300 \

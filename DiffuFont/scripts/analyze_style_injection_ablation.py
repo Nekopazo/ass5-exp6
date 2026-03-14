@@ -313,16 +313,13 @@ def _run_sample(
     site_heatmaps_float = _aggregate_site_heatmaps_float(token_attn[0], style_ref_mask[0])
 
     def _sample_with_drop(drop_site: str | None, active_seed: int) -> torch.Tensor:
-        original_builder = model._build_style_site_contexts
-
-        def _wrapped(style_tokens: torch.Tensor) -> dict[str, torch.Tensor]:
-            out = original_builder(style_tokens)
-            if drop_site is not None:
-                out[drop_site] = torch.zeros_like(out[drop_site])
-            return out
-
-        model._build_style_site_contexts = _wrapped  # type: ignore[method-assign]
+        original_force_keep = getattr(model, "_style_site_force_keep", None)
         try:
+            if drop_site is None:
+                model.set_style_site_force_keep(None)
+            else:
+                keep_sites = tuple(site for site in SITE_TO_TOKEN if site != drop_site)
+                model.set_style_site_force_keep(keep_sites)
             torch.manual_seed(int(active_seed))
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(int(active_seed))
@@ -334,7 +331,10 @@ def _run_sample(
                 condition_mode="style_only",
             ).detach().cpu()[0]
         finally:
-            model._build_style_site_contexts = original_builder  # type: ignore[method-assign]
+            if original_force_keep is None:
+                model.set_style_site_force_keep(None)
+            else:
+                model.set_style_site_force_keep(tuple(sorted(original_force_keep)))
 
     outputs_repeats: dict[str, list[torch.Tensor]] = {k: [] for k in ("full", "drop_mid", "drop_up_16", "drop_up_32")}
     for repeat_idx in range(max(1, int(repeat_seeds))):
@@ -428,7 +428,8 @@ def _build_trainer_from_config(cfg: dict[str, Any], device: torch.device, total_
         "attn_entropy_gap": float(cfg.get("attn_entropy_gap", 0.03)),
         "T": int(cfg.get("diffusion_steps", 1000)),
         "total_steps": int(total_steps),
-        "precision": str(cfg.get("precision", "fp32")),
+        "lr_warmup_steps": int(cfg.get("lr_warmup_steps", 0)),
+        "lr_min_scale": float(cfg.get("lr_min_scale", 1e-3)),
         "save_every_steps": None,
         "log_every_steps": None,
         "detailed_log": False,

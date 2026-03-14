@@ -148,8 +148,10 @@ class HierarchicalStyleEncoderMixin:
         style_token_dim: int,
         style_token_count: int,
         local_token_count: int = 3,
+        style_memory_mid_count: int = 4,
         style_memory_up16_count: int = 6,
         style_memory_up32_count: int = 6,
+        style_memory_mid_pool_hw: int = 8,
         style_memory_up16_pool_hw: int = 16,
         style_memory_up32_pool_hw: int = 16,
     ) -> None:
@@ -157,17 +159,19 @@ class HierarchicalStyleEncoderMixin:
         self.in_channels = int(in_channels)
         self.style_token_dim = int(style_token_dim)
         self.style_token_count = int(style_token_count)
+        self.style_memory_mid_count = int(style_memory_mid_count)
         self.style_memory_up16_count = int(style_memory_up16_count)
         self.style_memory_up32_count = int(style_memory_up32_count)
+        self.style_memory_mid_pool_hw = int(style_memory_mid_pool_hw)
         self.style_memory_up16_pool_hw = int(style_memory_up16_pool_hw)
         self.style_memory_up32_pool_hw = int(style_memory_up32_pool_hw)
         if self.style_token_dim <= 0:
             raise ValueError("style_token_dim must be > 0")
         if self.style_token_count != 3:
             raise ValueError(f"style_token_count must be 3 for low/mid/high routing, got {self.style_token_count}")
-        if self.style_memory_up16_count <= 0 or self.style_memory_up32_count <= 0:
+        if self.style_memory_mid_count <= 0 or self.style_memory_up16_count <= 0 or self.style_memory_up32_count <= 0:
             raise ValueError("style memory token counts must be > 0")
-        if self.style_memory_up16_pool_hw <= 0 or self.style_memory_up32_pool_hw <= 0:
+        if self.style_memory_mid_pool_hw <= 0 or self.style_memory_up16_pool_hw <= 0 or self.style_memory_up32_pool_hw <= 0:
             raise ValueError("style memory pool hw must be > 0")
 
         self.style_backbone = ResNet18FeaturePyramid(in_channels=self.in_channels)
@@ -231,8 +235,14 @@ class HierarchicalStyleEncoderMixin:
             nn.SiLU(inplace=True),
             nn.Linear(self.style_token_dim * 2, 64),
         )
+        self.memory_mid_feat_to_token = nn.Identity() if self.style_token_dim == 256 else nn.Linear(256, self.style_token_dim)
         self.memory_up16_feat_to_token = nn.Linear(128, self.style_token_dim)
         self.memory_up32_feat_to_token = nn.Linear(64, self.style_token_dim)
+        self.memory_mid_pool = QueryPoolingBlock(
+            embed_dim=self.style_token_dim,
+            num_heads=heads,
+            num_queries=self.style_memory_mid_count,
+        )
         self.memory_up16_pool = QueryPoolingBlock(
             embed_dim=self.style_token_dim,
             num_heads=heads,
@@ -389,6 +399,10 @@ class HierarchicalStyleEncoderMixin:
         token_grid_hw = feat_low_raw.shape[-2:]
         feat_mid_tok_raw = self._pool_to_token_grid(feat_mid_raw, token_grid_hw)
         feat_high_tok_raw = self._pool_to_token_grid(feat_high_raw, token_grid_hw)
+        feat_low_mem_raw = self._pool_to_token_grid(
+            feat_low_raw,
+            (self.style_memory_mid_pool_hw, self.style_memory_mid_pool_hw),
+        )
         feat_mid_mem_raw = self._pool_to_token_grid(
             feat_mid_raw,
             (self.style_memory_up16_pool_hw, self.style_memory_up16_pool_hw),
@@ -439,6 +453,14 @@ class HierarchicalStyleEncoderMixin:
         )
 
         tokens = torch.stack([t_low, t_mid, t_high], dim=1)
+        memory_mid_8 = self._aggregate_style_memory(
+            feat_low_mem_raw,
+            b=b,
+            r=r,
+            ref_mask=style_ref_mask,
+            projector=self.memory_mid_feat_to_token,
+            pooler=self.memory_mid_pool,
+        )
         memory_up_16 = self._aggregate_style_memory(
             feat_mid_mem_raw,
             b=b,
@@ -461,6 +483,7 @@ class HierarchicalStyleEncoderMixin:
             "t_low": t_low,
             "t_mid": t_mid,
             "t_high": t_high,
+            "memory_mid_8": memory_mid_8,
             "memory_up_16": memory_up_16,
             "memory_up_32": memory_up_32,
         }
@@ -480,9 +503,9 @@ class HierarchicalStyleEncoderMixin:
             out["token_attn"] = torch.stack(maps, dim=1)  # (B,3,R,32,32)
 
         if return_proxy:
-            # Keep low proxy on the coarse global token; supervise 16/32 through
-            # the memory pathway that actually feeds the routed style contexts.
-            out["pred_low"] = self.t_low_proxy_head(t_low)
+            # Supervise all three routed bands through the memory pathways that
+            # actually feed the injected style contexts.
+            out["pred_low"] = self.t_low_proxy_head(memory_mid_8.mean(dim=1))
             out["pred_mid"] = self.t_mid_proxy_head(memory_up_16.mean(dim=1))
             out["pred_high"] = self.t_high_proxy_head(memory_up_32.mean(dim=1))
             out["target_low"] = self._masked_ref_average(feat_low.detach(), style_ref_mask)
@@ -594,6 +617,7 @@ class HierarchicalStyleEncoderMixin:
             "t_low": out["t_low"],
             "t_mid": out["t_mid"],
             "t_high": out["t_high"],
+            "memory_mid_8": out["memory_mid_8"],
             "memory_up_16": out["memory_up_16"],
             "memory_up_32": out["memory_up_32"],
         }
