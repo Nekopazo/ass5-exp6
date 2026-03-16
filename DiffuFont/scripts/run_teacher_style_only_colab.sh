@@ -11,6 +11,19 @@ RESUME_CKPT=""
 SAVE_DIR_OVERRIDE=""
 PRETRAIN_STYLE_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/style_encoder_pretrain_midmem_5000.pt"
 DEVICE_ARG="cuda:1"
+TARGET_STEPS=100000
+STYLE_REF_COUNT=12
+ROUTER_TEMPERATURE="1.0"
+LAMBDA_PROXY_LOW="0.05"
+LAMBDA_PROXY_MID="0.05"
+LAMBDA_PROXY_HIGH="0.05"
+LAMBDA_ATTN_SEP="0.01"
+LAMBDA_ATTN_ORDER="0.0"
+LAMBDA_ATTN_ROLE="0.0"
+LAMBDA_ROUTE_SPARSE="0.002"
+LAMBDA_ROUTE_BALANCE="0.005"
+LAMBDA_ROUTE_DIV="0.01"
+LAMBDA_ROUTE_GATE="0.001"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -90,14 +103,15 @@ if [[ -z "${PRETRAIN_STYLE_CKPT}" || ! -f "${PRETRAIN_STYLE_CKPT}" ]]; then
   exit 2
 fi
 echo "[teacher_style_only] pretrained_style_ckpt=${PRETRAIN_STYLE_CKPT}"
-
-
-TARGET_STEPS=100000
 if [[ -n "${RESUME_CKPT}" ]]; then
   set -- --resume "${RESUME_CKPT}"
 else
   set --
 fi
+
+echo "[teacher_style_only] adaptive_style_routing=on router_temperature=${ROUTER_TEMPERATURE}"
+echo "[teacher_style_only] route_loss=(sparse:${LAMBDA_ROUTE_SPARSE},balance:${LAMBDA_ROUTE_BALANCE},div:${LAMBDA_ROUTE_DIV},gate:${LAMBDA_ROUTE_GATE})"
+echo "[teacher_style_only] proxy_loss=(low:${LAMBDA_PROXY_LOW},mid:${LAMBDA_PROXY_MID},high:${LAMBDA_PROXY_HIGH}) attn=(sep:${LAMBDA_ATTN_SEP},order:${LAMBDA_ATTN_ORDER},role:${LAMBDA_ATTN_ROLE})"
 
 "${PYTHON_BIN}" -u train.py \
   --teacher-line style_only \
@@ -108,14 +122,24 @@ fi
   --lr 2e-4 \
   --total-steps "${TARGET_STEPS}" \
   --val-ratio 0.1 \
-  --style-ref-count 12 \
+  --style-ref-count "${STYLE_REF_COUNT}" \
   --style-ref-drop-prob 0.15 \
   --style-ref-drop-min-keep 4 \
   --style-site-drop-prob 0.10 \
   --style-site-drop-min-keep 1 \
   --aux-loss-warmup-steps 5000 \
-  --lambda-proxy-mid 0.10 \
-  --lambda-attn-role 0.05 \
+  --adaptive-style-routing \
+  --router-temperature "${ROUTER_TEMPERATURE}" \
+  --lambda-proxy-low "${LAMBDA_PROXY_LOW}" \
+  --lambda-proxy-mid "${LAMBDA_PROXY_MID}" \
+  --lambda-proxy-high "${LAMBDA_PROXY_HIGH}" \
+  --lambda-attn-sep "${LAMBDA_ATTN_SEP}" \
+  --lambda-attn-order "${LAMBDA_ATTN_ORDER}" \
+  --lambda-attn-role "${LAMBDA_ATTN_ROLE}" \
+  --lambda-route-sparse "${LAMBDA_ROUTE_SPARSE}" \
+  --lambda-route-balance "${LAMBDA_ROUTE_BALANCE}" \
+  --lambda-route-div "${LAMBDA_ROUTE_DIV}" \
+  --lambda-route-gate "${LAMBDA_ROUTE_GATE}" \
   --pretrained-style-encoder "${PRETRAIN_STYLE_CKPT}" \
   --num-workers 8 \
   --sample-every-steps 300 \

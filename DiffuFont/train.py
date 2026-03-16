@@ -42,6 +42,10 @@ STYLE_ONLY_MAIN_DEFAULTS: Dict[str, float | int] = {
     "lambda_attn_sep": 0.01,
     "lambda_attn_order": 0.0,
     "lambda_attn_role": 0.0,
+    "lambda_route_sparse": 0.002,
+    "lambda_route_balance": 0.005,
+    "lambda_route_div": 0.01,
+    "lambda_route_gate": 0.001,
     "attn_overlap_margin": 0.70,
     "attn_entropy_gap": 0.03,
     "style_ref_drop_prob": 0.15,
@@ -59,6 +63,8 @@ STYLE_ONLY_MAIN_DEFAULTS: Dict[str, float | int] = {
     "content_query_mid_count": 2,
     "content_query_up16_count": 2,
     "content_query_up32_count": 4,
+    "adaptive_style_routing": 1,
+    "router_temperature": 1.0,
 }
 
 
@@ -371,6 +377,10 @@ def main() -> None:
     parser.add_argument("--lambda-attn-sep", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_attn_sep"]))
     parser.add_argument("--lambda-attn-order", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_attn_order"]))
     parser.add_argument("--lambda-attn-role", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_attn_role"]))
+    parser.add_argument("--lambda-route-sparse", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_route_sparse"]))
+    parser.add_argument("--lambda-route-balance", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_route_balance"]))
+    parser.add_argument("--lambda-route-div", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_route_div"]))
+    parser.add_argument("--lambda-route-gate", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_route_gate"]))
     parser.add_argument("--style-nce-temp", type=float, default=0.07)
     parser.add_argument("--aux-loss-warmup-steps", type=int, default=int(STYLE_ONLY_MAIN_DEFAULTS["aux_loss_warmup_steps"]))
     parser.add_argument("--attn-overlap-margin", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["attn_overlap_margin"]))
@@ -419,6 +429,18 @@ def main() -> None:
         "--content-query-up32-count",
         type=int,
         default=int(STYLE_ONLY_MAIN_DEFAULTS["content_query_up32_count"]),
+    )
+    parser.add_argument(
+        "--adaptive-style-routing",
+        action=argparse.BooleanOptionalAction,
+        default=bool(STYLE_ONLY_MAIN_DEFAULTS["adaptive_style_routing"]),
+        help="Enable adaptive all-to-all routing from each style injection site to all style memories.",
+    )
+    parser.add_argument(
+        "--router-temperature",
+        type=float,
+        default=float(STYLE_ONLY_MAIN_DEFAULTS["router_temperature"]),
+        help="Softmax temperature for adaptive style routing.",
     )
     parser.add_argument("--diffusion-steps", type=int, default=1000)
     parser.add_argument(
@@ -547,6 +569,8 @@ def main() -> None:
             "active_conditioning_mode": active_mode,
             "use_style_image": bool(use_style_image),
             "use_part_bank": False,
+            "adaptive_style_routing": bool(args.adaptive_style_routing),
+            "adaptive_route_sources": ["mid", "up_16", "up_32"],
             "fixed_style_transformer_scales": list(FIXED_STYLE_TRANSFORMER_SCALES),
             "fixed_style_local_mod_scales": list(FIXED_STYLE_LOCAL_MOD_SCALES),
             "fixed_style_token_consumers": {
@@ -669,6 +693,7 @@ def main() -> None:
         "[train] "
         f"mode={active_mode} style_attn={FIXED_STYLE_TRANSFORMER_SCALES} "
         f"style_local_mod={FIXED_STYLE_LOCAL_MOD_SCALES} "
+        f"adaptive_route={bool(args.adaptive_style_routing)} route_temp={float(args.router_temperature):.3f} "
         f"style_memory=(mid:{int(args.style_memory_mid_count)},up16:{int(args.style_memory_up16_count)},up32:{int(args.style_memory_up32_count)}) "
         f"content_queries=(mid:{int(args.content_query_mid_count)},up16:{int(args.content_query_up16_count)},up32:{int(args.content_query_up32_count)}) "
         f"steps_per_epoch={steps_per_epoch} total_steps={total_steps} grad_accum={args.grad_accum} "
@@ -695,6 +720,8 @@ def main() -> None:
         content_query_mid_count=int(args.content_query_mid_count),
         content_query_up16_count=int(args.content_query_up16_count),
         content_query_up32_count=int(args.content_query_up32_count),
+        adaptive_style_routing=bool(args.adaptive_style_routing),
+        router_temperature=float(args.router_temperature),
     )
 
     _try_enable_xformers(model)
@@ -704,40 +731,8 @@ def main() -> None:
         print("[train] gradient checkpointing disabled")
 
     if args.pretrained_style_encoder:
-        ckpt = torch.load(args.pretrained_style_encoder, map_location="cpu")
-        route_meta = {}
-        consumer_arch_meta = {}
-        if isinstance(ckpt, dict) and isinstance(ckpt.get("extra"), dict):
-            route_meta = ckpt["extra"].get("token_consumer_map", {}) or {}
-            consumer_arch_meta = ckpt["extra"].get("style_site_arch", {}) or {}
-        expected_route = {k: list(v) for k, v in FIXED_STYLE_TOKEN_CONSUMER_MAP.items()}
-        expected_consumer_arch = dict(FIXED_STYLE_SITE_ARCH)
-        if route_meta != expected_route:
-            print(
-                "[train] warning: pretrained style encoder routing metadata mismatch: "
-                f"ckpt={route_meta or '<missing>'} current={expected_route}. "
-                "Loading style encoder weights non-strictly anyway.",
-                flush=True,
-            )
-        if consumer_arch_meta != expected_consumer_arch:
-            print(
-                "[train] warning: pretrained style encoder consumer metadata mismatch: "
-                f"ckpt={consumer_arch_meta or '<missing>'} current={expected_consumer_arch}. "
-                "Loading style encoder weights non-strictly anyway.",
-                flush=True,
-            )
-        if isinstance(ckpt, dict) and isinstance(ckpt.get("style_encoder"), dict):
-            sd = ckpt["style_encoder"]
-        elif isinstance(ckpt, dict) and isinstance(ckpt.get("model_state"), dict):
-            sd = ckpt["model_state"]
-        elif isinstance(ckpt, dict):
-            sd = ckpt
-        else:
-            raise RuntimeError(f"Unsupported style checkpoint format: {type(ckpt)}")
-        missing, unexpected = model.load_state_dict(sd, strict=False)
-        loaded = len(sd) - len(unexpected)
+        model.load_style_pretrained(args.pretrained_style_encoder)
         print(f"[train] Loaded pretrained style encoder from {args.pretrained_style_encoder}")
-        print(f"  loaded={loaded} missing={len(missing)} unexpected={len(unexpected)}")
 
     trainer_cls = DiffusionTrainer if args.trainer == "diffusion" else FlowMatchingTrainer
     trainer_kwargs: Dict[str, Any] = {
@@ -752,6 +747,10 @@ def main() -> None:
         "lambda_attn_sep": float(args.lambda_attn_sep),
         "lambda_attn_order": float(args.lambda_attn_order),
         "lambda_attn_role": float(args.lambda_attn_role),
+        "lambda_route_sparse": float(args.lambda_route_sparse),
+        "lambda_route_balance": float(args.lambda_route_balance),
+        "lambda_route_div": float(args.lambda_route_div),
+        "lambda_route_gate": float(args.lambda_route_gate),
         "nce_temperature": float(args.style_nce_temp),
         "aux_loss_warmup_steps": int(args.aux_loss_warmup_steps),
         "attn_overlap_margin": float(args.attn_overlap_margin),

@@ -188,6 +188,17 @@ def cosine_same_diff(z1: torch.Tensor, z2: torch.Tensor) -> tuple[torch.Tensor, 
     return same, diff
 
 
+def probability_entropy(probs: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    p = probs.clamp_min(float(eps))
+    return -(p * p.log()).sum(dim=-1)
+
+
+def kl_to_uniform(probs: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    p = probs.clamp_min(float(eps))
+    num_bins = max(1, int(p.size(-1)))
+    return (p * (p.log() + math.log(float(num_bins)))).sum(dim=-1)
+
+
 # ====================================================================== #
 #  DiffusionTrainer
 # ====================================================================== #
@@ -210,6 +221,10 @@ class DiffusionTrainer:
         lambda_attn_sep: float = 0.0,
         lambda_attn_order: float = 0.0,
         lambda_attn_role: float = 0.0,
+        lambda_route_sparse: float = 0.0,
+        lambda_route_balance: float = 0.0,
+        lambda_route_div: float = 0.0,
+        lambda_route_gate: float = 0.0,
         nce_temperature: float = 0.07,
         aux_loss_warmup_steps: int = 0,
         attn_overlap_margin: float = 0.80,
@@ -306,6 +321,10 @@ class DiffusionTrainer:
         self.lambda_attn_sep = float(lambda_attn_sep)
         self.lambda_attn_order = float(lambda_attn_order)
         self.lambda_attn_role = float(lambda_attn_role)
+        self.lambda_route_sparse = float(lambda_route_sparse)
+        self.lambda_route_balance = float(lambda_route_balance)
+        self.lambda_route_div = float(lambda_route_div)
+        self.lambda_route_gate = float(lambda_route_gate)
         self.nce_temperature = float(nce_temperature)
         self.aux_loss_warmup_steps = max(0, int(aux_loss_warmup_steps))
         self.attn_overlap_margin = float(attn_overlap_margin)
@@ -612,6 +631,106 @@ class DiffusionTrainer:
 
         return keep.to(dtype=style_ref_mask.dtype)
 
+    def _compute_route_losses(
+        self,
+        route_views: list[dict[str, dict[str, torch.Tensor]]],
+    ) -> Dict[str, torch.Tensor]:
+        zero = torch.zeros((), device=self.device, dtype=torch.float32)
+        out: Dict[str, torch.Tensor] = {
+            "loss_route_sparse": zero,
+            "loss_route_balance": zero,
+            "loss_route_div": zero,
+            "loss_route_gate": zero,
+            "route_gate_mid": zero,
+            "route_gate_up_16": zero,
+            "route_gate_up_32": zero,
+            "route_mid_to_mid": zero,
+            "route_mid_to_up_16": zero,
+            "route_mid_to_up_32": zero,
+            "route_up_16_to_mid": zero,
+            "route_up_16_to_up_16": zero,
+            "route_up_16_to_up_32": zero,
+            "route_up_32_to_mid": zero,
+            "route_up_32_to_up_16": zero,
+            "route_up_32_to_up_32": zero,
+            "route_cos_mid_up_16": zero,
+            "route_cos_mid_up_32": zero,
+            "route_cos_up_16_up_32": zero,
+        }
+        if not route_views:
+            return out
+
+        site_names = ("mid", "up_16", "up_32")
+        alpha_by_site: dict[str, list[torch.Tensor]] = {site: [] for site in site_names}
+        gate_by_site: dict[str, list[torch.Tensor]] = {site: [] for site in site_names}
+
+        for route_view in route_views:
+            for site in site_names:
+                site_stats = route_view.get(site)
+                if not site_stats:
+                    continue
+                alpha = site_stats.get("alpha")
+                gate = site_stats.get("gate")
+                if alpha is not None:
+                    alpha_by_site[site].append(alpha)
+                if gate is not None:
+                    gate_by_site[site].append(gate)
+
+        entropy_terms: list[torch.Tensor] = []
+        balance_terms: list[torch.Tensor] = []
+        gate_terms: list[torch.Tensor] = []
+
+        for site in site_names:
+            if alpha_by_site[site]:
+                alpha_cat = torch.cat(alpha_by_site[site], dim=0)
+                denom = math.log(max(2, int(alpha_cat.size(-1))))
+                entropy_terms.append(probability_entropy(alpha_cat).mean() / denom)
+                balance_terms.append(kl_to_uniform(alpha_cat.mean(dim=0, keepdim=True)).mean())
+                metric_site = site
+                out[f"route_{metric_site}_to_mid"] = alpha_cat[:, 0].mean()
+                out[f"route_{metric_site}_to_up_16"] = alpha_cat[:, 1].mean()
+                out[f"route_{metric_site}_to_up_32"] = alpha_cat[:, 2].mean()
+            if gate_by_site[site]:
+                gate_cat = torch.cat(gate_by_site[site], dim=0)
+                gate_terms.append(gate_cat.mean())
+                out[f"route_gate_{site}"] = gate_cat.mean()
+
+        if entropy_terms:
+            out["loss_route_sparse"] = torch.stack(entropy_terms).mean()
+        if balance_terms:
+            out["loss_route_balance"] = torch.stack(balance_terms).mean()
+        if gate_terms:
+            out["loss_route_gate"] = torch.stack(gate_terms).mean()
+
+        pair_terms: list[torch.Tensor] = []
+        pair_metric_map = {
+            ("mid", "up_16"): "route_cos_mid_up_16",
+            ("mid", "up_32"): "route_cos_mid_up_32",
+            ("up_16", "up_32"): "route_cos_up_16_up_32",
+        }
+        pair_counts = {metric_name: 0 for metric_name in pair_metric_map.values()}
+        for route_view in route_views:
+            for (site_a, site_b), metric_name in pair_metric_map.items():
+                stats_a = route_view.get(site_a)
+                stats_b = route_view.get(site_b)
+                if not stats_a or not stats_b:
+                    continue
+                alpha_a = stats_a.get("alpha")
+                alpha_b = stats_b.get("alpha")
+                if alpha_a is None or alpha_b is None:
+                    continue
+                cos_val = F.cosine_similarity(alpha_a, alpha_b, dim=-1).mean()
+                pair_terms.append(cos_val)
+                out[metric_name] = out[metric_name] + cos_val
+                pair_counts[metric_name] += 1
+        for metric_name in pair_metric_map.values():
+            if pair_counts[metric_name] > 0:
+                out[metric_name] = out[metric_name] / pair_counts[metric_name]
+        if pair_terms:
+            out["loss_route_div"] = torch.stack(pair_terms).mean()
+
+        return out
+
     # ------------------------------------------------------------------ #
     #  Style regularizers on dual reference views
     # ------------------------------------------------------------------ #
@@ -641,6 +760,25 @@ class DiffusionTrainer:
             "cos_same": zero,
             "cos_diff": zero,
             "token_collapse": zero,
+            "loss_route_sparse": zero,
+            "loss_route_balance": zero,
+            "loss_route_div": zero,
+            "loss_route_gate": zero,
+            "route_gate_mid": zero,
+            "route_gate_up_16": zero,
+            "route_gate_up_32": zero,
+            "route_mid_to_mid": zero,
+            "route_mid_to_up_16": zero,
+            "route_mid_to_up_32": zero,
+            "route_up_16_to_mid": zero,
+            "route_up_16_to_up_16": zero,
+            "route_up_16_to_up_32": zero,
+            "route_up_32_to_mid": zero,
+            "route_up_32_to_up_16": zero,
+            "route_up_32_to_up_32": zero,
+            "route_cos_mid_up_16": zero,
+            "route_cos_mid_up_32": zero,
+            "route_cos_up_16_up_32": zero,
         }
         if not self._mode_uses_style(self.conditioning_mode):
             return out
@@ -665,6 +803,29 @@ class DiffusionTrainer:
 
         style_ref_mask_v1 = self._apply_style_ref_dropout(style_ref_mask_v1)
         style_ref_mask_v2 = self._apply_style_ref_dropout(style_ref_mask_v2)
+        content_img = batch.get("content", None)
+        if content_img is not None:
+            content_img = content_img.to(self.device)
+
+        route_views: list[dict[str, dict[str, torch.Tensor]]] = []
+        if content_img is not None and hasattr(self.model, "compute_style_route_diagnostics"):
+            route_v1 = self.model.compute_style_route_diagnostics(
+                content_img=content_img,
+                style_img=style_img_v1,
+                style_ref_mask=style_ref_mask_v1,
+                detach=False,
+            )
+            if route_v1:
+                route_views.append(route_v1)
+            route_v2 = self.model.compute_style_route_diagnostics(
+                content_img=content_img,
+                style_img=style_img_v2,
+                style_ref_mask=style_ref_mask_v2,
+                detach=False,
+            )
+            if route_v2:
+                route_views.append(route_v2)
+        out.update(self._compute_route_losses(route_views))
 
         attn1 = None
         attn2 = None
@@ -945,6 +1106,46 @@ class DiffusionTrainer:
             cos_same = style_losses["cos_same"]
             cos_diff = style_losses["cos_diff"]
             token_collapse = style_losses["token_collapse"]
+            loss_route_sparse = style_losses["loss_route_sparse"]
+            loss_route_balance = style_losses["loss_route_balance"]
+            loss_route_div = style_losses["loss_route_div"]
+            loss_route_gate = style_losses["loss_route_gate"]
+            route_gate_mid = style_losses["route_gate_mid"]
+            route_gate_up_16 = style_losses["route_gate_up_16"]
+            route_gate_up_32 = style_losses["route_gate_up_32"]
+            route_mid_to_mid = style_losses["route_mid_to_mid"]
+            route_mid_to_up_16 = style_losses["route_mid_to_up_16"]
+            route_mid_to_up_32 = style_losses["route_mid_to_up_32"]
+            route_up_16_to_mid = style_losses["route_up_16_to_mid"]
+            route_up_16_to_up_16 = style_losses["route_up_16_to_up_16"]
+            route_up_16_to_up_32 = style_losses["route_up_16_to_up_32"]
+            route_up_32_to_mid = style_losses["route_up_32_to_mid"]
+            route_up_32_to_up_16 = style_losses["route_up_32_to_up_16"]
+            route_up_32_to_up_32 = style_losses["route_up_32_to_up_32"]
+            route_cos_mid_up_16 = style_losses["route_cos_mid_up_16"]
+            route_cos_mid_up_32 = style_losses["route_cos_mid_up_32"]
+            route_cos_up_16_up_32 = style_losses["route_cos_up_16_up_32"]
+            route_metrics = {
+                "loss_route_sparse": loss_route_sparse.item(),
+                "loss_route_balance": loss_route_balance.item(),
+                "loss_route_div": loss_route_div.item(),
+                "loss_route_gate": loss_route_gate.item(),
+                "route_gate_mid": route_gate_mid.item(),
+                "route_gate_up_16": route_gate_up_16.item(),
+                "route_gate_up_32": route_gate_up_32.item(),
+                "route_mid_to_mid": route_mid_to_mid.item(),
+                "route_mid_to_up_16": route_mid_to_up_16.item(),
+                "route_mid_to_up_32": route_mid_to_up_32.item(),
+                "route_up_16_to_mid": route_up_16_to_mid.item(),
+                "route_up_16_to_up_16": route_up_16_to_up_16.item(),
+                "route_up_16_to_up_32": route_up_16_to_up_32.item(),
+                "route_up_32_to_mid": route_up_32_to_mid.item(),
+                "route_up_32_to_up_16": route_up_32_to_up_16.item(),
+                "route_up_32_to_up_32": route_up_32_to_up_32.item(),
+                "route_cos_mid_up_16": route_cos_mid_up_16.item(),
+                "route_cos_mid_up_32": route_cos_mid_up_32.item(),
+                "route_cos_up_16_up_32": route_cos_up_16_up_32.item(),
+            }
             eff_aux = self.effective_aux_loss_scale
             eff_lnce = eff_aux * self.lambda_nce
             eff_lslot = eff_aux * self.lambda_slot_nce
@@ -956,6 +1157,10 @@ class DiffusionTrainer:
             eff_lattn_sep = eff_aux * self.lambda_attn_sep
             eff_lattn_order = eff_aux * self.lambda_attn_order
             eff_lattn_role = eff_aux * self.lambda_attn_role
+            eff_lroute_sparse = eff_aux * self.lambda_route_sparse
+            eff_lroute_balance = eff_aux * self.lambda_route_balance
+            eff_lroute_div = eff_aux * self.lambda_route_div
+            eff_lroute_gate = eff_aux * self.lambda_route_gate
             loss = (
                 self.lambda_mse * loss_mse
                 + eff_lnce * loss_nce
@@ -968,6 +1173,10 @@ class DiffusionTrainer:
                 + eff_lattn_sep * loss_attn_sep
                 + eff_lattn_order * loss_attn_order
                 + eff_lattn_role * loss_attn_role
+                + eff_lroute_sparse * loss_route_sparse
+                + eff_lroute_balance * loss_route_balance
+                + eff_lroute_div * loss_route_div
+                + eff_lroute_gate * loss_route_gate
             )
 
         counterfactual_stats: Dict[str, float] = {}
@@ -1080,6 +1289,7 @@ class DiffusionTrainer:
                 "time_optimizer_step": float(opt_timing["time_optimizer_step"]),
                 "time_zero_grad": float(opt_timing["time_zero_grad"]),
             }
+            out.update(route_metrics)
             out.update(self._style_backbone_status())
             out.update(counterfactual_stats)
             return out
@@ -1158,6 +1368,7 @@ class DiffusionTrainer:
                 "time_optimizer_step": float(opt_timing["time_optimizer_step"]),
                 "time_zero_grad": float(opt_timing["time_zero_grad"]),
             }
+            log_row.update(route_metrics)
             log_row.update(self._style_backbone_status())
             if grad_norm is not None:
                 log_row["grad_norm"] = float(grad_norm)
@@ -1174,9 +1385,15 @@ class DiffusionTrainer:
                 f"attn_role={loss_attn_role.item():.4f} "
                 f"attn_ov={attn_overlap.item():.4f} "
                 f"H=({attn_entropy_low.item():.3f},{attn_entropy_mid.item():.3f},{attn_entropy_high.item():.3f}) "
+                f"route=({loss_route_sparse.item():.4f},{loss_route_balance.item():.4f},{loss_route_div.item():.4f},{loss_route_gate.item():.4f}) "
+                f"route_mid=({route_mid_to_mid.item():.2f},{route_mid_to_up_16.item():.2f},{route_mid_to_up_32.item():.2f}) "
+                f"route_u16=({route_up_16_to_mid.item():.2f},{route_up_16_to_up_16.item():.2f},{route_up_16_to_up_32.item():.2f}) "
+                f"route_u32=({route_up_32_to_mid.item():.2f},{route_up_32_to_up_16.item():.2f},{route_up_32_to_up_32.item():.2f}) "
+                f"route_gate=({route_gate_mid.item():.2f},{route_gate_up_16.item():.2f},{route_gate_up_32.item():.2f}) "
+                f"route_cos=({route_cos_mid_up_16.item():.3f},{route_cos_mid_up_32.item():.3f},{route_cos_up_16_up_32.item():.3f}) "
                 f"cos_same={cos_same.item():.4f} "
                 f"cos_diff={cos_diff.item():.4f} tok_coll={token_collapse.item():.4f} "
-                f"λnce={eff_lnce:.4f} λslot={eff_lslot:.4f} λaux={eff_aux:.4f} "
+                f"λnce={eff_lnce:.4f} λslot={eff_lslot:.4f} λroute=({eff_lroute_sparse:.4f},{eff_lroute_balance:.4f},{eff_lroute_div:.4f},{eff_lroute_gate:.4f}) λaux={eff_aux:.4f} "
                 f"lr={self.lr_schedule.get_last_lr()[0]:.6e} "
                 f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s "
                 f"split_t=(main:{timing_main_forward:.3f},style:{timing_style_losses:.3f},cf:{timing_counterfactual:.3f},opt:{timing_opt_step:.3f},"
@@ -1225,6 +1442,7 @@ class DiffusionTrainer:
             "data_time": float(self._step_data_time),
             "train_time": float(self._step_train_time),
         }
+        out.update(route_metrics)
         out.update(self._style_backbone_status())
         out.update(counterfactual_stats)
         return out
@@ -1554,6 +1772,10 @@ class FlowMatchingTrainer(DiffusionTrainer):
         lambda_attn_sep: float = 0.0,
         lambda_attn_order: float = 0.0,
         lambda_attn_role: float = 0.0,
+        lambda_route_sparse: float = 0.0,
+        lambda_route_balance: float = 0.0,
+        lambda_route_div: float = 0.0,
+        lambda_route_gate: float = 0.0,
         nce_temperature: float = 0.07,
         aux_loss_warmup_steps: int = 0,
         attn_overlap_margin: float = 0.80,
@@ -1591,6 +1813,10 @@ class FlowMatchingTrainer(DiffusionTrainer):
             lambda_attn_sep=lambda_attn_sep,
             lambda_attn_order=lambda_attn_order,
             lambda_attn_role=lambda_attn_role,
+            lambda_route_sparse=lambda_route_sparse,
+            lambda_route_balance=lambda_route_balance,
+            lambda_route_div=lambda_route_div,
+            lambda_route_gate=lambda_route_gate,
             nce_temperature=nce_temperature,
             aux_loss_warmup_steps=aux_loss_warmup_steps,
             attn_overlap_margin=attn_overlap_margin,
@@ -1707,6 +1933,46 @@ class FlowMatchingTrainer(DiffusionTrainer):
             cos_same = style_losses["cos_same"]
             cos_diff = style_losses["cos_diff"]
             token_collapse = style_losses["token_collapse"]
+            loss_route_sparse = style_losses["loss_route_sparse"]
+            loss_route_balance = style_losses["loss_route_balance"]
+            loss_route_div = style_losses["loss_route_div"]
+            loss_route_gate = style_losses["loss_route_gate"]
+            route_gate_mid = style_losses["route_gate_mid"]
+            route_gate_up_16 = style_losses["route_gate_up_16"]
+            route_gate_up_32 = style_losses["route_gate_up_32"]
+            route_mid_to_mid = style_losses["route_mid_to_mid"]
+            route_mid_to_up_16 = style_losses["route_mid_to_up_16"]
+            route_mid_to_up_32 = style_losses["route_mid_to_up_32"]
+            route_up_16_to_mid = style_losses["route_up_16_to_mid"]
+            route_up_16_to_up_16 = style_losses["route_up_16_to_up_16"]
+            route_up_16_to_up_32 = style_losses["route_up_16_to_up_32"]
+            route_up_32_to_mid = style_losses["route_up_32_to_mid"]
+            route_up_32_to_up_16 = style_losses["route_up_32_to_up_16"]
+            route_up_32_to_up_32 = style_losses["route_up_32_to_up_32"]
+            route_cos_mid_up_16 = style_losses["route_cos_mid_up_16"]
+            route_cos_mid_up_32 = style_losses["route_cos_mid_up_32"]
+            route_cos_up_16_up_32 = style_losses["route_cos_up_16_up_32"]
+            route_metrics = {
+                "loss_route_sparse": loss_route_sparse.item(),
+                "loss_route_balance": loss_route_balance.item(),
+                "loss_route_div": loss_route_div.item(),
+                "loss_route_gate": loss_route_gate.item(),
+                "route_gate_mid": route_gate_mid.item(),
+                "route_gate_up_16": route_gate_up_16.item(),
+                "route_gate_up_32": route_gate_up_32.item(),
+                "route_mid_to_mid": route_mid_to_mid.item(),
+                "route_mid_to_up_16": route_mid_to_up_16.item(),
+                "route_mid_to_up_32": route_mid_to_up_32.item(),
+                "route_up_16_to_mid": route_up_16_to_mid.item(),
+                "route_up_16_to_up_16": route_up_16_to_up_16.item(),
+                "route_up_16_to_up_32": route_up_16_to_up_32.item(),
+                "route_up_32_to_mid": route_up_32_to_mid.item(),
+                "route_up_32_to_up_16": route_up_32_to_up_16.item(),
+                "route_up_32_to_up_32": route_up_32_to_up_32.item(),
+                "route_cos_mid_up_16": route_cos_mid_up_16.item(),
+                "route_cos_mid_up_32": route_cos_mid_up_32.item(),
+                "route_cos_up_16_up_32": route_cos_up_16_up_32.item(),
+            }
             eff_aux = self.effective_aux_loss_scale
             eff_lnce = eff_aux * self.lambda_nce
             eff_lslot = eff_aux * self.lambda_slot_nce
@@ -1718,6 +1984,10 @@ class FlowMatchingTrainer(DiffusionTrainer):
             eff_lattn_sep = eff_aux * self.lambda_attn_sep
             eff_lattn_order = eff_aux * self.lambda_attn_order
             eff_lattn_role = eff_aux * self.lambda_attn_role
+            eff_lroute_sparse = eff_aux * self.lambda_route_sparse
+            eff_lroute_balance = eff_aux * self.lambda_route_balance
+            eff_lroute_div = eff_aux * self.lambda_route_div
+            eff_lroute_gate = eff_aux * self.lambda_route_gate
             loss = (
                 self.lambda_fm * loss_fm
                 + eff_lnce * loss_nce
@@ -1730,6 +2000,10 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 + eff_lattn_sep * loss_attn_sep
                 + eff_lattn_order * loss_attn_order
                 + eff_lattn_role * loss_attn_role
+                + eff_lroute_sparse * loss_route_sparse
+                + eff_lroute_balance * loss_route_balance
+                + eff_lroute_div * loss_route_div
+                + eff_lroute_gate * loss_route_gate
             )
 
         counterfactual_stats: Dict[str, float] = {}
@@ -1839,6 +2113,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 "time_optimizer_step": float(opt_timing["time_optimizer_step"]),
                 "time_zero_grad": float(opt_timing["time_zero_grad"]),
             }
+            out.update(route_metrics)
             out.update(self._style_backbone_status())
             out.update(counterfactual_stats)
             return out
@@ -1912,6 +2187,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 "time_optimizer_step": float(opt_timing["time_optimizer_step"]),
                 "time_zero_grad": float(opt_timing["time_zero_grad"]),
             }
+            log_row.update(route_metrics)
             log_row.update(self._style_backbone_status())
             if grad_norm is not None:
                 log_row["grad_norm"] = float(grad_norm)
@@ -1928,9 +2204,15 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 f"attn_role={loss_attn_role.item():.4f} "
                 f"attn_ov={attn_overlap.item():.4f} "
                 f"H=({attn_entropy_low.item():.3f},{attn_entropy_mid.item():.3f},{attn_entropy_high.item():.3f}) "
+                f"route=({loss_route_sparse.item():.4f},{loss_route_balance.item():.4f},{loss_route_div.item():.4f},{loss_route_gate.item():.4f}) "
+                f"route_mid=({route_mid_to_mid.item():.2f},{route_mid_to_up_16.item():.2f},{route_mid_to_up_32.item():.2f}) "
+                f"route_u16=({route_up_16_to_mid.item():.2f},{route_up_16_to_up_16.item():.2f},{route_up_16_to_up_32.item():.2f}) "
+                f"route_u32=({route_up_32_to_mid.item():.2f},{route_up_32_to_up_16.item():.2f},{route_up_32_to_up_32.item():.2f}) "
+                f"route_gate=({route_gate_mid.item():.2f},{route_gate_up_16.item():.2f},{route_gate_up_32.item():.2f}) "
+                f"route_cos=({route_cos_mid_up_16.item():.3f},{route_cos_mid_up_32.item():.3f},{route_cos_up_16_up_32.item():.3f}) "
                 f"cos_same={cos_same.item():.4f} "
                 f"cos_diff={cos_diff.item():.4f} tok_coll={token_collapse.item():.4f} "
-                f"λnce={eff_lnce:.4f} λslot={eff_lslot:.4f} λaux={eff_aux:.4f} "
+                f"λnce={eff_lnce:.4f} λslot={eff_lslot:.4f} λroute=({eff_lroute_sparse:.4f},{eff_lroute_balance:.4f},{eff_lroute_div:.4f},{eff_lroute_gate:.4f}) λaux={eff_aux:.4f} "
                 f"lr={self.lr_schedule.get_last_lr()[0]:.6e} "
                 f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s "
                 f"split_t=(main:{timing_main_forward:.3f},style:{timing_style_losses:.3f},cf:{timing_counterfactual:.3f},opt:{timing_opt_step:.3f},"
@@ -1979,6 +2261,7 @@ class FlowMatchingTrainer(DiffusionTrainer):
             "data_time": float(self._step_data_time),
             "train_time": float(self._step_train_time),
         }
+        out.update(route_metrics)
         out.update(self._style_backbone_status())
         out.update(counterfactual_stats)
         return out

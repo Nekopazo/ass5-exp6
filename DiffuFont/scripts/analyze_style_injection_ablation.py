@@ -293,6 +293,44 @@ def _write_attention_summary(out_dir: Path, attention_summary: dict[str, Any]) -
     }
 
 
+def _summarize_route_metrics(route_stats: dict[str, dict[str, torch.Tensor]]) -> dict[str, float]:
+    if not route_stats:
+        return {}
+    out: dict[str, float] = {}
+    site_names = ("mid", "up_16", "up_32")
+    for site in site_names:
+        stats = route_stats.get(site)
+        if not stats:
+            continue
+        alpha = stats.get("alpha")
+        gate = stats.get("gate")
+        if alpha is not None and alpha.numel() > 0:
+            alpha_cpu = alpha.detach().cpu()
+            out[f"route_{site}_to_mid"] = float(alpha_cpu[:, 0].mean().item())
+            out[f"route_{site}_to_up_16"] = float(alpha_cpu[:, 1].mean().item())
+            out[f"route_{site}_to_up_32"] = float(alpha_cpu[:, 2].mean().item())
+        if gate is not None and gate.numel() > 0:
+            out[f"route_gate_{site}"] = float(gate.detach().cpu().mean().item())
+    pair_specs = (
+        ("mid", "up_16", "route_cos_mid_up_16"),
+        ("mid", "up_32", "route_cos_mid_up_32"),
+        ("up_16", "up_32", "route_cos_up_16_up_32"),
+    )
+    for site_a, site_b, metric_name in pair_specs:
+        stats_a = route_stats.get(site_a)
+        stats_b = route_stats.get(site_b)
+        if not stats_a or not stats_b:
+            continue
+        alpha_a = stats_a.get("alpha")
+        alpha_b = stats_b.get("alpha")
+        if alpha_a is None or alpha_b is None:
+            continue
+        out[metric_name] = float(
+            F.cosine_similarity(alpha_a.detach().cpu(), alpha_b.detach().cpu(), dim=-1).mean().item()
+        )
+    return out
+
+
 def _run_sample(
     trainer: DiffusionTrainer | FlowMatchingTrainer,
     sample: dict[str, Any],
@@ -311,6 +349,16 @@ def _run_sample(
         _, token_attn = model.encode_style_tokens_with_attention(style_img, style_ref_mask=style_ref_mask)
     site_heatmaps = _aggregate_site_heatmaps(token_attn[0], style_ref_mask[0])
     site_heatmaps_float = _aggregate_site_heatmaps_float(token_attn[0], style_ref_mask[0])
+    route_metrics: dict[str, float] = {}
+    if hasattr(model, "compute_style_route_diagnostics"):
+        with torch.no_grad():
+            route_stats = model.compute_style_route_diagnostics(
+                content_img=content,
+                style_img=style_img,
+                style_ref_mask=style_ref_mask,
+                detach=True,
+            )
+        route_metrics = _summarize_route_metrics(route_stats)
 
     def _sample_with_drop(drop_site: str | None, active_seed: int) -> torch.Tensor:
         original_force_keep = getattr(model, "_style_site_force_keep", None)
@@ -390,6 +438,7 @@ def _run_sample(
         },
         "heatmap_path": str((out_dir / "heatmaps" / f"{sample_name}.png").resolve()),
         "generation_path": str((out_dir / "generations" / f"{sample_name}.png").resolve()),
+        "route_metrics": route_metrics,
         "site_heatmaps_float": site_heatmaps_float,
     }
 
@@ -407,6 +456,17 @@ def _build_trainer_from_config(cfg: dict[str, Any], device: torch.device, total_
         conditioning_profile=mode,
         style_token_dim=int(cfg.get("style_token_dim", 256)),
         style_token_count=int(cfg.get("style_token_count", 3)),
+        style_memory_mid_count=int(cfg.get("style_memory_mid_count", 4)),
+        style_memory_up16_count=int(cfg.get("style_memory_up16_count", 6)),
+        style_memory_up32_count=int(cfg.get("style_memory_up32_count", 6)),
+        style_memory_mid_pool_hw=int(cfg.get("style_memory_mid_pool_hw", 8)),
+        style_memory_up16_pool_hw=int(cfg.get("style_memory_up16_pool_hw", 16)),
+        style_memory_up32_pool_hw=int(cfg.get("style_memory_up32_pool_hw", 16)),
+        content_query_mid_count=int(cfg.get("content_query_mid_count", 2)),
+        content_query_up16_count=int(cfg.get("content_query_up16_count", 2)),
+        content_query_up32_count=int(cfg.get("content_query_up32_count", 4)),
+        adaptive_style_routing=bool(cfg.get("adaptive_style_routing", False)),
+        router_temperature=float(cfg.get("router_temperature", 1.0)),
     )
 
     trainer_cls = DiffusionTrainer if str(cfg.get("trainer", "diffusion")) == "diffusion" else FlowMatchingTrainer
@@ -422,6 +482,10 @@ def _build_trainer_from_config(cfg: dict[str, Any], device: torch.device, total_
         "lambda_attn_sep": float(cfg.get("lambda_attn_sep", 0.0)),
         "lambda_attn_order": float(cfg.get("lambda_attn_order", 0.0)),
         "lambda_attn_role": float(cfg.get("lambda_attn_role", 0.0)),
+        "lambda_route_sparse": float(cfg.get("lambda_route_sparse", 0.0)),
+        "lambda_route_balance": float(cfg.get("lambda_route_balance", 0.0)),
+        "lambda_route_div": float(cfg.get("lambda_route_div", 0.0)),
+        "lambda_route_gate": float(cfg.get("lambda_route_gate", 0.0)),
         "nce_temperature": float(cfg.get("style_nce_temp", 0.07)),
         "aux_loss_warmup_steps": int(cfg.get("aux_loss_warmup_steps", 0)),
         "attn_overlap_margin": float(cfg.get("attn_overlap_margin", 0.80)),
@@ -509,6 +573,7 @@ def main() -> None:
     chosen = rng.sample(list(chosen_pool), k=sample_count)
     rows: list[dict[str, Any]] = []
     aggregate: dict[str, list[dict[str, float]]] = {}
+    route_aggregate: dict[str, list[float]] = {}
     attention_acc = AttentionStatsAccumulator()
 
     for rank, sample_index in enumerate(chosen):
@@ -526,6 +591,8 @@ def main() -> None:
         rows.append(row)
         for condition, metrics in row["metrics"].items():
             aggregate.setdefault(condition, []).append(metrics)
+        for metric_name, value in row.get("route_metrics", {}).items():
+            route_aggregate.setdefault(metric_name, []).append(float(value))
         print(
             f"[analyze] sample={row['sample_name']} "
             + " ".join(
@@ -556,6 +623,13 @@ def main() -> None:
                 for metric in ("pixel_mse", "pixel_l1", "pixel_mse_std", "pixel_l1_std")
             }
             for condition, values in aggregate.items()
+        },
+        "aggregate_route_metrics": {
+            metric: {
+                "mean": float(np.mean(values)),
+                "std": float(np.std(values, ddof=0)),
+            }
+            for metric, values in route_aggregate.items()
         },
         "attention_summary": attention_summary,
         "attention_paths": attention_paths,

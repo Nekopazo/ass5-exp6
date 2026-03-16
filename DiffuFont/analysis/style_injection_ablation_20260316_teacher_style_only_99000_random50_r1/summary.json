@@ -1,0 +1,3001 @@
+{
+  "run_dir": "/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/teacher_style_only_20260314_093844",
+  "checkpoint": "/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/teacher_style_only_20260314_093844/ckpt_step_99000.pt",
+  "device": "cuda:1",
+  "split": "val",
+  "repeat_seeds": 1,
+  "split_stats": {
+    "total_fonts": 137,
+    "train_fonts": 123,
+    "val_fonts": 14
+  },
+  "num_samples": 50,
+  "samples": [
+    {
+      "sample_name": "方正汉真广标简体__雌",
+      "font": "方正汉真广标简体",
+      "char": "雌",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.8405199646949768,
+          "pixel_l1": 0.4688457250595093,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.9341574907302856,
+          "pixel_l1": 0.5132378339767456,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.8909597396850586,
+          "pixel_l1": 0.4952313303947449,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.9260095953941345,
+          "pixel_l1": 0.5121715664863586,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9794016766774456,
+        "up_16": 0.7839076771886078,
+        "up_32": 0.9644501913561013
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正汉真广标简体__雌.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正汉真广标简体__雌.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476630091667175,
+        "route_mid_to_up_16": 0.02618168666958809,
+        "route_mid_to_up_32": 0.02615528367459774,
+        "route_gate_mid": 0.0013168579898774624,
+        "route_up_16_to_mid": 0.02626071311533451,
+        "route_up_16_to_up_16": 0.9474979639053345,
+        "route_up_16_to_up_32": 0.026241302490234375,
+        "route_gate_up_16": 0.0013887706445530057,
+        "route_up_32_to_mid": 0.02631964720785618,
+        "route_up_32_to_up_16": 0.026319652795791626,
+        "route_up_32_to_up_32": 0.9473606944084167,
+        "route_gate_up_32": 0.001364838914014399,
+        "route_cos_mid_up_16": 0.05602215230464935,
+        "route_cos_mid_up_32": 0.05606338381767273,
+        "route_cos_up_16_up_32": 0.05616099387407303
+      }
+    },
+    {
+      "sample_name": "方正准圆简体__毯",
+      "font": "方正准圆简体",
+      "char": "毯",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.8255423307418823,
+          "pixel_l1": 0.4603196680545807,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.8609175682067871,
+          "pixel_l1": 0.4823307394981384,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.7077003121376038,
+          "pixel_l1": 0.40071919560432434,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.7700561285018921,
+          "pixel_l1": 0.43641290068626404,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9719511061768368,
+        "up_16": 0.7535184064051514,
+        "up_32": 0.9593695834270939
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正准圆简体__毯.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正准圆简体__毯.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476659297943115,
+        "route_mid_to_up_16": 0.026180235669016838,
+        "route_mid_to_up_32": 0.02615378238260746,
+        "route_gate_mid": 0.0013168706791475415,
+        "route_up_16_to_mid": 0.026261597871780396,
+        "route_up_16_to_up_16": 0.9474962949752808,
+        "route_up_16_to_up_32": 0.026242107152938843,
+        "route_gate_up_16": 0.001388811506330967,
+        "route_up_32_to_mid": 0.026320915669202805,
+        "route_up_32_to_up_16": 0.02632087841629982,
+        "route_up_32_to_up_32": 0.947358250617981,
+        "route_gate_up_32": 0.00136477779597044,
+        "route_cos_mid_up_16": 0.05602150037884712,
+        "route_cos_mid_up_32": 0.05606311932206154,
+        "route_cos_up_16_up_32": 0.05616331845521927
+      }
+    },
+    {
+      "sample_name": "STXINGKA__蛤",
+      "font": "STXINGKA",
+      "char": "蛤",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.4825061857700348,
+          "pixel_l1": 0.27697962522506714,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.5611692667007446,
+          "pixel_l1": 0.31735914945602417,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.6583067178726196,
+          "pixel_l1": 0.36585405468940735,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.5259870886802673,
+          "pixel_l1": 0.29982951283454895,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.948053584894005,
+        "up_16": 0.7676819522829016,
+        "up_32": 0.9548060206531991
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/STXINGKA__蛤.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/STXINGKA__蛤.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476655125617981,
+        "route_mid_to_up_16": 0.026180485263466835,
+        "route_mid_to_up_32": 0.02615406922996044,
+        "route_gate_mid": 0.0013168493751436472,
+        "route_up_16_to_mid": 0.026260873302817345,
+        "route_up_16_to_up_16": 0.9474976658821106,
+        "route_up_16_to_up_32": 0.026241470128297806,
+        "route_gate_up_16": 0.0013887719251215458,
+        "route_up_32_to_mid": 0.026321325451135635,
+        "route_up_32_to_up_16": 0.02632138878107071,
+        "route_up_32_to_up_32": 0.9473572969436646,
+        "route_gate_up_32": 0.001364875235594809,
+        "route_cos_mid_up_16": 0.056020963937044144,
+        "route_cos_mid_up_32": 0.05606391280889511,
+        "route_cos_up_16_up_32": 0.056163158267736435
+      }
+    },
+    {
+      "sample_name": "方正苏新诗柳楷简体__蟀",
+      "font": "方正苏新诗柳楷简体",
+      "char": "蟀",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.7291823029518127,
+          "pixel_l1": 0.40777939558029175,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.6012296676635742,
+          "pixel_l1": 0.34269097447395325,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.5749776363372803,
+          "pixel_l1": 0.33038198947906494,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.614050030708313,
+          "pixel_l1": 0.3512982726097107,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9494510974922926,
+        "up_16": 0.769404402996352,
+        "up_32": 0.9566729126709039
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正苏新诗柳楷简体__蟀.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正苏新诗柳楷简体__蟀.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476648569107056,
+        "route_mid_to_up_16": 0.02618074044585228,
+        "route_mid_to_up_32": 0.026154324412345886,
+        "route_gate_mid": 0.0013168606674298644,
+        "route_up_16_to_mid": 0.026261039078235626,
+        "route_up_16_to_up_16": 0.9474973678588867,
+        "route_up_16_to_up_32": 0.026241587474942207,
+        "route_gate_up_16": 0.0013887614477425814,
+        "route_up_32_to_mid": 0.02632012963294983,
+        "route_up_32_to_up_16": 0.02632009983062744,
+        "route_up_32_to_up_32": 0.9473598599433899,
+        "route_gate_up_32": 0.0013647830346599221,
+        "route_cos_mid_up_16": 0.05602144077420235,
+        "route_cos_mid_up_32": 0.056062836199998856,
+        "route_cos_up_16_up_32": 0.05616183206439018
+      }
+    },
+    {
+      "sample_name": "方正启笛简体__邮",
+      "font": "方正启笛简体",
+      "char": "邮",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.4839474558830261,
+          "pixel_l1": 0.2745274305343628,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.6620323657989502,
+          "pixel_l1": 0.3663219213485718,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.5852195024490356,
+          "pixel_l1": 0.3257867395877838,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.5159956216812134,
+          "pixel_l1": 0.2904496490955353,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9514115244234747,
+        "up_16": 0.7611490135609551,
+        "up_32": 0.9559292734989591
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正启笛简体__邮.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正启笛简体__邮.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476637840270996,
+        "route_mid_to_up_16": 0.02618132159113884,
+        "route_mid_to_up_32": 0.02615494467318058,
+        "route_gate_mid": 0.0013168356381356716,
+        "route_up_16_to_mid": 0.026261985301971436,
+        "route_up_16_to_up_16": 0.9474954009056091,
+        "route_up_16_to_up_32": 0.026242589578032494,
+        "route_gate_up_16": 0.0013888420071452856,
+        "route_up_32_to_mid": 0.026324523612856865,
+        "route_up_32_to_up_16": 0.026324784383177757,
+        "route_up_32_to_up_32": 0.9473506212234497,
+        "route_gate_up_32": 0.001365109346807003,
+        "route_cos_mid_up_16": 0.056023191660642624,
+        "route_cos_mid_up_32": 0.05606856569647789,
+        "route_cos_up_16_up_32": 0.056168295443058014
+      }
+    },
+    {
+      "sample_name": "方正启笛简体__窜",
+      "font": "方正启笛简体",
+      "char": "窜",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.4852930009365082,
+          "pixel_l1": 0.2732292115688324,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.5886486768722534,
+          "pixel_l1": 0.32726725935935974,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.549034595489502,
+          "pixel_l1": 0.30647075176239014,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6471318602561951,
+          "pixel_l1": 0.3599393963813782,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9530185973602538,
+        "up_16": 0.7619732649530062,
+        "up_32": 0.9550642920669185
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正启笛简体__窜.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正启笛简体__窜.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476693272590637,
+        "route_mid_to_up_16": 0.026178598403930664,
+        "route_mid_to_up_32": 0.026152130216360092,
+        "route_gate_mid": 0.0013168675359338522,
+        "route_up_16_to_mid": 0.02625683881342411,
+        "route_up_16_to_up_16": 0.9475057125091553,
+        "route_up_16_to_up_32": 0.026237521320581436,
+        "route_gate_up_16": 0.0013886766973882914,
+        "route_up_32_to_mid": 0.02631787769496441,
+        "route_up_32_to_up_16": 0.026317644864320755,
+        "route_up_32_to_up_32": 0.9473645687103271,
+        "route_gate_up_32": 0.0013645398430526257,
+        "route_cos_mid_up_16": 0.05601421743631363,
+        "route_cos_mid_up_32": 0.05605775862932205,
+        "route_cos_up_16_up_32": 0.05615440011024475
+      }
+    },
+    {
+      "sample_name": "方正卡通简体__鬓",
+      "font": "方正卡通简体",
+      "char": "鬓",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.8719842433929443,
+          "pixel_l1": 0.491859495639801,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.6996023058891296,
+          "pixel_l1": 0.4084465205669403,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.9169467091560364,
+          "pixel_l1": 0.512370228767395,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 1.0353338718414307,
+          "pixel_l1": 0.575238049030304,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.956588304500354,
+        "up_16": 0.7672705965103277,
+        "up_32": 0.9554379880468806
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正卡通简体__鬓.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正卡通简体__鬓.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476709365844727,
+        "route_mid_to_up_16": 0.026177775114774704,
+        "route_mid_to_up_32": 0.026151221245527267,
+        "route_gate_mid": 0.001316938316449523,
+        "route_up_16_to_mid": 0.026253491640090942,
+        "route_up_16_to_up_16": 0.9475124478340149,
+        "route_up_16_to_up_32": 0.026234116405248642,
+        "route_gate_up_16": 0.0013885821681469679,
+        "route_up_32_to_mid": 0.026311121881008148,
+        "route_up_32_to_up_16": 0.026310373097658157,
+        "route_up_32_to_up_32": 0.9473785758018494,
+        "route_gate_up_32": 0.0013640181859955192,
+        "route_cos_mid_up_16": 0.056009456515312195,
+        "route_cos_mid_up_32": 0.05604899674654007,
+        "route_cos_up_16_up_32": 0.05614226311445236
+      }
+    },
+    {
+      "sample_name": "方正准雅宋简__饿",
+      "font": "方正准雅宋简",
+      "char": "饿",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.2807908356189728,
+          "pixel_l1": 0.18634577095508575,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.2660243809223175,
+          "pixel_l1": 0.18426784873008728,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.2641117572784424,
+          "pixel_l1": 0.17819716036319733,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.26427510380744934,
+          "pixel_l1": 0.17784884572029114,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9683772064106084,
+        "up_16": 0.7829571956012054,
+        "up_32": 0.9520208115324472
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正准雅宋简__饿.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正准雅宋简__饿.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476640224456787,
+        "route_mid_to_up_16": 0.026181260123848915,
+        "route_mid_to_up_32": 0.026154838502407074,
+        "route_gate_mid": 0.0013168579898774624,
+        "route_up_16_to_mid": 0.0262625589966774,
+        "route_up_16_to_up_16": 0.9474943280220032,
+        "route_up_16_to_up_32": 0.02624307945370674,
+        "route_gate_up_16": 0.0013888312969356775,
+        "route_up_32_to_mid": 0.026322312653064728,
+        "route_up_32_to_up_16": 0.026322413235902786,
+        "route_up_32_to_up_32": 0.9473552107810974,
+        "route_gate_up_32": 0.0013649447355419397,
+        "route_cos_mid_up_16": 0.05602375790476799,
+        "route_cos_mid_up_32": 0.056065913289785385,
+        "route_cos_up_16_up_32": 0.05616617202758789
+      }
+    },
+    {
+      "sample_name": "方正苏新诗柳楷简体__啊",
+      "font": "方正苏新诗柳楷简体",
+      "char": "啊",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.6566370129585266,
+          "pixel_l1": 0.366713285446167,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.7792762517929077,
+          "pixel_l1": 0.4249100685119629,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.7465844750404358,
+          "pixel_l1": 0.40803301334381104,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6570574045181274,
+          "pixel_l1": 0.3695334196090698,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9534223185143681,
+        "up_16": 0.7718943280665992,
+        "up_32": 0.9499180558371999
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正苏新诗柳楷简体__啊.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正苏新诗柳楷简体__啊.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476616382598877,
+        "route_mid_to_up_16": 0.02618236653506756,
+        "route_mid_to_up_32": 0.026156006380915642,
+        "route_gate_mid": 0.0013168543810024858,
+        "route_up_16_to_mid": 0.02626241371035576,
+        "route_up_16_to_up_16": 0.9474945664405823,
+        "route_up_16_to_up_32": 0.026242978870868683,
+        "route_gate_up_16": 0.0013888294342905283,
+        "route_up_32_to_mid": 0.026320384815335274,
+        "route_up_32_to_up_16": 0.02632049284875393,
+        "route_up_32_to_up_32": 0.9473590850830078,
+        "route_gate_up_32": 0.0013649564934894443,
+        "route_cos_mid_up_16": 0.05602486804127693,
+        "route_cos_mid_up_32": 0.05606505274772644,
+        "route_cos_up_16_up_32": 0.056163862347602844
+      }
+    },
+    {
+      "sample_name": "方正准圆简体__鹊",
+      "font": "方正准圆简体",
+      "char": "鹊",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.528049647808075,
+          "pixel_l1": 0.3131427764892578,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.47414615750312805,
+          "pixel_l1": 0.2899056077003479,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.4685016870498657,
+          "pixel_l1": 0.28382834792137146,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6539967060089111,
+          "pixel_l1": 0.3773280680179596,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9714167035598532,
+        "up_16": 0.7574607032724547,
+        "up_32": 0.975913626286212
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正准圆简体__鹊.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正准圆简体__鹊.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476656913757324,
+        "route_mid_to_up_16": 0.026180364191532135,
+        "route_mid_to_up_32": 0.0261539313942194,
+        "route_gate_mid": 0.0013168606674298644,
+        "route_up_16_to_mid": 0.026258908212184906,
+        "route_up_16_to_up_16": 0.947501540184021,
+        "route_up_16_to_up_32": 0.02623952552676201,
+        "route_gate_up_16": 0.0013887243112549186,
+        "route_up_32_to_mid": 0.026318712159991264,
+        "route_up_32_to_up_16": 0.026318592950701714,
+        "route_up_32_to_up_32": 0.9473627209663391,
+        "route_gate_up_32": 0.0013646724401041865,
+        "route_cos_mid_up_16": 0.056018587201833725,
+        "route_cos_mid_up_32": 0.05606076866388321,
+        "route_cos_up_16_up_32": 0.05615776777267456
+      }
+    },
+    {
+      "sample_name": "方正粗宋简体__艾",
+      "font": "方正粗宋简体",
+      "char": "艾",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.3388422727584839,
+          "pixel_l1": 0.2005440890789032,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.43898388743400574,
+          "pixel_l1": 0.25430387258529663,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.37821120023727417,
+          "pixel_l1": 0.220540851354599,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.4514327049255371,
+          "pixel_l1": 0.2591831088066101,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9693059795490521,
+        "up_16": 0.7659084955438129,
+        "up_32": 0.9520115748300941
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正粗宋简体__艾.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正粗宋简体__艾.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476682543754578,
+        "route_mid_to_up_16": 0.026179101318120956,
+        "route_mid_to_up_32": 0.026152687147259712,
+        "route_gate_mid": 0.001316830632276833,
+        "route_up_16_to_mid": 0.026262687519192696,
+        "route_up_16_to_up_16": 0.9474940299987793,
+        "route_up_16_to_up_32": 0.026243247091770172,
+        "route_gate_up_16": 0.0013889054534956813,
+        "route_up_32_to_mid": 0.026331042870879173,
+        "route_up_32_to_up_16": 0.02633153274655342,
+        "route_up_32_to_up_32": 0.9473373889923096,
+        "route_gate_up_32": 0.0013653419446200132,
+        "route_cos_mid_up_16": 0.05602145567536354,
+        "route_cos_mid_up_32": 0.05607344210147858,
+        "route_cos_up_16_up_32": 0.05617672950029373
+      }
+    },
+    {
+      "sample_name": "方正苏新诗柳楷简体__盈",
+      "font": "方正苏新诗柳楷简体",
+      "char": "盈",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.47245603799819946,
+          "pixel_l1": 0.2746950387954712,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.5754485726356506,
+          "pixel_l1": 0.326579213142395,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.6438357830047607,
+          "pixel_l1": 0.3598487973213196,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.5660718083381653,
+          "pixel_l1": 0.3203871250152588,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9534079069092705,
+        "up_16": 0.7667345441428534,
+        "up_32": 0.959040544600393
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正苏新诗柳楷简体__盈.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正苏新诗柳楷简体__盈.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.947666585445404,
+        "route_mid_to_up_16": 0.026179902255535126,
+        "route_mid_to_up_32": 0.026153450831770897,
+        "route_gate_mid": 0.001316865673288703,
+        "route_up_16_to_mid": 0.026258785277605057,
+        "route_up_16_to_up_16": 0.9475018382072449,
+        "route_up_16_to_up_32": 0.026239408180117607,
+        "route_gate_up_16": 0.0013887534150853753,
+        "route_up_32_to_mid": 0.02632112242281437,
+        "route_up_32_to_up_16": 0.02632109262049198,
+        "route_up_32_to_up_32": 0.9473578333854675,
+        "route_gate_up_32": 0.0013647712767124176,
+        "route_cos_mid_up_16": 0.0560179203748703,
+        "route_cos_mid_up_32": 0.0560629740357399,
+        "route_cos_up_16_up_32": 0.056160472333431244
+      }
+    },
+    {
+      "sample_name": "方正平和简体__缸",
+      "font": "方正平和简体",
+      "char": "缸",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.7625507712364197,
+          "pixel_l1": 0.4114550054073334,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.9273239970207214,
+          "pixel_l1": 0.4949808716773987,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.9439469575881958,
+          "pixel_l1": 0.5040879845619202,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.8756583333015442,
+          "pixel_l1": 0.47191938757896423,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9393291778879375,
+        "up_16": 0.7659796567138887,
+        "up_32": 0.9445962475320049
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正平和简体__缸.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正平和简体__缸.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476653933525085,
+        "route_mid_to_up_16": 0.02618049830198288,
+        "route_mid_to_up_32": 0.026154091581702232,
+        "route_gate_mid": 0.00131683808285743,
+        "route_up_16_to_mid": 0.026261240243911743,
+        "route_up_16_to_up_16": 0.9474968910217285,
+        "route_up_16_to_up_32": 0.02624185010790825,
+        "route_gate_up_16": 0.0013888367684558034,
+        "route_up_32_to_mid": 0.026325656101107597,
+        "route_up_32_to_up_16": 0.026325926184654236,
+        "route_up_32_to_up_32": 0.947348415851593,
+        "route_gate_up_32": 0.0013651001499965787,
+        "route_cos_mid_up_16": 0.056021399796009064,
+        "route_cos_mid_up_32": 0.056068889796733856,
+        "route_cos_up_16_up_32": 0.056168753653764725
+      }
+    },
+    {
+      "sample_name": "方正准圆简体__省",
+      "font": "方正准圆简体",
+      "char": "省",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.2747887074947357,
+          "pixel_l1": 0.17504049837589264,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.38419318199157715,
+          "pixel_l1": 0.22960776090621948,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.4072681963443756,
+          "pixel_l1": 0.2449958324432373,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.5351490378379822,
+          "pixel_l1": 0.30816465616226196,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9721365867622735,
+        "up_16": 0.770248382699291,
+        "up_32": 0.9760374857422306
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正准圆简体__省.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正准圆简体__省.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476682543754578,
+        "route_mid_to_up_16": 0.026179082691669464,
+        "route_mid_to_up_32": 0.02615262381732464,
+        "route_gate_mid": 0.001316855545155704,
+        "route_up_16_to_mid": 0.02625882439315319,
+        "route_up_16_to_up_16": 0.9475017189979553,
+        "route_up_16_to_up_32": 0.026239454746246338,
+        "route_gate_up_16": 0.0013887692475691438,
+        "route_up_32_to_mid": 0.02632325328886509,
+        "route_up_32_to_up_16": 0.026323309168219566,
+        "route_up_32_to_up_32": 0.9473534226417542,
+        "route_gate_up_32": 0.001364859752357006,
+        "route_cos_mid_up_16": 0.056017033755779266,
+        "route_cos_mid_up_32": 0.05606447160243988,
+        "route_cos_up_16_up_32": 0.05616305395960808
+      }
+    },
+    {
+      "sample_name": "方正楷体简体__铡",
+      "font": "方正楷体简体",
+      "char": "铡",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.8298457860946655,
+          "pixel_l1": 0.4593331813812256,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.6484654545783997,
+          "pixel_l1": 0.3688724637031555,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.3107108771800995,
+          "pixel_l1": 0.19901147484779358,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.2991939187049866,
+          "pixel_l1": 0.1935052126646042,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9525721315702265,
+        "up_16": 0.7681951027840799,
+        "up_32": 0.9556039070236597
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正楷体简体__铡.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正楷体简体__铡.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476620554924011,
+        "route_mid_to_up_16": 0.026182137429714203,
+        "route_mid_to_up_32": 0.026155756786465645,
+        "route_gate_mid": 0.001316857524216175,
+        "route_up_16_to_mid": 0.02626354992389679,
+        "route_up_16_to_up_16": 0.9474924206733704,
+        "route_up_16_to_up_32": 0.02624405175447464,
+        "route_gate_up_16": 0.001388853881508112,
+        "route_up_32_to_mid": 0.026320233941078186,
+        "route_up_32_to_up_16": 0.026320291683077812,
+        "route_up_32_to_up_32": 0.9473595023155212,
+        "route_gate_up_32": 0.0013649078318849206,
+        "route_cos_mid_up_16": 0.05602589622139931,
+        "route_cos_mid_up_32": 0.05606459081172943,
+        "route_cos_up_16_up_32": 0.056164853274822235
+      }
+    },
+    {
+      "sample_name": "方正小篆体__舆",
+      "font": "方正小篆体",
+      "char": "舆",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.60690838098526,
+          "pixel_l1": 0.3418266177177429,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.6160634160041809,
+          "pixel_l1": 0.3474275767803192,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.6300088763237,
+          "pixel_l1": 0.3552553653717041,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.60824054479599,
+          "pixel_l1": 0.34278228878974915,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.940620467815517,
+        "up_16": 0.7602283642135184,
+        "up_32": 0.967128547671781
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正小篆体__舆.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正小篆体__舆.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476667642593384,
+        "route_mid_to_up_16": 0.026179824024438858,
+        "route_mid_to_up_32": 0.02615339308977127,
+        "route_gate_mid": 0.001316855545155704,
+        "route_up_16_to_mid": 0.02625967375934124,
+        "route_up_16_to_up_16": 0.9474999904632568,
+        "route_up_16_to_up_32": 0.026240259408950806,
+        "route_gate_up_16": 0.0013887652894482017,
+        "route_up_32_to_mid": 0.02632238157093525,
+        "route_up_32_to_up_16": 0.026322413235902786,
+        "route_up_32_to_up_32": 0.9473552107810974,
+        "route_gate_up_32": 0.0013648363528773189,
+        "route_cos_mid_up_16": 0.05601884797215462,
+        "route_cos_mid_up_32": 0.05606434494256973,
+        "route_cos_up_16_up_32": 0.05616295337677002
+      }
+    },
+    {
+      "sample_name": "STXINGKA__芯",
+      "font": "STXINGKA",
+      "char": "芯",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.40451788902282715,
+          "pixel_l1": 0.2343355119228363,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.35354042053222656,
+          "pixel_l1": 0.2072325348854065,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.4383872151374817,
+          "pixel_l1": 0.2514440417289734,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.42464977502822876,
+          "pixel_l1": 0.2428971827030182,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9458755979475673,
+        "up_16": 0.7660746659379047,
+        "up_32": 0.9551697108486952
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/STXINGKA__芯.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/STXINGKA__芯.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476667642593384,
+        "route_mid_to_up_16": 0.02617979422211647,
+        "route_mid_to_up_32": 0.026153406128287315,
+        "route_gate_mid": 0.0013168242294341326,
+        "route_up_16_to_mid": 0.026263197883963585,
+        "route_up_16_to_up_16": 0.9474930763244629,
+        "route_up_16_to_up_32": 0.02624375931918621,
+        "route_gate_up_16": 0.0013889187248423696,
+        "route_up_32_to_mid": 0.026331134140491486,
+        "route_up_32_to_up_16": 0.026331666857004166,
+        "route_up_32_to_up_32": 0.94733726978302,
+        "route_gate_up_32": 0.0013653862988576293,
+        "route_cos_mid_up_16": 0.056022822856903076,
+        "route_cos_mid_up_32": 0.056074365973472595,
+        "route_cos_up_16_up_32": 0.05617745593190193
+      }
+    },
+    {
+      "sample_name": "STXINGKA__但",
+      "font": "STXINGKA",
+      "char": "但",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.3530369997024536,
+          "pixel_l1": 0.20763346552848816,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.3236660361289978,
+          "pixel_l1": 0.19082637131214142,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.39359331130981445,
+          "pixel_l1": 0.2237735092639923,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.48767411708831787,
+          "pixel_l1": 0.2714713215827942,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9458291128910624,
+        "up_16": 0.7678052381114441,
+        "up_32": 0.9539662483061656
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/STXINGKA__但.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/STXINGKA__但.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.947666347026825,
+        "route_mid_to_up_16": 0.026179995387792587,
+        "route_mid_to_up_32": 0.026153575628995895,
+        "route_gate_mid": 0.0013168412260711193,
+        "route_up_16_to_mid": 0.026260729879140854,
+        "route_up_16_to_up_16": 0.9474978446960449,
+        "route_up_16_to_up_32": 0.026241345331072807,
+        "route_gate_up_16": 0.0013888499233871698,
+        "route_up_32_to_mid": 0.02632586658000946,
+        "route_up_32_to_up_16": 0.026326123625040054,
+        "route_up_32_to_up_32": 0.9473480582237244,
+        "route_gate_up_32": 0.0013650917680934072,
+        "route_cos_mid_up_16": 0.05602024868130684,
+        "route_cos_mid_up_32": 0.0560685396194458,
+        "route_cos_up_16_up_32": 0.05616840347647667
+      }
+    },
+    {
+      "sample_name": "方正准圆简体__公",
+      "font": "方正准圆简体",
+      "char": "公",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.688554048538208,
+          "pixel_l1": 0.3748428523540497,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.5968242883682251,
+          "pixel_l1": 0.33114340901374817,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.5692962408065796,
+          "pixel_l1": 0.31444528698921204,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.5357730388641357,
+          "pixel_l1": 0.297393262386322,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.973307319764209,
+        "up_16": 0.7695070709129591,
+        "up_32": 0.9669189249219735
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正准圆简体__公.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正准圆简体__公.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476674199104309,
+        "route_mid_to_up_16": 0.026179486885666847,
+        "route_mid_to_up_32": 0.026153072714805603,
+        "route_gate_mid": 0.0013168267905712128,
+        "route_up_16_to_mid": 0.026264412328600883,
+        "route_up_16_to_up_16": 0.9474906921386719,
+        "route_up_16_to_up_32": 0.026244930922985077,
+        "route_gate_up_16": 0.0013889787951484323,
+        "route_up_32_to_mid": 0.02633327804505825,
+        "route_up_32_to_up_16": 0.026333913207054138,
+        "route_up_32_to_up_32": 0.9473328590393066,
+        "route_gate_up_32": 0.0013655148213729262,
+        "route_cos_mid_up_16": 0.05602385103702545,
+        "route_cos_mid_up_32": 0.05607642978429794,
+        "route_cos_up_16_up_32": 0.056181348860263824
+      }
+    },
+    {
+      "sample_name": "方正卡通简体__即",
+      "font": "方正卡通简体",
+      "char": "即",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.745416522026062,
+          "pixel_l1": 0.41113758087158203,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.6682244539260864,
+          "pixel_l1": 0.36954715847969055,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.7840334177017212,
+          "pixel_l1": 0.4241039454936981,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.7852028608322144,
+          "pixel_l1": 0.4286598563194275,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9531758742525062,
+        "up_16": 0.7694996149604654,
+        "up_32": 0.9569346361753704
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正卡通简体__即.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正卡通简体__即.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476648569107056,
+        "route_mid_to_up_16": 0.026180753484368324,
+        "route_mid_to_up_32": 0.026154350489377975,
+        "route_gate_mid": 0.001316838781349361,
+        "route_up_16_to_mid": 0.026261454448103905,
+        "route_up_16_to_up_16": 0.9474964737892151,
+        "route_up_16_to_up_32": 0.026242075487971306,
+        "route_gate_up_16": 0.0013888274552300572,
+        "route_up_32_to_mid": 0.026324115693569183,
+        "route_up_32_to_up_16": 0.02632434107363224,
+        "route_up_32_to_up_32": 0.9473515152931213,
+        "route_gate_up_32": 0.0013650618493556976,
+        "route_cos_mid_up_16": 0.056021932512521744,
+        "route_cos_mid_up_32": 0.05606742948293686,
+        "route_cos_up_16_up_32": 0.05616720765829086
+      }
+    },
+    {
+      "sample_name": "方正卡通简体__车",
+      "font": "方正卡通简体",
+      "char": "车",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.9336656928062439,
+          "pixel_l1": 0.4956497550010681,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.63673335313797,
+          "pixel_l1": 0.34796321392059326,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.7142261862754822,
+          "pixel_l1": 0.387519508600235,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.9120376706123352,
+          "pixel_l1": 0.48756280541419983,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9533497906778388,
+        "up_16": 0.7727651149842808,
+        "up_32": 0.9483195338781616
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正卡通简体__车.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正卡通简体__车.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476682543754578,
+        "route_mid_to_up_16": 0.026179123669862747,
+        "route_mid_to_up_32": 0.026152687147259712,
+        "route_gate_mid": 0.0013168430887162685,
+        "route_up_16_to_mid": 0.026259856298565865,
+        "route_up_16_to_up_16": 0.947499692440033,
+        "route_up_16_to_up_32": 0.026240481063723564,
+        "route_gate_up_16": 0.0013888610992580652,
+        "route_up_32_to_mid": 0.026328468695282936,
+        "route_up_32_to_up_16": 0.026328809559345245,
+        "route_up_32_to_up_32": 0.9473428130149841,
+        "route_gate_up_32": 0.001365163130685687,
+        "route_cos_mid_up_16": 0.05601825192570686,
+        "route_cos_mid_up_32": 0.05607049912214279,
+        "route_cos_up_16_up_32": 0.056170471012592316
+      }
+    },
+    {
+      "sample_name": "方正平和简体__轮",
+      "font": "方正平和简体",
+      "char": "轮",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.9157698154449463,
+          "pixel_l1": 0.4920452833175659,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.9442424774169922,
+          "pixel_l1": 0.5076479315757751,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.9225432872772217,
+          "pixel_l1": 0.4972090721130371,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 1.0059250593185425,
+          "pixel_l1": 0.5376200675964355,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9421924351870641,
+        "up_16": 0.7599600043703556,
+        "up_32": 0.9478136702792157
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正平和简体__轮.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正平和简体__轮.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476655125617981,
+        "route_mid_to_up_16": 0.02618049643933773,
+        "route_mid_to_up_32": 0.02615406922996044,
+        "route_gate_mid": 0.0013168519362807274,
+        "route_up_16_to_mid": 0.026262376457452774,
+        "route_up_16_to_up_16": 0.9474947452545166,
+        "route_up_16_to_up_32": 0.026242902502417564,
+        "route_gate_up_16": 0.0013888492248952389,
+        "route_up_32_to_mid": 0.0263246838003397,
+        "route_up_32_to_up_16": 0.02632487751543522,
+        "route_up_32_to_up_32": 0.9473504424095154,
+        "route_gate_up_32": 0.0013650344917550683,
+        "route_cos_mid_up_16": 0.05602268502116203,
+        "route_cos_mid_up_32": 0.05606774985790253,
+        "route_cos_up_16_up_32": 0.05616876482963562
+      }
+    },
+    {
+      "sample_name": "方正楷体简体__湿",
+      "font": "方正楷体简体",
+      "char": "湿",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.22137290239334106,
+          "pixel_l1": 0.1436925083398819,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.38002532720565796,
+          "pixel_l1": 0.2247748225927353,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.5039507746696472,
+          "pixel_l1": 0.2909722626209259,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.31609004735946655,
+          "pixel_l1": 0.19415882229804993,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9581598820858067,
+        "up_16": 0.7757467085204874,
+        "up_32": 0.9541796922905197
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正楷体简体__湿.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正楷体简体__湿.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476661682128906,
+        "route_mid_to_up_16": 0.026180170476436615,
+        "route_mid_to_up_32": 0.02615375630557537,
+        "route_gate_mid": 0.001316845533438027,
+        "route_up_16_to_mid": 0.02626052498817444,
+        "route_up_16_to_up_16": 0.9474983215332031,
+        "route_up_16_to_up_32": 0.026241138577461243,
+        "route_gate_up_16": 0.0013887804234400392,
+        "route_up_32_to_mid": 0.02632227912545204,
+        "route_up_32_to_up_16": 0.02632235363125801,
+        "route_up_32_to_up_32": 0.947355329990387,
+        "route_gate_up_32": 0.0013648844324052334,
+        "route_cos_mid_up_16": 0.056020211428403854,
+        "route_cos_mid_up_32": 0.05606464296579361,
+        "route_cos_up_16_up_32": 0.056163884699344635
+      }
+    },
+    {
+      "sample_name": "STXINGKA__拾",
+      "font": "STXINGKA",
+      "char": "拾",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.49434447288513184,
+          "pixel_l1": 0.2834579348564148,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.3897770345211029,
+          "pixel_l1": 0.22696033120155334,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.4537298083305359,
+          "pixel_l1": 0.26217901706695557,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.28600621223449707,
+          "pixel_l1": 0.17429131269454956,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9472682173666164,
+        "up_16": 0.7635748477536375,
+        "up_32": 0.9511897377793025
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/STXINGKA__拾.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/STXINGKA__拾.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476659297943115,
+        "route_mid_to_up_16": 0.026180244982242584,
+        "route_mid_to_up_32": 0.02615383267402649,
+        "route_gate_mid": 0.0013168437872081995,
+        "route_up_16_to_mid": 0.026261799037456512,
+        "route_up_16_to_up_16": 0.9474958181381226,
+        "route_up_16_to_up_32": 0.026242371648550034,
+        "route_gate_up_16": 0.0013888301327824593,
+        "route_up_32_to_mid": 0.02632473036646843,
+        "route_up_32_to_up_16": 0.026324937120079994,
+        "route_up_32_to_up_32": 0.9473503232002258,
+        "route_gate_up_32": 0.0013650364708155394,
+        "route_cos_mid_up_16": 0.05602174624800682,
+        "route_cos_mid_up_32": 0.056067533791065216,
+        "route_cos_up_16_up_32": 0.056168220937252045
+      }
+    },
+    {
+      "sample_name": "方正楷体简体__漱",
+      "font": "方正楷体简体",
+      "char": "漱",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.6942155957221985,
+          "pixel_l1": 0.38822877407073975,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.575436532497406,
+          "pixel_l1": 0.3300817608833313,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.5006446838378906,
+          "pixel_l1": 0.2927016019821167,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6027814149856567,
+          "pixel_l1": 0.34503039717674255,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9593372217065352,
+        "up_16": 0.7771901939888187,
+        "up_32": 0.9512356514763384
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正楷体简体__漱.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正楷体简体__漱.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.947664201259613,
+        "route_mid_to_up_16": 0.026181085035204887,
+        "route_mid_to_up_32": 0.026154669001698494,
+        "route_gate_mid": 0.0013168579898774624,
+        "route_up_16_to_mid": 0.026263106614351273,
+        "route_up_16_to_up_16": 0.9474932551383972,
+        "route_up_16_to_up_32": 0.02624361403286457,
+        "route_gate_up_16": 0.0013888287357985973,
+        "route_up_32_to_mid": 0.02632170170545578,
+        "route_up_32_to_up_16": 0.0263217780739069,
+        "route_up_32_to_up_32": 0.9473565220832825,
+        "route_gate_up_32": 0.0013649103930220008,
+        "route_cos_mid_up_16": 0.05602419003844261,
+        "route_cos_mid_up_32": 0.05606503039598465,
+        "route_cos_up_16_up_32": 0.05616605281829834
+      }
+    },
+    {
+      "sample_name": "方正卡通简体__王",
+      "font": "方正卡通简体",
+      "char": "王",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.3321470320224762,
+          "pixel_l1": 0.19480016827583313,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.3633357584476471,
+          "pixel_l1": 0.2074880301952362,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.41110289096832275,
+          "pixel_l1": 0.23471325635910034,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.45765382051467896,
+          "pixel_l1": 0.25487419962882996,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9532149621544683,
+        "up_16": 0.7606449238535821,
+        "up_32": 0.9469590767812549
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正卡通简体__王.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正卡通简体__王.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.947668731212616,
+        "route_mid_to_up_16": 0.026178894564509392,
+        "route_mid_to_up_32": 0.02615247294306755,
+        "route_gate_mid": 0.0013168317964300513,
+        "route_up_16_to_mid": 0.026260217651724815,
+        "route_up_16_to_up_16": 0.9474989175796509,
+        "route_up_16_to_up_32": 0.02624085545539856,
+        "route_gate_up_16": 0.001388900214806199,
+        "route_up_32_to_mid": 0.02633138932287693,
+        "route_up_32_to_up_16": 0.026331879198551178,
+        "route_up_32_to_up_32": 0.947336733341217,
+        "route_gate_up_32": 0.0013653304195031524,
+        "route_cos_mid_up_16": 0.0560184046626091,
+        "route_cos_mid_up_32": 0.056073591113090515,
+        "route_cos_up_16_up_32": 0.056174393743276596
+      }
+    },
+    {
+      "sample_name": "方正粗宋简体__垂",
+      "font": "方正粗宋简体",
+      "char": "垂",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.5726335048675537,
+          "pixel_l1": 0.3363630175590515,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.4624718725681305,
+          "pixel_l1": 0.2757194936275482,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.40225958824157715,
+          "pixel_l1": 0.246540367603302,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.5426676869392395,
+          "pixel_l1": 0.32429006695747375,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9716102205986008,
+        "up_16": 0.7690561328803865,
+        "up_32": 0.9488794873696575
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正粗宋简体__垂.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正粗宋简体__垂.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476682543754578,
+        "route_mid_to_up_16": 0.026179082691669464,
+        "route_mid_to_up_32": 0.026152631267905235,
+        "route_gate_mid": 0.0013168593868613243,
+        "route_up_16_to_mid": 0.026256397366523743,
+        "route_up_16_to_up_16": 0.9475065469741821,
+        "route_up_16_to_up_32": 0.026237109676003456,
+        "route_gate_up_16": 0.0013887076638638973,
+        "route_up_32_to_mid": 0.02632041648030281,
+        "route_up_32_to_up_16": 0.026320330798625946,
+        "route_up_32_to_up_32": 0.9473593235015869,
+        "route_gate_up_32": 0.0013646900188177824,
+        "route_cos_mid_up_16": 0.05601426959037781,
+        "route_cos_mid_up_32": 0.05606123432517052,
+        "route_cos_up_16_up_32": 0.056156985461711884
+      }
+    },
+    {
+      "sample_name": "方正汉真广标简体__痊",
+      "font": "方正汉真广标简体",
+      "char": "痊",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.642255961894989,
+          "pixel_l1": 0.3629073202610016,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.7913233041763306,
+          "pixel_l1": 0.439933717250824,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.6739969849586487,
+          "pixel_l1": 0.37954482436180115,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.7535130977630615,
+          "pixel_l1": 0.41642624139785767,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9776875624704235,
+        "up_16": 0.7745264522184485,
+        "up_32": 0.966005429124898
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正汉真广标简体__痊.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正汉真广标简体__痊.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476680755615234,
+        "route_mid_to_up_16": 0.026179201900959015,
+        "route_mid_to_up_32": 0.026152754202485085,
+        "route_gate_mid": 0.0013168593868613243,
+        "route_up_16_to_mid": 0.026259398087859154,
+        "route_up_16_to_up_16": 0.9475005269050598,
+        "route_up_16_to_up_32": 0.02624000981450081,
+        "route_gate_up_16": 0.0013887599343433976,
+        "route_up_32_to_mid": 0.026321768760681152,
+        "route_up_32_to_up_16": 0.026321763172745705,
+        "route_up_32_to_up_32": 0.9473564028739929,
+        "route_gate_up_32": 0.001364793279208243,
+        "route_cos_mid_up_16": 0.05601782351732254,
+        "route_cos_mid_up_32": 0.05606292188167572,
+        "route_cos_up_16_up_32": 0.05616192892193794
+      }
+    },
+    {
+      "sample_name": "方正粗宋简体__驰",
+      "font": "方正粗宋简体",
+      "char": "驰",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.35685059428215027,
+          "pixel_l1": 0.2322622388601303,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.41480928659439087,
+          "pixel_l1": 0.2566360533237457,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.5703972578048706,
+          "pixel_l1": 0.3320208191871643,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.40141403675079346,
+          "pixel_l1": 0.2536044418811798,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9719023486100173,
+        "up_16": 0.7745460364869766,
+        "up_32": 0.9502143227639034
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正粗宋简体__驰.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正粗宋简体__驰.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476633667945862,
+        "route_mid_to_up_16": 0.026181483641266823,
+        "route_mid_to_up_32": 0.026155080646276474,
+        "route_gate_mid": 0.0013168519362807274,
+        "route_up_16_to_mid": 0.026262005791068077,
+        "route_up_16_to_up_16": 0.9474954009056091,
+        "route_up_16_to_up_32": 0.02624257281422615,
+        "route_gate_up_16": 0.0013888326939195395,
+        "route_up_32_to_mid": 0.026322446763515472,
+        "route_up_32_to_up_16": 0.02632256969809532,
+        "route_up_32_to_up_32": 0.9473550319671631,
+        "route_gate_up_32": 0.001364968833513558,
+        "route_cos_mid_up_16": 0.05602339655160904,
+        "route_cos_mid_up_32": 0.056066349148750305,
+        "route_cos_up_16_up_32": 0.05616576224565506
+      }
+    },
+    {
+      "sample_name": "方正平和简体__叨",
+      "font": "方正平和简体",
+      "char": "叨",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.8550850749015808,
+          "pixel_l1": 0.4578361213207245,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.993484616279602,
+          "pixel_l1": 0.522911548614502,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.6136492490768433,
+          "pixel_l1": 0.333525687456131,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.8873493671417236,
+          "pixel_l1": 0.47416892647743225,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9441942931866899,
+        "up_16": 0.7602751078173839,
+        "up_32": 0.9409808684227061
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正平和简体__叨.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正平和简体__叨.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476636648178101,
+        "route_mid_to_up_16": 0.02618137001991272,
+        "route_mid_to_up_32": 0.026154976338148117,
+        "route_gate_mid": 0.0013168343575671315,
+        "route_up_16_to_mid": 0.026263078674674034,
+        "route_up_16_to_up_16": 0.9474932551383972,
+        "route_up_16_to_up_32": 0.026243656873703003,
+        "route_gate_up_16": 0.0013889201218262315,
+        "route_up_32_to_mid": 0.02632737159729004,
+        "route_up_32_to_up_16": 0.026327766478061676,
+        "route_up_32_to_up_32": 0.9473448395729065,
+        "route_gate_up_32": 0.001365261385217309,
+        "route_cos_mid_up_16": 0.05602448806166649,
+        "route_cos_mid_up_32": 0.05607185885310173,
+        "route_cos_up_16_up_32": 0.05617289990186691
+      }
+    },
+    {
+      "sample_name": "方正小篆体__唱",
+      "font": "方正小篆体",
+      "char": "唱",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.6413787603378296,
+          "pixel_l1": 0.3566678762435913,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.6418620347976685,
+          "pixel_l1": 0.3539748787879944,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.5954875946044922,
+          "pixel_l1": 0.3320290446281433,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6228939890861511,
+          "pixel_l1": 0.34560155868530273,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9339671208798571,
+        "up_16": 0.7588285430416647,
+        "up_32": 0.9500815840423705
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正小篆体__唱.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正小篆体__唱.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476661682128906,
+        "route_mid_to_up_16": 0.026180164888501167,
+        "route_mid_to_up_32": 0.026153748854994774,
+        "route_gate_mid": 0.0013168469304218888,
+        "route_up_16_to_mid": 0.026258505880832672,
+        "route_up_16_to_up_16": 0.9475023746490479,
+        "route_up_16_to_up_32": 0.026239177212119102,
+        "route_gate_up_16": 0.0013887480599805713,
+        "route_up_32_to_mid": 0.026320792734622955,
+        "route_up_32_to_up_16": 0.026320792734622955,
+        "route_up_32_to_up_32": 0.9473583698272705,
+        "route_gate_up_32": 0.0013647973537445068,
+        "route_cos_mid_up_16": 0.056017905473709106,
+        "route_cos_mid_up_32": 0.056062936782836914,
+        "route_cos_up_16_up_32": 0.05615986883640289
+      }
+    },
+    {
+      "sample_name": "方正卡通简体__洛",
+      "font": "方正卡通简体",
+      "char": "洛",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.7016233801841736,
+          "pixel_l1": 0.38693922758102417,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.7986050844192505,
+          "pixel_l1": 0.43605250120162964,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.691609799861908,
+          "pixel_l1": 0.38247057795524597,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6635528802871704,
+          "pixel_l1": 0.3696688115596771,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9557325331171033,
+        "up_16": 0.7657430424852901,
+        "up_32": 0.9498617778181085
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正卡通简体__洛.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正卡通简体__洛.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476670026779175,
+        "route_mid_to_up_16": 0.026179688051342964,
+        "route_mid_to_up_32": 0.02615324966609478,
+        "route_gate_mid": 0.0013168473960831761,
+        "route_up_16_to_mid": 0.02626221999526024,
+        "route_up_16_to_up_16": 0.9474949836730957,
+        "route_up_16_to_up_32": 0.026242779567837715,
+        "route_gate_up_16": 0.0013888394460082054,
+        "route_up_32_to_mid": 0.026324687525629997,
+        "route_up_32_to_up_16": 0.02632487751543522,
+        "route_up_32_to_up_32": 0.9473504424095154,
+        "route_gate_up_32": 0.0013650065520778298,
+        "route_cos_mid_up_16": 0.056021593511104584,
+        "route_cos_mid_up_32": 0.05606682598590851,
+        "route_cos_up_16_up_32": 0.05616862326860428
+      }
+    },
+    {
+      "sample_name": "方正少儿简体__歹",
+      "font": "方正少儿简体",
+      "char": "歹",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.5429139137268066,
+          "pixel_l1": 0.2983478307723999,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.4433320164680481,
+          "pixel_l1": 0.24768003821372986,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.5828235149383545,
+          "pixel_l1": 0.31687623262405396,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.45816928148269653,
+          "pixel_l1": 0.25372424721717834,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9638883179909014,
+        "up_16": 0.7719225568305248,
+        "up_32": 0.9475583884848503
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正少儿简体__歹.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正少儿简体__歹.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476678371429443,
+        "route_mid_to_up_16": 0.026179324835538864,
+        "route_mid_to_up_32": 0.026152873411774635,
+        "route_gate_mid": 0.0013168506557121873,
+        "route_up_16_to_mid": 0.026261424645781517,
+        "route_up_16_to_up_16": 0.9474965929985046,
+        "route_up_16_to_up_32": 0.026242002844810486,
+        "route_gate_up_16": 0.0013889067340642214,
+        "route_up_32_to_mid": 0.026329010725021362,
+        "route_up_32_to_up_16": 0.026329388841986656,
+        "route_up_32_to_up_32": 0.9473415613174438,
+        "route_gate_up_32": 0.0013652158668264747,
+        "route_cos_mid_up_16": 0.05602027103304863,
+        "route_cos_mid_up_32": 0.05607133358716965,
+        "route_cos_up_16_up_32": 0.056172870099544525
+      }
+    },
+    {
+      "sample_name": "方正楷体简体__济",
+      "font": "方正楷体简体",
+      "char": "济",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.6684294939041138,
+          "pixel_l1": 0.36713743209838867,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.3525278568267822,
+          "pixel_l1": 0.20806285738945007,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.4792998135089874,
+          "pixel_l1": 0.2736365497112274,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.5406303405761719,
+          "pixel_l1": 0.30583229660987854,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9588146428957425,
+        "up_16": 0.7703148537605027,
+        "up_32": 0.9588377798455545
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正楷体简体__济.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正楷体简体__济.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476670026779175,
+        "route_mid_to_up_16": 0.02617970108985901,
+        "route_mid_to_up_32": 0.026153286918997765,
+        "route_gate_mid": 0.0013168356381356716,
+        "route_up_16_to_mid": 0.02626374363899231,
+        "route_up_16_to_up_16": 0.9474920034408569,
+        "route_up_16_to_up_32": 0.026244252920150757,
+        "route_gate_up_16": 0.0013889082474634051,
+        "route_up_32_to_mid": 0.02632933482527733,
+        "route_up_32_to_up_16": 0.02632974646985531,
+        "route_up_32_to_up_32": 0.9473409056663513,
+        "route_gate_up_32": 0.0013652619672939181,
+        "route_cos_mid_up_16": 0.05602334067225456,
+        "route_cos_mid_up_32": 0.0560721755027771,
+        "route_cos_up_16_up_32": 0.056175846606492996
+      }
+    },
+    {
+      "sample_name": "方正启笛简体__芝",
+      "font": "方正启笛简体",
+      "char": "芝",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.490641325712204,
+          "pixel_l1": 0.27004438638687134,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.34100794792175293,
+          "pixel_l1": 0.1960807591676712,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.547899603843689,
+          "pixel_l1": 0.29850471019744873,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.4002566337585449,
+          "pixel_l1": 0.22357037663459778,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9496658597503961,
+        "up_16": 0.761585802074255,
+        "up_32": 0.9528269769085543
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正启笛简体__芝.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正启笛简体__芝.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476689100265503,
+        "route_mid_to_up_16": 0.0261787548661232,
+        "route_mid_to_up_32": 0.02615230530500412,
+        "route_gate_mid": 0.0013168512377887964,
+        "route_up_16_to_mid": 0.026260390877723694,
+        "route_up_16_to_up_16": 0.947498619556427,
+        "route_up_16_to_up_32": 0.026240989565849304,
+        "route_gate_up_16": 0.0013888445682823658,
+        "route_up_32_to_mid": 0.026327114552259445,
+        "route_up_32_to_up_16": 0.026327364146709442,
+        "route_up_32_to_up_32": 0.947345495223999,
+        "route_gate_up_32": 0.0013650675537064672,
+        "route_cos_mid_up_16": 0.05601844564080238,
+        "route_cos_mid_up_32": 0.05606851726770401,
+        "route_cos_up_16_up_32": 0.05616941675543785
+      }
+    },
+    {
+      "sample_name": "方正隶变简体__少",
+      "font": "方正隶变简体",
+      "char": "少",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.41963037848472595,
+          "pixel_l1": 0.22857104241847992,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.3920879364013672,
+          "pixel_l1": 0.21801593899726868,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.29923215508461,
+          "pixel_l1": 0.17004568874835968,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.4239629805088043,
+          "pixel_l1": 0.22875241935253143,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9518925572232593,
+        "up_16": 0.7916520567942893,
+        "up_32": 0.9537931759235554
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正隶变简体__少.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正隶变简体__少.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476664662361145,
+        "route_mid_to_up_16": 0.0261799618601799,
+        "route_mid_to_up_32": 0.026153558865189552,
+        "route_gate_mid": 0.001316829933784902,
+        "route_up_16_to_mid": 0.02626493200659752,
+        "route_up_16_to_up_16": 0.9474896192550659,
+        "route_up_16_to_up_32": 0.02624542824923992,
+        "route_gate_up_16": 0.001389024662785232,
+        "route_up_32_to_mid": 0.026334060356020927,
+        "route_up_32_to_up_16": 0.026334723457694054,
+        "route_up_32_to_up_32": 0.9473311901092529,
+        "route_gate_up_32": 0.0013655637158080935,
+        "route_cos_mid_up_16": 0.056024983525276184,
+        "route_cos_mid_up_32": 0.05607788264751434,
+        "route_cos_up_16_up_32": 0.05618284270167351
+      }
+    },
+    {
+      "sample_name": "STXINGKA__砸",
+      "font": "STXINGKA",
+      "char": "砸",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.5595451593399048,
+          "pixel_l1": 0.316151887178421,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.8582481741905212,
+          "pixel_l1": 0.4676779508590698,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.8019535541534424,
+          "pixel_l1": 0.4351761043071747,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6619094610214233,
+          "pixel_l1": 0.3650616407394409,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.952240303502716,
+        "up_16": 0.7679701801138151,
+        "up_32": 0.9498555848627813
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/STXINGKA__砸.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/STXINGKA__砸.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476637840270996,
+        "route_mid_to_up_16": 0.026181278750300407,
+        "route_mid_to_up_32": 0.026154881343245506,
+        "route_gate_mid": 0.0013168531004339457,
+        "route_up_16_to_mid": 0.026260800659656525,
+        "route_up_16_to_up_16": 0.9474977850914001,
+        "route_up_16_to_up_32": 0.026241399347782135,
+        "route_gate_up_16": 0.0013887957902625203,
+        "route_up_32_to_mid": 0.026321150362491608,
+        "route_up_32_to_up_16": 0.02632122114300728,
+        "route_up_32_to_up_32": 0.9473575949668884,
+        "route_gate_up_32": 0.0013648935128003359,
+        "route_cos_mid_up_16": 0.0560217946767807,
+        "route_cos_mid_up_32": 0.05606464296579361,
+        "route_cos_up_16_up_32": 0.056162893772125244
+      }
+    },
+    {
+      "sample_name": "方正苏新诗柳楷简体__浴",
+      "font": "方正苏新诗柳楷简体",
+      "char": "浴",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.5676050186157227,
+          "pixel_l1": 0.3153436779975891,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.5896964073181152,
+          "pixel_l1": 0.32511618733406067,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.6215619444847107,
+          "pixel_l1": 0.34283676743507385,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.5537945032119751,
+          "pixel_l1": 0.30699121952056885,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9512221852972692,
+        "up_16": 0.7692557557548566,
+        "up_32": 0.9564324516918089
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正苏新诗柳楷简体__浴.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正苏新诗柳楷简体__浴.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476671814918518,
+        "route_mid_to_up_16": 0.026179643347859383,
+        "route_mid_to_up_32": 0.026153219863772392,
+        "route_gate_mid": 0.0013168392470106483,
+        "route_up_16_to_mid": 0.026263590902090073,
+        "route_up_16_to_up_16": 0.9474923014640808,
+        "route_up_16_to_up_32": 0.02624412439763546,
+        "route_gate_up_16": 0.0013888771645724773,
+        "route_up_32_to_mid": 0.02632659487426281,
+        "route_up_32_to_up_16": 0.02632688172161579,
+        "route_up_32_to_up_32": 0.9473464488983154,
+        "route_gate_up_32": 0.0013651197077706456,
+        "route_cos_mid_up_16": 0.056023094803094864,
+        "route_cos_mid_up_32": 0.056068964302539825,
+        "route_cos_up_16_up_32": 0.056172437965869904
+      }
+    },
+    {
+      "sample_name": "方正隶变简体__皿",
+      "font": "方正隶变简体",
+      "char": "皿",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.4303472340106964,
+          "pixel_l1": 0.23964923620224,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.3860182464122772,
+          "pixel_l1": 0.21688470244407654,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.394673615694046,
+          "pixel_l1": 0.2199077308177948,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.4040285050868988,
+          "pixel_l1": 0.22589881718158722,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9552987009244392,
+        "up_16": 0.7794321765189529,
+        "up_32": 0.9533776328037976
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正隶变简体__皿.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正隶变简体__皿.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476650953292847,
+        "route_mid_to_up_16": 0.026180658489465714,
+        "route_mid_to_up_32": 0.02615426853299141,
+        "route_gate_mid": 0.0013168217847123742,
+        "route_up_16_to_mid": 0.026261629536747932,
+        "route_up_16_to_up_16": 0.9474960565567017,
+        "route_up_16_to_up_32": 0.026242278516292572,
+        "route_gate_up_16": 0.0013888856628909707,
+        "route_up_32_to_mid": 0.02632891573011875,
+        "route_up_32_to_up_16": 0.026329372078180313,
+        "route_up_32_to_up_32": 0.9473416209220886,
+        "route_gate_up_32": 0.0013653186615556479,
+        "route_cos_mid_up_16": 0.056022025644779205,
+        "route_cos_mid_up_32": 0.056072816252708435,
+        "route_cos_up_16_up_32": 0.056173160672187805
+      }
+    },
+    {
+      "sample_name": "方正准雅宋简__葛",
+      "font": "方正准雅宋简",
+      "char": "葛",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.21423053741455078,
+          "pixel_l1": 0.14881916344165802,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.2937104105949402,
+          "pixel_l1": 0.2004908174276352,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.23073604702949524,
+          "pixel_l1": 0.16318179666996002,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.33218711614608765,
+          "pixel_l1": 0.2214617133140564,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9679806683467261,
+        "up_16": 0.7845690136760503,
+        "up_32": 0.965555021175589
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正准雅宋简__葛.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正准雅宋简__葛.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476689100265503,
+        "route_mid_to_up_16": 0.026178760454058647,
+        "route_mid_to_up_32": 0.026152275502681732,
+        "route_gate_mid": 0.0013168795267120004,
+        "route_up_16_to_mid": 0.02625623717904091,
+        "route_up_16_to_up_16": 0.947506844997406,
+        "route_up_16_to_up_32": 0.026236897334456444,
+        "route_gate_up_16": 0.0013886700617149472,
+        "route_up_32_to_mid": 0.026317402720451355,
+        "route_up_32_to_up_16": 0.026317114010453224,
+        "route_up_32_to_up_32": 0.9473655223846436,
+        "route_gate_up_32": 0.0013644795399159193,
+        "route_cos_mid_up_16": 0.056013718247413635,
+        "route_cos_mid_up_32": 0.05605738237500191,
+        "route_cos_up_16_up_32": 0.05615309253334999
+      }
+    },
+    {
+      "sample_name": "方正粗宋简体__枢",
+      "font": "方正粗宋简体",
+      "char": "枢",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.27348822355270386,
+          "pixel_l1": 0.18224778771400452,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.29854804277420044,
+          "pixel_l1": 0.19068686664104462,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.3369125425815582,
+          "pixel_l1": 0.2129175364971161,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.38716405630111694,
+          "pixel_l1": 0.238053098320961,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9717585117615525,
+        "up_16": 0.7669273562061083,
+        "up_32": 0.9487618158489471
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正粗宋简体__枢.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正粗宋简体__枢.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476651549339294,
+        "route_mid_to_up_16": 0.026180604472756386,
+        "route_mid_to_up_32": 0.02615419775247574,
+        "route_gate_mid": 0.0013168412260711193,
+        "route_up_16_to_mid": 0.026262523606419563,
+        "route_up_16_to_up_16": 0.9474944472312927,
+        "route_up_16_to_up_32": 0.02624308317899704,
+        "route_gate_up_16": 0.0013888333924114704,
+        "route_up_32_to_mid": 0.026323579251766205,
+        "route_up_32_to_up_16": 0.026323772966861725,
+        "route_up_32_to_up_32": 0.9473526477813721,
+        "route_gate_up_32": 0.0013650234322994947,
+        "route_cos_mid_up_16": 0.05602297559380531,
+        "route_cos_mid_up_32": 0.056066639721393585,
+        "route_cos_up_16_up_32": 0.056167710572481155
+      }
+    },
+    {
+      "sample_name": "方正小篆体__曼",
+      "font": "方正小篆体",
+      "char": "曼",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.6070167422294617,
+          "pixel_l1": 0.33938834071159363,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.5949110984802246,
+          "pixel_l1": 0.32978761196136475,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.6529107093811035,
+          "pixel_l1": 0.3636620342731476,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.600290060043335,
+          "pixel_l1": 0.3409116566181183,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9389406015447903,
+        "up_16": 0.757607651135598,
+        "up_32": 0.949347106302762
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正小篆体__曼.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正小篆体__曼.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476709365844727,
+        "route_mid_to_up_16": 0.026177795603871346,
+        "route_mid_to_up_32": 0.026151277124881744,
+        "route_gate_mid": 0.0013168881414458156,
+        "route_up_16_to_mid": 0.026254426687955856,
+        "route_up_16_to_up_16": 0.9475104212760925,
+        "route_up_16_to_up_32": 0.026235142722725868,
+        "route_gate_up_16": 0.0013886118540540338,
+        "route_up_32_to_mid": 0.026315847411751747,
+        "route_up_32_to_up_16": 0.026315445080399513,
+        "route_up_32_to_up_32": 0.9473687410354614,
+        "route_gate_up_32": 0.00136435532476753,
+        "route_cos_mid_up_16": 0.05601055547595024,
+        "route_cos_mid_up_32": 0.05605446547269821,
+        "route_cos_up_16_up_32": 0.0561491921544075
+      }
+    },
+    {
+      "sample_name": "方正字迹-童体硬笔字体__涩",
+      "font": "方正字迹-童体硬笔字体",
+      "char": "涩",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.5225057601928711,
+          "pixel_l1": 0.29092398285865784,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.5650189518928528,
+          "pixel_l1": 0.31431564688682556,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.570858895778656,
+          "pixel_l1": 0.31690627336502075,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.5614690780639648,
+          "pixel_l1": 0.3119678795337677,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9557884270245403,
+        "up_16": 0.7707575105812521,
+        "up_32": 0.9688464280088711
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正字迹-童体硬笔字体__涩.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正字迹-童体硬笔字体__涩.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476661682128906,
+        "route_mid_to_up_16": 0.02618010900914669,
+        "route_mid_to_up_32": 0.0261536855250597,
+        "route_gate_mid": 0.0013168519362807274,
+        "route_up_16_to_mid": 0.02626248635351658,
+        "route_up_16_to_up_16": 0.9474944472312927,
+        "route_up_16_to_up_32": 0.026243021711707115,
+        "route_gate_up_16": 0.0013888657558709383,
+        "route_up_32_to_mid": 0.026325136423110962,
+        "route_up_32_to_up_16": 0.02632533200085163,
+        "route_up_32_to_up_32": 0.9473495483398438,
+        "route_gate_up_32": 0.0013650298351421952,
+        "route_cos_mid_up_16": 0.05602237582206726,
+        "route_cos_mid_up_32": 0.05606783181428909,
+        "route_cos_up_16_up_32": 0.05616942048072815
+      }
+    },
+    {
+      "sample_name": "方正启笛简体__号",
+      "font": "方正启笛简体",
+      "char": "号",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.5762277841567993,
+          "pixel_l1": 0.31375330686569214,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.5911754369735718,
+          "pixel_l1": 0.31835028529167175,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.3330313265323639,
+          "pixel_l1": 0.18987274169921875,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.29071253538131714,
+          "pixel_l1": 0.1691003441810608,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9490162962625438,
+        "up_16": 0.7605949530142933,
+        "up_32": 0.9562032520594324
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正启笛简体__号.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正启笛简体__号.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476680755615234,
+        "route_mid_to_up_16": 0.026179149746894836,
+        "route_mid_to_up_32": 0.026152724400162697,
+        "route_gate_mid": 0.0013168399455025792,
+        "route_up_16_to_mid": 0.0262595247477293,
+        "route_up_16_to_up_16": 0.9475003480911255,
+        "route_up_16_to_up_32": 0.026240168139338493,
+        "route_gate_up_16": 0.0013888644753023982,
+        "route_up_32_to_mid": 0.026328589767217636,
+        "route_up_32_to_up_16": 0.0263289213180542,
+        "route_up_32_to_up_32": 0.9473423957824707,
+        "route_gate_up_32": 0.0013651527697220445,
+        "route_cos_mid_up_16": 0.056017905473709106,
+        "route_cos_mid_up_32": 0.056070681661367416,
+        "route_cos_up_16_up_32": 0.05617024749517441
+      }
+    },
+    {
+      "sample_name": "方正准雅宋简__八",
+      "font": "方正准雅宋简",
+      "char": "八",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.235472172498703,
+          "pixel_l1": 0.13992775976657867,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.19287654757499695,
+          "pixel_l1": 0.11911046504974365,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.33493831753730774,
+          "pixel_l1": 0.19076190888881683,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.22007030248641968,
+          "pixel_l1": 0.13124234974384308,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.963422731165387,
+        "up_16": 0.7787250899727219,
+        "up_32": 0.939887582451585
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正准雅宋简__八.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正准雅宋简__八.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476662278175354,
+        "route_mid_to_up_16": 0.026180073618888855,
+        "route_mid_to_up_32": 0.026153702288866043,
+        "route_gate_mid": 0.0013168079312890768,
+        "route_up_16_to_mid": 0.026265915483236313,
+        "route_up_16_to_up_16": 0.9474875926971436,
+        "route_up_16_to_up_32": 0.02624644711613655,
+        "route_gate_up_16": 0.0013891025446355343,
+        "route_up_32_to_mid": 0.026338621973991394,
+        "route_up_32_to_up_16": 0.026339562609791756,
+        "route_up_32_to_up_32": 0.9473217725753784,
+        "route_gate_up_32": 0.0013658719835802913,
+        "route_cos_mid_up_16": 0.056026242673397064,
+        "route_cos_mid_up_32": 0.05608326196670532,
+        "route_cos_up_16_up_32": 0.056189507246017456
+      }
+    },
+    {
+      "sample_name": "方正卡通简体__长",
+      "font": "方正卡通简体",
+      "char": "长",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.6555709838867188,
+          "pixel_l1": 0.355694442987442,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.6666213870048523,
+          "pixel_l1": 0.3612491488456726,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.8766083717346191,
+          "pixel_l1": 0.4680509567260742,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.6866569519042969,
+          "pixel_l1": 0.37061864137649536,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9510031243511189,
+        "up_16": 0.7661915000146449,
+        "up_32": 0.9422667835629172
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正卡通简体__长.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正卡通简体__长.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476675391197205,
+        "route_mid_to_up_16": 0.026179440319538116,
+        "route_mid_to_up_32": 0.026153026148676872,
+        "route_gate_mid": 0.0013168292352929711,
+        "route_up_16_to_mid": 0.02626250497996807,
+        "route_up_16_to_up_16": 0.9474944472312927,
+        "route_up_16_to_up_32": 0.02624308317899704,
+        "route_gate_up_16": 0.0013889054534956813,
+        "route_up_32_to_mid": 0.02633047290146351,
+        "route_up_32_to_up_16": 0.026330962777137756,
+        "route_up_32_to_up_32": 0.9473385214805603,
+        "route_gate_up_32": 0.001365338801406324,
+        "route_cos_mid_up_16": 0.05602163448929787,
+        "route_cos_mid_up_32": 0.056073181331157684,
+        "route_cos_up_16_up_32": 0.05617588758468628
+      }
+    },
+    {
+      "sample_name": "方正苏新诗柳楷简体__吆",
+      "font": "方正苏新诗柳楷简体",
+      "char": "吆",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.5633208751678467,
+          "pixel_l1": 0.31110504269599915,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.6248730421066284,
+          "pixel_l1": 0.3385346829891205,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.6492828726768494,
+          "pixel_l1": 0.3516857624053955,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.5403053760528564,
+          "pixel_l1": 0.29852765798568726,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9562031852443058,
+        "up_16": 0.7785497510982863,
+        "up_32": 0.9596525220350582
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正苏新诗柳楷简体__吆.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正苏新诗柳楷简体__吆.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476650953292847,
+        "route_mid_to_up_16": 0.02618071436882019,
+        "route_mid_to_up_32": 0.026154300197958946,
+        "route_gate_mid": 0.0013168442528694868,
+        "route_up_16_to_mid": 0.02626301907002926,
+        "route_up_16_to_up_16": 0.9474933743476868,
+        "route_up_16_to_up_32": 0.026243554428219795,
+        "route_gate_up_16": 0.0013889041729271412,
+        "route_up_32_to_mid": 0.026327386498451233,
+        "route_up_32_to_up_16": 0.026327738538384438,
+        "route_up_32_to_up_32": 0.947344958782196,
+        "route_gate_up_32": 0.0013652145862579346,
+        "route_cos_mid_up_16": 0.05602366104722023,
+        "route_cos_mid_up_32": 0.056071095168590546,
+        "route_cos_up_16_up_32": 0.05617275461554527
+      }
+    },
+    {
+      "sample_name": "方正字迹-童体硬笔字体__泛",
+      "font": "方正字迹-童体硬笔字体",
+      "char": "泛",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.33785417675971985,
+          "pixel_l1": 0.19358527660369873,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.4309167265892029,
+          "pixel_l1": 0.23920567333698273,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.39733579754829407,
+          "pixel_l1": 0.22637483477592468,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.4639739692211151,
+          "pixel_l1": 0.25628405809402466,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9530989419344635,
+        "up_16": 0.7741335130837769,
+        "up_32": 0.9643059738236234
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正字迹-童体硬笔字体__泛.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正字迹-童体硬笔字体__泛.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476684927940369,
+        "route_mid_to_up_16": 0.026178956031799316,
+        "route_mid_to_up_32": 0.026152517646551132,
+        "route_gate_mid": 0.001316848094575107,
+        "route_up_16_to_mid": 0.02626221254467964,
+        "route_up_16_to_up_16": 0.9474949836730957,
+        "route_up_16_to_up_32": 0.026242760941386223,
+        "route_gate_up_16": 0.0013888842659071088,
+        "route_up_32_to_mid": 0.026327647268772125,
+        "route_up_32_to_up_16": 0.026327943429350853,
+        "route_up_32_to_up_32": 0.9473444223403931,
+        "route_gate_up_32": 0.0013651197077706456,
+        "route_cos_mid_up_16": 0.056020744144916534,
+        "route_cos_mid_up_32": 0.05606936663389206,
+        "route_cos_up_16_up_32": 0.05617209151387215
+      }
+    },
+    {
+      "sample_name": "方正准圆简体__铡",
+      "font": "方正准圆简体",
+      "char": "铡",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.6642104983329773,
+          "pixel_l1": 0.39065486192703247,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.4937421381473541,
+          "pixel_l1": 0.3028676211833954,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.5082317590713501,
+          "pixel_l1": 0.3066233992576599,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.5962631702423096,
+          "pixel_l1": 0.3484877049922943,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9735100009492695,
+        "up_16": 0.7717403622416765,
+        "up_32": 0.9753276041848742
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正准圆简体__铡.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正准圆简体__铡.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476620554924011,
+        "route_mid_to_up_16": 0.026182137429714203,
+        "route_mid_to_up_32": 0.026155756786465645,
+        "route_gate_mid": 0.001316857524216175,
+        "route_up_16_to_mid": 0.02626354992389679,
+        "route_up_16_to_up_16": 0.9474924206733704,
+        "route_up_16_to_up_32": 0.02624405175447464,
+        "route_gate_up_16": 0.001388853881508112,
+        "route_up_32_to_mid": 0.026320233941078186,
+        "route_up_32_to_up_16": 0.026320291683077812,
+        "route_up_32_to_up_32": 0.9473595023155212,
+        "route_gate_up_32": 0.0013649078318849206,
+        "route_cos_mid_up_16": 0.05602589622139931,
+        "route_cos_mid_up_32": 0.05606459081172943,
+        "route_cos_up_16_up_32": 0.056164853274822235
+      }
+    },
+    {
+      "sample_name": "方正准圆简体__驴",
+      "font": "方正准圆简体",
+      "char": "驴",
+      "metrics": {
+        "full": {
+          "pixel_mse": 0.6024394035339355,
+          "pixel_l1": 0.3415980935096741,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_mid": {
+          "pixel_mse": 0.6245383620262146,
+          "pixel_l1": 0.352250337600708,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_16": {
+          "pixel_mse": 0.7631497979164124,
+          "pixel_l1": 0.42159879207611084,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        },
+        "drop_up_32": {
+          "pixel_mse": 0.292497843503952,
+          "pixel_l1": 0.18436571955680847,
+          "pixel_mse_std": 0.0,
+          "pixel_l1_std": 0.0
+        }
+      },
+      "repeat_seeds": 1,
+      "attention_entropy": {
+        "mid": 0.9733062086136882,
+        "up_16": 0.7534104192293902,
+        "up_32": 0.9532797733281468
+      },
+      "heatmap_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/heatmaps/方正准圆简体__驴.png",
+      "generation_path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/generations/方正准圆简体__驴.png",
+      "route_metrics": {
+        "route_mid_to_mid": 0.9476655125617981,
+        "route_mid_to_up_16": 0.026180485263466835,
+        "route_mid_to_up_32": 0.026154080405831337,
+        "route_gate_mid": 0.0013168412260711193,
+        "route_up_16_to_mid": 0.02626207284629345,
+        "route_up_16_to_up_16": 0.9474952816963196,
+        "route_up_16_to_up_32": 0.026242638006806374,
+        "route_gate_up_16": 0.0013888743706047535,
+        "route_up_32_to_mid": 0.026326682418584824,
+        "route_up_32_to_up_16": 0.026326997205615044,
+        "route_up_32_to_up_32": 0.9473462700843811,
+        "route_gate_up_32": 0.0013651573099195957,
+        "route_cos_mid_up_16": 0.05602232739329338,
+        "route_cos_mid_up_32": 0.05607004836201668,
+        "route_cos_up_16_up_32": 0.05617087334394455
+      }
+    }
+  ],
+  "aggregate_metrics": {
+    "full": {
+      "pixel_mse": {
+        "mean": 0.559083257317543,
+        "std": 0.19000904901930232
+      },
+      "pixel_l1": {
+        "mean": 0.31568760007619856,
+        "std": 0.09735001517426797
+      },
+      "pixel_mse_std": {
+        "mean": 0.0,
+        "std": 0.0
+      },
+      "pixel_l1_std": {
+        "mean": 0.0,
+        "std": 0.0
+      }
+    },
+    "drop_mid": {
+      "pixel_mse": {
+        "mean": 0.5618379050493241,
+        "std": 0.19325289878236396
+      },
+      "pixel_l1": {
+        "mean": 0.31707542061805727,
+        "std": 0.09822726450011457
+      },
+      "pixel_mse_std": {
+        "mean": 0.0,
+        "std": 0.0
+      },
+      "pixel_l1_std": {
+        "mean": 0.0,
+        "std": 0.0
+      }
+    },
+    "drop_up_16": {
+      "pixel_mse": {
+        "mean": 0.5659334790706635,
+        "std": 0.18090689741733176
+      },
+      "pixel_l1": {
+        "mean": 0.31888851523399353,
+        "std": 0.09183237344929714
+      },
+      "pixel_mse_std": {
+        "mean": 0.0,
+        "std": 0.0
+      },
+      "pixel_l1_std": {
+        "mean": 0.0,
+        "std": 0.0
+      }
+    },
+    "drop_up_32": {
+      "pixel_mse": {
+        "mean": 0.5609033399820328,
+        "std": 0.19465232594594462
+      },
+      "pixel_l1": {
+        "mean": 0.3168912515044212,
+        "std": 0.10018785568884751
+      },
+      "pixel_mse_std": {
+        "mean": 0.0,
+        "std": 0.0
+      },
+      "pixel_l1_std": {
+        "mean": 0.0,
+        "std": 0.0
+      }
+    }
+  },
+  "aggregate_route_metrics": {
+    "route_mid_to_mid": {
+      "mean": 0.9476662635803222,
+      "std": 2.1148816546234163e-06
+    },
+    "route_mid_to_up_16": {
+      "mean": 0.026180079318583013,
+      "std": 1.0433362624955853e-06
+    },
+    "route_mid_to_up_32": {
+      "mean": 0.026153656132519246,
+      "std": 1.0702687250893557e-06
+    },
+    "route_gate_mid": {
+      "mean": 0.0013168494286946953,
+      "std": 1.9361939443700907e-08
+    },
+    "route_up_16_to_mid": {
+      "mean": 0.026261108964681625,
+      "std": 2.4888260849087935e-06
+    },
+    "route_up_16_to_up_16": {
+      "mean": 0.947497193813324,
+      "std": 4.9417655623888915e-06
+    },
+    "route_up_16_to_up_32": {
+      "mean": 0.026241693086922167,
+      "std": 2.4438216192816202e-06
+    },
+    "route_gate_up_16": {
+      "mean": 0.0013888306240551174,
+      "std": 9.223605943021557e-08
+    },
+    "route_up_32_to_mid": {
+      "mean": 0.026324471086263658,
+      "std": 5.03881757742742e-06
+    },
+    "route_up_32_to_up_16": {
+      "mean": 0.026324648931622504,
+      "std": 5.3118814700639305e-06
+    },
+    "route_up_32_to_up_32": {
+      "mean": 0.9473508810997009,
+      "std": 1.0366156049088861e-05
+    },
+    "route_gate_up_32": {
+      "mean": 0.0013650071388110517,
+      "std": 3.0821314268551334e-07
+    },
+    "route_cos_mid_up_16": {
+      "mean": 0.056020770072937015,
+      "std": 3.6416705565115123e-06
+    },
+    "route_cos_mid_up_32": {
+      "mean": 0.056067036762833596,
+      "std": 5.8430235821765555e-06
+    },
+    "route_cos_up_16_up_32": {
+      "mean": 0.056167125031352044,
+      "std": 8.241260635454177e-06
+    }
+  },
+  "attention_summary": {
+    "count": 50,
+    "entropy": {
+      "mid": {
+        "mean": 0.957086402563665,
+        "std": 0.011172230262410265
+      },
+      "up_16": {
+        "mean": 0.7687119257472018,
+        "std": 0.007989707840040935
+      },
+      "up_32": {
+        "mean": 0.9553765453671487,
+        "std": 0.008323998319730342
+      }
+    },
+    "pair_cosine": {
+      "mid__up_16": {
+        "mean": 0.08660034599468541,
+        "std": 0.019700917589528598
+      },
+      "mid__up_32": {
+        "mean": 0.33511957658612296,
+        "std": 0.08016769345255387
+      },
+      "up_16__up_32": {
+        "mean": 0.4285028590694604,
+        "std": 0.03596887312939794
+      }
+    },
+    "pair_overlap": {
+      "mid__up_16": {
+        "mean": 0.11668726995986216,
+        "std": 0.018702783094340262
+      },
+      "mid__up_32": {
+        "mean": 0.364090356797505,
+        "std": 0.06665941545743044
+      },
+      "up_16__up_32": {
+        "mean": 0.2921211809481385,
+        "std": 0.018813474183177643
+      }
+    }
+  },
+  "attention_paths": {
+    "attention_stats_json": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/attention_stats.json",
+    "attention_mean_heatmaps": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/attention_mean_heatmaps.png",
+    "attention_mean_maps_npz": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/style_injection_ablation_20260316_teacher_style_only_99000_random50_r1/attention_mean_maps.npz"
+  }
+}
