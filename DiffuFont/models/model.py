@@ -225,6 +225,9 @@ class DiffusionTrainer:
         lambda_route_balance: float = 0.0,
         lambda_route_div: float = 0.0,
         lambda_route_gate: float = 0.0,
+        lambda_ref_sparse: float = 0.0,
+        lambda_ref_balance: float = 0.0,
+        lambda_ref_div: float = 0.0,
         nce_temperature: float = 0.07,
         aux_loss_warmup_steps: int = 0,
         attn_overlap_margin: float = 0.80,
@@ -325,6 +328,9 @@ class DiffusionTrainer:
         self.lambda_route_balance = float(lambda_route_balance)
         self.lambda_route_div = float(lambda_route_div)
         self.lambda_route_gate = float(lambda_route_gate)
+        self.lambda_ref_sparse = float(lambda_ref_sparse)
+        self.lambda_ref_balance = float(lambda_ref_balance)
+        self.lambda_ref_div = float(lambda_ref_div)
         self.nce_temperature = float(nce_temperature)
         self.aux_loss_warmup_steps = max(0, int(aux_loss_warmup_steps))
         self.attn_overlap_margin = float(attn_overlap_margin)
@@ -549,10 +555,6 @@ class DiffusionTrainer:
         with self.step_log_file.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    def _set_style_site_force_keep(self, keep_sites: tuple[str, ...] | None) -> None:
-        if hasattr(self.model, "set_style_site_force_keep"):
-            self.model.set_style_site_force_keep(keep_sites)
-
     @property
     def effective_aux_loss_scale(self) -> float:
         """Shared linear warmup scale for all auxiliary losses except the main reconstruction loss."""
@@ -641,6 +643,9 @@ class DiffusionTrainer:
             "loss_route_balance": zero,
             "loss_route_div": zero,
             "loss_route_gate": zero,
+            "loss_ref_sparse": zero,
+            "loss_ref_balance": zero,
+            "loss_ref_div": zero,
             "route_gate_mid": zero,
             "route_gate_up_16": zero,
             "route_gate_up_32": zero,
@@ -656,6 +661,15 @@ class DiffusionTrainer:
             "route_cos_mid_up_16": zero,
             "route_cos_mid_up_32": zero,
             "route_cos_up_16_up_32": zero,
+            "ref_entropy_mid": zero,
+            "ref_entropy_up_16": zero,
+            "ref_entropy_up_32": zero,
+            "ref_peak_mid": zero,
+            "ref_peak_up_16": zero,
+            "ref_peak_up_32": zero,
+            "ref_cos_mid_up_16": zero,
+            "ref_cos_mid_up_32": zero,
+            "ref_cos_up_16_up_32": zero,
         }
         if not route_views:
             return out
@@ -728,6 +742,86 @@ class DiffusionTrainer:
                 out[metric_name] = out[metric_name] / pair_counts[metric_name]
         if pair_terms:
             out["loss_route_div"] = torch.stack(pair_terms).mean()
+
+        return out
+
+    def _compute_reference_losses(
+        self,
+        route_views: list[dict[str, dict[str, torch.Tensor]]],
+    ) -> Dict[str, torch.Tensor]:
+        zero = torch.zeros((), device=self.device, dtype=torch.float32)
+        out: Dict[str, torch.Tensor] = {
+            "loss_ref_sparse": zero,
+            "loss_ref_balance": zero,
+            "loss_ref_div": zero,
+            "ref_entropy_mid": zero,
+            "ref_entropy_up_16": zero,
+            "ref_entropy_up_32": zero,
+            "ref_peak_mid": zero,
+            "ref_peak_up_16": zero,
+            "ref_peak_up_32": zero,
+            "ref_cos_mid_up_16": zero,
+            "ref_cos_mid_up_32": zero,
+            "ref_cos_up_16_up_32": zero,
+        }
+        if not route_views:
+            return out
+
+        site_names = ("mid", "up_16", "up_32")
+        beta_by_site: dict[str, list[torch.Tensor]] = {site: [] for site in site_names}
+        for route_view in route_views:
+            for site in site_names:
+                site_stats = route_view.get(site)
+                if not site_stats:
+                    continue
+                beta = site_stats.get("beta")
+                if beta is not None:
+                    beta_by_site[site].append(beta)
+
+        entropy_terms: list[torch.Tensor] = []
+        balance_terms: list[torch.Tensor] = []
+        for site in site_names:
+            if not beta_by_site[site]:
+                continue
+            beta_cat = torch.cat(beta_by_site[site], dim=0)
+            denom = math.log(max(2, int(beta_cat.size(-1))))
+            entropy = probability_entropy(beta_cat).mean() / denom
+            peak = beta_cat.max(dim=-1).values.mean()
+            entropy_terms.append(entropy)
+            balance_terms.append(kl_to_uniform(beta_cat.mean(dim=0, keepdim=True)).mean())
+            out[f"ref_entropy_{site}"] = entropy
+            out[f"ref_peak_{site}"] = peak
+        if entropy_terms:
+            out["loss_ref_sparse"] = torch.stack(entropy_terms).mean()
+        if balance_terms:
+            out["loss_ref_balance"] = torch.stack(balance_terms).mean()
+
+        pair_terms: list[torch.Tensor] = []
+        pair_metric_map = {
+            ("mid", "up_16"): "ref_cos_mid_up_16",
+            ("mid", "up_32"): "ref_cos_mid_up_32",
+            ("up_16", "up_32"): "ref_cos_up_16_up_32",
+        }
+        pair_counts = {metric_name: 0 for metric_name in pair_metric_map.values()}
+        for route_view in route_views:
+            for (site_a, site_b), metric_name in pair_metric_map.items():
+                stats_a = route_view.get(site_a)
+                stats_b = route_view.get(site_b)
+                if not stats_a or not stats_b:
+                    continue
+                beta_a = stats_a.get("beta")
+                beta_b = stats_b.get("beta")
+                if beta_a is None or beta_b is None:
+                    continue
+                cos_val = F.cosine_similarity(beta_a, beta_b, dim=-1).mean()
+                pair_terms.append(cos_val)
+                out[metric_name] = out[metric_name] + cos_val
+                pair_counts[metric_name] += 1
+        for metric_name in pair_metric_map.values():
+            if pair_counts[metric_name] > 0:
+                out[metric_name] = out[metric_name] / pair_counts[metric_name]
+        if pair_terms:
+            out["loss_ref_div"] = torch.stack(pair_terms).mean()
 
         return out
 
@@ -826,6 +920,7 @@ class DiffusionTrainer:
             if route_v2:
                 route_views.append(route_v2)
         out.update(self._compute_route_losses(route_views))
+        out.update(self._compute_reference_losses(route_views))
 
         attn1 = None
         attn2 = None
@@ -992,40 +1087,42 @@ class DiffusionTrainer:
                     margin=self.attn_overlap_margin,
                 )
             )
-            loss_attn_order_1, ent1 = attention_entropy_order_loss(
-                attn1,
-                style_ref_mask=style_ref_mask_v1,
-                gap=self.attn_entropy_gap,
-            )
-            loss_attn_order_2, ent2 = attention_entropy_order_loss(
-                attn2,
-                style_ref_mask=style_ref_mask_v2,
-                gap=self.attn_entropy_gap,
-            )
-            out["loss_attn_order"] = 0.5 * (loss_attn_order_1 + loss_attn_order_2)
-            loss_attn_role_1, role_vec_1, _ = attention_role_alignment_loss(
-                attn1,
-                style_img_v1,
-                style_ref_mask=style_ref_mask_v1,
-            )
-            loss_attn_role_2, role_vec_2, _ = attention_role_alignment_loss(
-                attn2,
-                style_img_v2,
-                style_ref_mask=style_ref_mask_v2,
-            )
-            role_vec = 0.5 * (role_vec_1 + role_vec_2)
-            out["loss_attn_role"] = 0.5 * (loss_attn_role_1 + loss_attn_role_2)
-            out["loss_attn_role_low"] = role_vec[0]
-            out["loss_attn_role_mid"] = role_vec[1]
-            out["loss_attn_role_high"] = role_vec[2]
             out["attn_overlap"] = 0.5 * (
                 attention_mean_overlap(attn1, style_ref_mask=style_ref_mask_v1)
                 + attention_mean_overlap(attn2, style_ref_mask=style_ref_mask_v2)
             )
-            ent = 0.5 * (ent1 + ent2)
-            out["attn_entropy_low"] = ent[0]
-            out["attn_entropy_mid"] = ent[1]
-            out["attn_entropy_high"] = ent[2]
+            if self.lambda_attn_order > 0.0:
+                loss_attn_order_1, ent1 = attention_entropy_order_loss(
+                    attn1,
+                    style_ref_mask=style_ref_mask_v1,
+                    gap=self.attn_entropy_gap,
+                )
+                loss_attn_order_2, ent2 = attention_entropy_order_loss(
+                    attn2,
+                    style_ref_mask=style_ref_mask_v2,
+                    gap=self.attn_entropy_gap,
+                )
+                out["loss_attn_order"] = 0.5 * (loss_attn_order_1 + loss_attn_order_2)
+                ent = 0.5 * (ent1 + ent2)
+                out["attn_entropy_low"] = ent[0]
+                out["attn_entropy_mid"] = ent[1]
+                out["attn_entropy_high"] = ent[2]
+            if self.lambda_attn_role > 0.0:
+                loss_attn_role_1, role_vec_1, _ = attention_role_alignment_loss(
+                    attn1,
+                    style_img_v1,
+                    style_ref_mask=style_ref_mask_v1,
+                )
+                loss_attn_role_2, role_vec_2, _ = attention_role_alignment_loss(
+                    attn2,
+                    style_img_v2,
+                    style_ref_mask=style_ref_mask_v2,
+                )
+                role_vec = 0.5 * (role_vec_1 + role_vec_2)
+                out["loss_attn_role"] = 0.5 * (loss_attn_role_1 + loss_attn_role_2)
+                out["loss_attn_role_low"] = role_vec[0]
+                out["loss_attn_role_mid"] = role_vec[1]
+                out["loss_attn_role_high"] = role_vec[2]
         return out
 
     # ------------------------------------------------------------------ #
@@ -1043,28 +1140,11 @@ class DiffusionTrainer:
         x0 = batch["target"].to(self.device)
         content = batch["content"].to(self.device)
         style_img, style_ref_mask = self._select_style_view(batch)
-        part_imgs = batch["parts"].to(self.device) if "parts" in batch else None
-        part_mask = batch["part_mask"].to(self.device) if "part_mask" in batch else None
         self._ensure_required_conditions(self.conditioning_mode, style_img, stage="train_step")
         if self._mode_uses_style(self.conditioning_mode):
             style_ref_mask = self._apply_style_ref_dropout(style_ref_mask)
         B = x0.size(0)
         t = torch.randint(0, self.scheduler.T, (B,), device=self.device)
-
-        # Optional part drop path (inactive when part branch is disabled).
-        part_drop_mask = None
-        if (
-            self.part_drop_prob > 0.0
-            and part_imgs is not None
-            and self._mode_uses_parts(self.conditioning_mode)
-        ):
-            part_drop_mask = (torch.rand((B,), device=self.device) < self.part_drop_prob)
-            if bool(part_drop_mask.any().item()):
-                part_imgs = part_imgs.clone()
-                part_imgs[part_drop_mask] = 1.0
-                if part_mask is not None:
-                    part_mask = part_mask.clone()
-                    part_mask[part_drop_mask] = 0.0
 
         # Convert pixel → latent BEFORE adding noise (no grad needed for bilinear resize).
         with torch.no_grad():
@@ -1076,8 +1156,6 @@ class DiffusionTrainer:
             eps_hat_latent = self.model(
                 x_t_latent, t, content,
                 style_img=style_img,
-                part_imgs=part_imgs,
-                part_mask=part_mask,
                 condition_mode=self.conditioning_mode,
                 style_ref_mask=style_ref_mask,
             )
@@ -1110,6 +1188,9 @@ class DiffusionTrainer:
             loss_route_balance = style_losses["loss_route_balance"]
             loss_route_div = style_losses["loss_route_div"]
             loss_route_gate = style_losses["loss_route_gate"]
+            loss_ref_sparse = style_losses["loss_ref_sparse"]
+            loss_ref_balance = style_losses["loss_ref_balance"]
+            loss_ref_div = style_losses["loss_ref_div"]
             route_gate_mid = style_losses["route_gate_mid"]
             route_gate_up_16 = style_losses["route_gate_up_16"]
             route_gate_up_32 = style_losses["route_gate_up_32"]
@@ -1125,11 +1206,23 @@ class DiffusionTrainer:
             route_cos_mid_up_16 = style_losses["route_cos_mid_up_16"]
             route_cos_mid_up_32 = style_losses["route_cos_mid_up_32"]
             route_cos_up_16_up_32 = style_losses["route_cos_up_16_up_32"]
+            ref_entropy_mid = style_losses["ref_entropy_mid"]
+            ref_entropy_up_16 = style_losses["ref_entropy_up_16"]
+            ref_entropy_up_32 = style_losses["ref_entropy_up_32"]
+            ref_peak_mid = style_losses["ref_peak_mid"]
+            ref_peak_up_16 = style_losses["ref_peak_up_16"]
+            ref_peak_up_32 = style_losses["ref_peak_up_32"]
+            ref_cos_mid_up_16 = style_losses["ref_cos_mid_up_16"]
+            ref_cos_mid_up_32 = style_losses["ref_cos_mid_up_32"]
+            ref_cos_up_16_up_32 = style_losses["ref_cos_up_16_up_32"]
             route_metrics = {
                 "loss_route_sparse": loss_route_sparse.item(),
                 "loss_route_balance": loss_route_balance.item(),
                 "loss_route_div": loss_route_div.item(),
                 "loss_route_gate": loss_route_gate.item(),
+                "loss_ref_sparse": loss_ref_sparse.item(),
+                "loss_ref_balance": loss_ref_balance.item(),
+                "loss_ref_div": loss_ref_div.item(),
                 "route_gate_mid": route_gate_mid.item(),
                 "route_gate_up_16": route_gate_up_16.item(),
                 "route_gate_up_32": route_gate_up_32.item(),
@@ -1145,6 +1238,15 @@ class DiffusionTrainer:
                 "route_cos_mid_up_16": route_cos_mid_up_16.item(),
                 "route_cos_mid_up_32": route_cos_mid_up_32.item(),
                 "route_cos_up_16_up_32": route_cos_up_16_up_32.item(),
+                "ref_entropy_mid": ref_entropy_mid.item(),
+                "ref_entropy_up_16": ref_entropy_up_16.item(),
+                "ref_entropy_up_32": ref_entropy_up_32.item(),
+                "ref_peak_mid": ref_peak_mid.item(),
+                "ref_peak_up_16": ref_peak_up_16.item(),
+                "ref_peak_up_32": ref_peak_up_32.item(),
+                "ref_cos_mid_up_16": ref_cos_mid_up_16.item(),
+                "ref_cos_mid_up_32": ref_cos_mid_up_32.item(),
+                "ref_cos_up_16_up_32": ref_cos_up_16_up_32.item(),
             }
             eff_aux = self.effective_aux_loss_scale
             eff_lnce = eff_aux * self.lambda_nce
@@ -1161,6 +1263,9 @@ class DiffusionTrainer:
             eff_lroute_balance = eff_aux * self.lambda_route_balance
             eff_lroute_div = eff_aux * self.lambda_route_div
             eff_lroute_gate = eff_aux * self.lambda_route_gate
+            eff_lref_sparse = eff_aux * self.lambda_ref_sparse
+            eff_lref_balance = eff_aux * self.lambda_ref_balance
+            eff_lref_div = eff_aux * self.lambda_ref_div
             loss = (
                 self.lambda_mse * loss_mse
                 + eff_lnce * loss_nce
@@ -1177,74 +1282,12 @@ class DiffusionTrainer:
                 + eff_lroute_balance * loss_route_balance
                 + eff_lroute_div * loss_route_div
                 + eff_lroute_gate * loss_route_gate
+                + eff_lref_sparse * loss_ref_sparse
+                + eff_lref_balance * loss_ref_balance
+                + eff_lref_div * loss_ref_div
             )
 
         counterfactual_stats: Dict[str, float] = {}
-        should_log_counterfactual = bool(
-            self.log_every_steps and ((self.global_step + 1) % self.log_every_steps == 0)
-        )
-        if should_log_counterfactual and style_img is not None and self._mode_uses_style(self.conditioning_mode):
-            _t_cf0 = time.perf_counter()
-            with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                if part_imgs is not None and self._mode_uses_parts(self.conditioning_mode):
-                    eps_hat_part_only = self.model(
-                        x_t_latent, t, content,
-                        style_img=None,
-                        part_imgs=part_imgs,
-                        part_mask=part_mask,
-                        condition_mode="part_only",
-                    )
-                    cf_loss_part_only = F.mse_loss(eps_hat_part_only, eps_latent)
-                else:
-                    cf_loss_part_only = loss_mse.detach()
-                eps_hat_style_only = self.model(
-                    x_t_latent, t, content,
-                    style_img=style_img,
-                    part_imgs=None,
-                    part_mask=None,
-                    condition_mode="style_only",
-                    style_ref_mask=style_ref_mask,
-                )
-                cf_loss_style_only = F.mse_loss(eps_hat_style_only, eps_latent)
-                solo_site_losses: Dict[str, float] = {}
-                if self.conditioning_mode == "style_only" and hasattr(self.model, "set_style_site_force_keep"):
-                    try:
-                        for site_name, stat_key in (
-                            ("mid", "cf_loss_style_mid_only"),
-                            ("up_16", "cf_loss_style_up16_only"),
-                            ("up_32", "cf_loss_style_up32_only"),
-                        ):
-                            self._set_style_site_force_keep((site_name,))
-                            eps_hat_solo = self.model(
-                                x_t_latent, t, content,
-                                style_img=style_img,
-                                part_imgs=None,
-                                part_mask=None,
-                                condition_mode="style_only",
-                                style_ref_mask=style_ref_mask,
-                            )
-                            solo_site_losses[stat_key] = float(F.mse_loss(eps_hat_solo, eps_latent).item())
-                    finally:
-                        self._set_style_site_force_keep(None)
-            timing_counterfactual += float(time.perf_counter() - _t_cf0)
-            base = float(loss_mse.detach().item())
-            lp = float(cf_loss_part_only.item())
-            ls = float(cf_loss_style_only.item())
-            counterfactual_stats = {
-                "cf_loss_both": base,
-                "cf_loss_part_only": lp,
-                "cf_loss_style_only": ls,
-                # Remove-style effect: compare both vs part_only.
-                "cf_delta_drop_style": lp - base,
-                # Remove-part effect: compare both vs style_only.
-                "cf_delta_drop_part": ls - base,
-            }
-            counterfactual_stats.update(solo_site_losses)
-            if solo_site_losses:
-                counterfactual_stats["cf_delta_style_mid_only"] = solo_site_losses["cf_loss_style_mid_only"] - base
-                counterfactual_stats["cf_delta_style_up16_only"] = solo_site_losses["cf_loss_style_up16_only"] - base
-                counterfactual_stats["cf_delta_style_up32_only"] = solo_site_losses["cf_loss_style_up32_only"] - base
-
         did_update, grad_norm, opt_timing = self._do_optimizer_update(loss, grad_clip)
         timing_opt_step += float(
             opt_timing["time_backward"]
@@ -1386,14 +1429,19 @@ class DiffusionTrainer:
                 f"attn_ov={attn_overlap.item():.4f} "
                 f"H=({attn_entropy_low.item():.3f},{attn_entropy_mid.item():.3f},{attn_entropy_high.item():.3f}) "
                 f"route=({loss_route_sparse.item():.4f},{loss_route_balance.item():.4f},{loss_route_div.item():.4f},{loss_route_gate.item():.4f}) "
+                f"ref=({loss_ref_sparse.item():.4f},{loss_ref_balance.item():.4f},{loss_ref_div.item():.4f}) "
                 f"route_mid=({route_mid_to_mid.item():.2f},{route_mid_to_up_16.item():.2f},{route_mid_to_up_32.item():.2f}) "
                 f"route_u16=({route_up_16_to_mid.item():.2f},{route_up_16_to_up_16.item():.2f},{route_up_16_to_up_32.item():.2f}) "
                 f"route_u32=({route_up_32_to_mid.item():.2f},{route_up_32_to_up_16.item():.2f},{route_up_32_to_up_32.item():.2f}) "
                 f"route_gate=({route_gate_mid.item():.2f},{route_gate_up_16.item():.2f},{route_gate_up_32.item():.2f}) "
                 f"route_cos=({route_cos_mid_up_16.item():.3f},{route_cos_mid_up_32.item():.3f},{route_cos_up_16_up_32.item():.3f}) "
+                f"ref_peak=({ref_peak_mid.item():.2f},{ref_peak_up_16.item():.2f},{ref_peak_up_32.item():.2f}) "
+                f"ref_cos=({ref_cos_mid_up_16.item():.3f},{ref_cos_mid_up_32.item():.3f},{ref_cos_up_16_up_32.item():.3f}) "
                 f"cos_same={cos_same.item():.4f} "
                 f"cos_diff={cos_diff.item():.4f} tok_coll={token_collapse.item():.4f} "
-                f"λnce={eff_lnce:.4f} λslot={eff_lslot:.4f} λroute=({eff_lroute_sparse:.4f},{eff_lroute_balance:.4f},{eff_lroute_div:.4f},{eff_lroute_gate:.4f}) λaux={eff_aux:.4f} "
+                f"λnce={eff_lnce:.4f} λslot={eff_lslot:.4f} "
+                f"λroute=({eff_lroute_sparse:.4f},{eff_lroute_balance:.4f},{eff_lroute_div:.4f},{eff_lroute_gate:.4f}) "
+                f"λref=({eff_lref_sparse:.4f},{eff_lref_balance:.4f},{eff_lref_div:.4f}) λaux={eff_aux:.4f} "
                 f"lr={self.lr_schedule.get_last_lr()[0]:.6e} "
                 f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s "
                 f"split_t=(main:{timing_main_forward:.3f},style:{timing_style_losses:.3f},cf:{timing_counterfactual:.3f},opt:{timing_opt_step:.3f},"
@@ -1776,6 +1824,9 @@ class FlowMatchingTrainer(DiffusionTrainer):
         lambda_route_balance: float = 0.0,
         lambda_route_div: float = 0.0,
         lambda_route_gate: float = 0.0,
+        lambda_ref_sparse: float = 0.0,
+        lambda_ref_balance: float = 0.0,
+        lambda_ref_div: float = 0.0,
         nce_temperature: float = 0.07,
         aux_loss_warmup_steps: int = 0,
         attn_overlap_margin: float = 0.80,
@@ -1817,6 +1868,9 @@ class FlowMatchingTrainer(DiffusionTrainer):
             lambda_route_balance=lambda_route_balance,
             lambda_route_div=lambda_route_div,
             lambda_route_gate=lambda_route_gate,
+            lambda_ref_sparse=lambda_ref_sparse,
+            lambda_ref_balance=lambda_ref_balance,
+            lambda_ref_div=lambda_ref_div,
             nce_temperature=nce_temperature,
             aux_loss_warmup_steps=aux_loss_warmup_steps,
             attn_overlap_margin=attn_overlap_margin,
@@ -1866,8 +1920,6 @@ class FlowMatchingTrainer(DiffusionTrainer):
         x0 = batch["target"].to(self.device)
         content = batch["content"].to(self.device)
         style_img, style_ref_mask = self._select_style_view(batch)
-        part_imgs = batch["parts"].to(self.device) if "parts" in batch else None
-        part_mask = batch["part_mask"].to(self.device) if "part_mask" in batch else None
         self._ensure_required_conditions(self.conditioning_mode, style_img, stage="flow_train_step")
         if self._mode_uses_style(self.conditioning_mode):
             style_ref_mask = self._apply_style_ref_dropout(style_ref_mask)
@@ -1884,27 +1936,11 @@ class FlowMatchingTrainer(DiffusionTrainer):
         v_target = x1_latent - x0_latent
         t_idx = (t * float(self.diffusion_steps - 1)).round().long()
 
-        # Optional part drop path (inactive when part branch is disabled).
-        part_drop_mask = None
-        if (
-            self.part_drop_prob > 0.0
-            and part_imgs is not None
-            and self._mode_uses_parts(self.conditioning_mode)
-        ):
-            part_drop_mask = (torch.rand((b,), device=self.device) < self.part_drop_prob)
-            if bool(part_drop_mask.any().item()):
-                part_imgs = part_imgs.clone()
-                part_imgs[part_drop_mask] = 1.0
-                if part_mask is not None:
-                    part_mask = part_mask.clone()
-                    part_mask[part_drop_mask] = 0.0
-
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             _t_main0 = time.perf_counter()
             v_hat = self.model(
                 x_t_latent, t_idx, content,
                 style_img=style_img,
-                part_imgs=part_imgs, part_mask=part_mask,
                 condition_mode=self.conditioning_mode,
                 style_ref_mask=style_ref_mask,
             )
@@ -1937,6 +1973,9 @@ class FlowMatchingTrainer(DiffusionTrainer):
             loss_route_balance = style_losses["loss_route_balance"]
             loss_route_div = style_losses["loss_route_div"]
             loss_route_gate = style_losses["loss_route_gate"]
+            loss_ref_sparse = style_losses["loss_ref_sparse"]
+            loss_ref_balance = style_losses["loss_ref_balance"]
+            loss_ref_div = style_losses["loss_ref_div"]
             route_gate_mid = style_losses["route_gate_mid"]
             route_gate_up_16 = style_losses["route_gate_up_16"]
             route_gate_up_32 = style_losses["route_gate_up_32"]
@@ -1952,11 +1991,23 @@ class FlowMatchingTrainer(DiffusionTrainer):
             route_cos_mid_up_16 = style_losses["route_cos_mid_up_16"]
             route_cos_mid_up_32 = style_losses["route_cos_mid_up_32"]
             route_cos_up_16_up_32 = style_losses["route_cos_up_16_up_32"]
+            ref_entropy_mid = style_losses["ref_entropy_mid"]
+            ref_entropy_up_16 = style_losses["ref_entropy_up_16"]
+            ref_entropy_up_32 = style_losses["ref_entropy_up_32"]
+            ref_peak_mid = style_losses["ref_peak_mid"]
+            ref_peak_up_16 = style_losses["ref_peak_up_16"]
+            ref_peak_up_32 = style_losses["ref_peak_up_32"]
+            ref_cos_mid_up_16 = style_losses["ref_cos_mid_up_16"]
+            ref_cos_mid_up_32 = style_losses["ref_cos_mid_up_32"]
+            ref_cos_up_16_up_32 = style_losses["ref_cos_up_16_up_32"]
             route_metrics = {
                 "loss_route_sparse": loss_route_sparse.item(),
                 "loss_route_balance": loss_route_balance.item(),
                 "loss_route_div": loss_route_div.item(),
                 "loss_route_gate": loss_route_gate.item(),
+                "loss_ref_sparse": loss_ref_sparse.item(),
+                "loss_ref_balance": loss_ref_balance.item(),
+                "loss_ref_div": loss_ref_div.item(),
                 "route_gate_mid": route_gate_mid.item(),
                 "route_gate_up_16": route_gate_up_16.item(),
                 "route_gate_up_32": route_gate_up_32.item(),
@@ -1972,6 +2023,15 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 "route_cos_mid_up_16": route_cos_mid_up_16.item(),
                 "route_cos_mid_up_32": route_cos_mid_up_32.item(),
                 "route_cos_up_16_up_32": route_cos_up_16_up_32.item(),
+                "ref_entropy_mid": ref_entropy_mid.item(),
+                "ref_entropy_up_16": ref_entropy_up_16.item(),
+                "ref_entropy_up_32": ref_entropy_up_32.item(),
+                "ref_peak_mid": ref_peak_mid.item(),
+                "ref_peak_up_16": ref_peak_up_16.item(),
+                "ref_peak_up_32": ref_peak_up_32.item(),
+                "ref_cos_mid_up_16": ref_cos_mid_up_16.item(),
+                "ref_cos_mid_up_32": ref_cos_mid_up_32.item(),
+                "ref_cos_up_16_up_32": ref_cos_up_16_up_32.item(),
             }
             eff_aux = self.effective_aux_loss_scale
             eff_lnce = eff_aux * self.lambda_nce
@@ -1988,6 +2048,9 @@ class FlowMatchingTrainer(DiffusionTrainer):
             eff_lroute_balance = eff_aux * self.lambda_route_balance
             eff_lroute_div = eff_aux * self.lambda_route_div
             eff_lroute_gate = eff_aux * self.lambda_route_gate
+            eff_lref_sparse = eff_aux * self.lambda_ref_sparse
+            eff_lref_balance = eff_aux * self.lambda_ref_balance
+            eff_lref_div = eff_aux * self.lambda_ref_div
             loss = (
                 self.lambda_fm * loss_fm
                 + eff_lnce * loss_nce
@@ -2004,72 +2067,12 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 + eff_lroute_balance * loss_route_balance
                 + eff_lroute_div * loss_route_div
                 + eff_lroute_gate * loss_route_gate
+                + eff_lref_sparse * loss_ref_sparse
+                + eff_lref_balance * loss_ref_balance
+                + eff_lref_div * loss_ref_div
             )
 
         counterfactual_stats: Dict[str, float] = {}
-        should_log_counterfactual = bool(
-            self.log_every_steps and ((self.global_step + 1) % self.log_every_steps == 0)
-        )
-        if should_log_counterfactual and style_img is not None and self._mode_uses_style(self.conditioning_mode):
-            _t_cf0 = time.perf_counter()
-            with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                if part_imgs is not None and self._mode_uses_parts(self.conditioning_mode):
-                    v_hat_part_only = self.model(
-                        x_t_latent, t_idx, content,
-                        style_img=None,
-                        part_imgs=part_imgs,
-                        part_mask=part_mask,
-                        condition_mode="part_only",
-                    )
-                    cf_loss_part_only = F.mse_loss(v_hat_part_only, v_target)
-                else:
-                    cf_loss_part_only = loss_fm.detach()
-                v_hat_style_only = self.model(
-                    x_t_latent, t_idx, content,
-                    style_img=style_img,
-                    part_imgs=None,
-                    part_mask=None,
-                    condition_mode="style_only",
-                    style_ref_mask=style_ref_mask,
-                )
-                cf_loss_style_only = F.mse_loss(v_hat_style_only, v_target)
-                solo_site_losses: Dict[str, float] = {}
-                if self.conditioning_mode == "style_only" and hasattr(self.model, "set_style_site_force_keep"):
-                    try:
-                        for site_name, stat_key in (
-                            ("mid", "cf_loss_style_mid_only"),
-                            ("up_16", "cf_loss_style_up16_only"),
-                            ("up_32", "cf_loss_style_up32_only"),
-                        ):
-                            self._set_style_site_force_keep((site_name,))
-                            v_hat_solo = self.model(
-                                x_t_latent, t_idx, content,
-                                style_img=style_img,
-                                part_imgs=None,
-                                part_mask=None,
-                                condition_mode="style_only",
-                                style_ref_mask=style_ref_mask,
-                            )
-                            solo_site_losses[stat_key] = float(F.mse_loss(v_hat_solo, v_target).item())
-                    finally:
-                        self._set_style_site_force_keep(None)
-            timing_counterfactual += float(time.perf_counter() - _t_cf0)
-            base = float(loss_fm.detach().item())
-            lp = float(cf_loss_part_only.item())
-            ls = float(cf_loss_style_only.item())
-            counterfactual_stats = {
-                "cf_loss_both": base,
-                "cf_loss_part_only": lp,
-                "cf_loss_style_only": ls,
-                "cf_delta_drop_style": lp - base,
-                "cf_delta_drop_part": ls - base,
-            }
-            counterfactual_stats.update(solo_site_losses)
-            if solo_site_losses:
-                counterfactual_stats["cf_delta_style_mid_only"] = solo_site_losses["cf_loss_style_mid_only"] - base
-                counterfactual_stats["cf_delta_style_up16_only"] = solo_site_losses["cf_loss_style_up16_only"] - base
-                counterfactual_stats["cf_delta_style_up32_only"] = solo_site_losses["cf_loss_style_up32_only"] - base
-
         did_update, grad_norm, opt_timing = self._do_optimizer_update(loss, grad_clip)
         timing_opt_step += float(
             opt_timing["time_backward"]
@@ -2205,14 +2208,19 @@ class FlowMatchingTrainer(DiffusionTrainer):
                 f"attn_ov={attn_overlap.item():.4f} "
                 f"H=({attn_entropy_low.item():.3f},{attn_entropy_mid.item():.3f},{attn_entropy_high.item():.3f}) "
                 f"route=({loss_route_sparse.item():.4f},{loss_route_balance.item():.4f},{loss_route_div.item():.4f},{loss_route_gate.item():.4f}) "
+                f"ref=({loss_ref_sparse.item():.4f},{loss_ref_balance.item():.4f},{loss_ref_div.item():.4f}) "
                 f"route_mid=({route_mid_to_mid.item():.2f},{route_mid_to_up_16.item():.2f},{route_mid_to_up_32.item():.2f}) "
                 f"route_u16=({route_up_16_to_mid.item():.2f},{route_up_16_to_up_16.item():.2f},{route_up_16_to_up_32.item():.2f}) "
                 f"route_u32=({route_up_32_to_mid.item():.2f},{route_up_32_to_up_16.item():.2f},{route_up_32_to_up_32.item():.2f}) "
                 f"route_gate=({route_gate_mid.item():.2f},{route_gate_up_16.item():.2f},{route_gate_up_32.item():.2f}) "
                 f"route_cos=({route_cos_mid_up_16.item():.3f},{route_cos_mid_up_32.item():.3f},{route_cos_up_16_up_32.item():.3f}) "
+                f"ref_peak=({ref_peak_mid.item():.2f},{ref_peak_up_16.item():.2f},{ref_peak_up_32.item():.2f}) "
+                f"ref_cos=({ref_cos_mid_up_16.item():.3f},{ref_cos_mid_up_32.item():.3f},{ref_cos_up_16_up_32.item():.3f}) "
                 f"cos_same={cos_same.item():.4f} "
                 f"cos_diff={cos_diff.item():.4f} tok_coll={token_collapse.item():.4f} "
-                f"λnce={eff_lnce:.4f} λslot={eff_lslot:.4f} λroute=({eff_lroute_sparse:.4f},{eff_lroute_balance:.4f},{eff_lroute_div:.4f},{eff_lroute_gate:.4f}) λaux={eff_aux:.4f} "
+                f"λnce={eff_lnce:.4f} λslot={eff_lslot:.4f} "
+                f"λroute=({eff_lroute_sparse:.4f},{eff_lroute_balance:.4f},{eff_lroute_div:.4f},{eff_lroute_gate:.4f}) "
+                f"λref=({eff_lref_sparse:.4f},{eff_lref_balance:.4f},{eff_lref_div:.4f}) λaux={eff_aux:.4f} "
                 f"lr={self.lr_schedule.get_last_lr()[0]:.6e} "
                 f"data_t={self._step_data_time:.3f}s train_t={self._step_train_time:.3f}s "
                 f"split_t=(main:{timing_main_forward:.3f},style:{timing_style_losses:.3f},cf:{timing_counterfactual:.3f},opt:{timing_opt_step:.3f},"

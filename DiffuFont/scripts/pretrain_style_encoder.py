@@ -773,6 +773,12 @@ def main() -> None:
         style_memory_up16_pool_hw=int(args.style_memory_up16_pool_hw),
         style_memory_up32_pool_hw=int(args.style_memory_up32_pool_hw),
     ).to(device)
+    if hasattr(encoder, "enable_xformers_memory_efficient_attention_style"):
+        try:
+            enabled_style = int(encoder.enable_xformers_memory_efficient_attention_style())
+            print(f"[pretrain] xformers enabled for style_attn={enabled_style}", flush=True)
+        except Exception as e:
+            print(f"[pretrain] xformers unavailable, fallback to default attention: {e}", flush=True)
 
     if init_ckpt_path is not None:
         if not init_ckpt_path.exists():

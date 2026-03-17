@@ -10,6 +10,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models as tv_models
 
+try:
+    import xformers.ops as xops
+except Exception:
+    xops = None
+
 
 class ResNet18FeaturePyramid(nn.Module):
     """ResNet18 stem truncated at layer3, exposing 32/16/8 feature maps."""
@@ -61,6 +66,22 @@ class CrossAttentionWithBias(nn.Module):
         self.k_proj = nn.Linear(self.embed_dim, self.embed_dim)
         self.v_proj = nn.Linear(self.embed_dim, self.embed_dim)
         self.out_proj = nn.Linear(self.embed_dim, self.embed_dim)
+        self._use_memory_efficient_attention_xformers = False
+        self._attention_op = None
+
+    def set_use_memory_efficient_attention_xformers(
+        self,
+        valid: bool,
+        attention_op=None,
+    ) -> None:
+        if not valid:
+            self._use_memory_efficient_attention_xformers = False
+            self._attention_op = None
+            return
+        if xops is None:
+            raise ImportError("xformers is not installed; cannot enable memory efficient attention.")
+        self._use_memory_efficient_attention_xformers = True
+        self._attention_op = attention_op
 
     def forward(
         self,
@@ -77,19 +98,55 @@ class CrossAttentionWithBias(nn.Module):
         k = self.k_proj(key).view(bsz, k_len, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(value).view(bsz, k_len, self.num_heads, self.head_dim).transpose(1, 2)
 
-        logits = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-        if key_padding_mask is not None:
-            if key_padding_mask.shape != (bsz, k_len):
-                raise ValueError(
-                    f"key_padding_mask must have shape {(bsz, k_len)}, got {tuple(key_padding_mask.shape)}"
-                )
-            logits = logits.masked_fill(key_padding_mask.unsqueeze(1).unsqueeze(2), float("-inf"))
+        if key_padding_mask is not None and key_padding_mask.shape != (bsz, k_len):
+            raise ValueError(
+                f"key_padding_mask must have shape {(bsz, k_len)}, got {tuple(key_padding_mask.shape)}"
+            )
 
-        attn = torch.softmax(logits, dim=-1)
-        out = torch.matmul(attn, v)
+        if need_weights:
+            logits = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+            if key_padding_mask is not None:
+                logits = logits.masked_fill(key_padding_mask.unsqueeze(1).unsqueeze(2), float("-inf"))
+            attn = torch.softmax(logits, dim=-1)
+            out = torch.matmul(attn, v)
+            weights = attn.mean(dim=1)
+        else:
+            out = None
+            if self._use_memory_efficient_attention_xformers and xops is not None and q.device.type == "cuda":
+                try:
+                    q_x = q.transpose(1, 2).contiguous()
+                    k_x = k.transpose(1, 2).contiguous()
+                    v_x = v.transpose(1, 2).contiguous()
+                    attn_bias = None
+                    if key_padding_mask is not None:
+                        attn_bias = torch.zeros((bsz, q_len, k_len), device=q.device, dtype=q.dtype)
+                        attn_bias = attn_bias.masked_fill(key_padding_mask[:, None, :], float("-inf"))
+                    out = xops.memory_efficient_attention(
+                        q_x,
+                        k_x,
+                        v_x,
+                        attn_bias=attn_bias,
+                        p=0.0,
+                        op=self._attention_op,
+                    )
+                    out = out.transpose(1, 2).contiguous()
+                except Exception:
+                    out = None
+            if out is None:
+                attn_mask = None
+                if key_padding_mask is not None:
+                    attn_mask = (~key_padding_mask).unsqueeze(1).unsqueeze(2)
+                out = F.scaled_dot_product_attention(
+                    q,
+                    k,
+                    v,
+                    attn_mask=attn_mask,
+                    dropout_p=0.0,
+                    is_causal=False,
+                )
+            weights = None
         out = out.transpose(1, 2).contiguous().view(bsz, q_len, self.embed_dim)
         out = self.out_proj(out)
-        weights = attn.mean(dim=1) if need_weights else None
         return out, weights
 
 
@@ -140,6 +197,14 @@ class HierarchicalStyleEncoderMixin:
     """Reusable low/mid/high token encoder for pretrain and generation."""
 
     style_token_names = ("t_low", "t_mid", "t_high")
+
+    def enable_xformers_memory_efficient_attention_style(self, attention_op=None) -> int:
+        enabled = 0
+        for module in self.modules():
+            if isinstance(module, CrossAttentionWithBias):
+                module.set_use_memory_efficient_attention_xformers(True, attention_op=attention_op)
+                enabled += 1
+        return enabled
 
     def _init_hierarchical_style_encoder(
         self,
@@ -374,6 +439,30 @@ class HierarchicalStyleEncoderMixin:
         )
         return memory
 
+    def _aggregate_style_memory_per_ref(
+        self,
+        feat: torch.Tensor,
+        *,
+        b: int,
+        r: int,
+        ref_mask: Optional[torch.Tensor],
+        projector: nn.Module,
+        pooler: QueryPoolingBlock,
+    ) -> torch.Tensor:
+        _, c, h, w = feat.shape
+        patch = feat.view(b * r, c, h * w).transpose(1, 2).contiguous()
+        patch = projector(patch)
+        memory, _ = pooler(
+            patch,
+            key_padding_mask=None,
+            need_weights=False,
+        )
+        memory = memory.view(b, r, int(memory.size(1)), int(memory.size(2)))
+        if ref_mask is not None:
+            valid = ref_mask.to(device=memory.device, dtype=memory.dtype).clamp(0.0, 1.0)
+            memory = memory * valid[:, :, None, None]
+        return memory
+
     @staticmethod
     def _pool_to_token_grid(feat: torch.Tensor, target_hw: tuple[int, int]) -> torch.Tensor:
         target_h, target_w = int(target_hw[0]), int(target_hw[1])
@@ -477,6 +566,30 @@ class HierarchicalStyleEncoderMixin:
             projector=self.memory_up32_feat_to_token,
             pooler=self.memory_up32_pool,
         )
+        memory_mid_8_ref = self._aggregate_style_memory_per_ref(
+            feat_low_mem_raw,
+            b=b,
+            r=r,
+            ref_mask=style_ref_mask,
+            projector=self.memory_mid_feat_to_token,
+            pooler=self.memory_mid_pool,
+        )
+        memory_up_16_ref = self._aggregate_style_memory_per_ref(
+            feat_mid_mem_raw,
+            b=b,
+            r=r,
+            ref_mask=style_ref_mask,
+            projector=self.memory_up16_feat_to_token,
+            pooler=self.memory_up16_pool,
+        )
+        memory_up_32_ref = self._aggregate_style_memory_per_ref(
+            feat_high_mem_raw,
+            b=b,
+            r=r,
+            ref_mask=style_ref_mask,
+            projector=self.memory_up32_feat_to_token,
+            pooler=self.memory_up32_pool,
+        )
 
         out: dict[str, torch.Tensor] = {
             "tokens": tokens,
@@ -486,7 +599,12 @@ class HierarchicalStyleEncoderMixin:
             "memory_mid_8": memory_mid_8,
             "memory_up_16": memory_up_16,
             "memory_up_32": memory_up_32,
+            "memory_mid_8_ref": memory_mid_8_ref,
+            "memory_up_16_ref": memory_up_16_ref,
+            "memory_up_32_ref": memory_up_32_ref,
         }
+        if style_ref_mask is not None:
+            out["style_ref_mask"] = style_ref_mask
 
         if return_token_attention:
             maps = []
@@ -621,6 +739,12 @@ class HierarchicalStyleEncoderMixin:
             "memory_up_16": out["memory_up_16"],
             "memory_up_32": out["memory_up_32"],
         }
+        if "memory_mid_8_ref" in out:
+            pack["memory_mid_8_ref"] = out["memory_mid_8_ref"]
+            pack["memory_up_16_ref"] = out["memory_up_16_ref"]
+            pack["memory_up_32_ref"] = out["memory_up_32_ref"]
+        if "style_ref_mask" in out:
+            pack["style_ref_mask"] = out["style_ref_mask"]
         return pack, proxy, out["token_attn"]
 
     def encode_style_embedding(

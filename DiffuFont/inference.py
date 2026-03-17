@@ -67,6 +67,12 @@ def load_model_and_trainer(
         conditioning_profile=mode,
         style_token_dim=style_token_dim,
     )
+    if hasattr(model, "enable_xformers_memory_efficient_attention"):
+        try:
+            enabled_style = int(model.enable_xformers_memory_efficient_attention())
+            print(f"[inference] xformers enabled for style_attn={enabled_style}")
+        except Exception as e:
+            print(f"[inference] xformers unavailable, fallback to default attention: {e}")
     trainer_cls = DiffusionTrainer if trainer_type == "diffusion" else FlowMatchingTrainer
     trainer_kwargs = {
         "lr": 1e-4,

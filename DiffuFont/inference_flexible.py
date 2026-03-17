@@ -584,6 +584,12 @@ def main() -> None:
         conditioning_profile=mode,
         style_token_dim=int(args.style_token_dim),
     )
+    if hasattr(model, "enable_xformers_memory_efficient_attention"):
+        try:
+            enabled_style = int(model.enable_xformers_memory_efficient_attention())
+            print(f"[inference] xformers enabled for style_attn={enabled_style}")
+        except Exception as e:
+            print(f"[inference] xformers unavailable, fallback to default attention: {e}")
     load_model_weights(
         model=model,
         checkpoint=args.checkpoint,

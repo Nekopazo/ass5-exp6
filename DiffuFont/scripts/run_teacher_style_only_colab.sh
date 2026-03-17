@@ -12,8 +12,9 @@ SAVE_DIR_OVERRIDE=""
 PRETRAIN_STYLE_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/style_encoder_pretrain_midmem_5000.pt"
 DEVICE_ARG="cuda:1"
 TARGET_STEPS=100000
-STYLE_REF_COUNT=12
+STYLE_REF_COUNT=8
 ROUTER_TEMPERATURE="1.0"
+REFERENCE_TOPK="3"
 LAMBDA_PROXY_LOW="0.05"
 LAMBDA_PROXY_MID="0.05"
 LAMBDA_PROXY_HIGH="0.05"
@@ -23,7 +24,10 @@ LAMBDA_ATTN_ROLE="0.0"
 LAMBDA_ROUTE_SPARSE="0.002"
 LAMBDA_ROUTE_BALANCE="0.005"
 LAMBDA_ROUTE_DIV="0.01"
-LAMBDA_ROUTE_GATE="0.001"
+LAMBDA_ROUTE_GATE="0.0"
+LAMBDA_REF_SPARSE="0.002"
+LAMBDA_REF_BALANCE="0.002"
+LAMBDA_REF_DIV="0.01"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -111,6 +115,7 @@ fi
 
 echo "[teacher_style_only] adaptive_style_routing=on router_temperature=${ROUTER_TEMPERATURE}"
 echo "[teacher_style_only] route_loss=(sparse:${LAMBDA_ROUTE_SPARSE},balance:${LAMBDA_ROUTE_BALANCE},div:${LAMBDA_ROUTE_DIV},gate:${LAMBDA_ROUTE_GATE})"
+echo "[teacher_style_only] ref_loss=(sparse:${LAMBDA_REF_SPARSE},balance:${LAMBDA_REF_BALANCE},div:${LAMBDA_REF_DIV}) reference_topk=${REFERENCE_TOPK}"
 echo "[teacher_style_only] proxy_loss=(low:${LAMBDA_PROXY_LOW},mid:${LAMBDA_PROXY_MID},high:${LAMBDA_PROXY_HIGH}) attn=(sep:${LAMBDA_ATTN_SEP},order:${LAMBDA_ATTN_ORDER},role:${LAMBDA_ATTN_ROLE})"
 
 "${PYTHON_BIN}" -u train.py \
@@ -130,6 +135,7 @@ echo "[teacher_style_only] proxy_loss=(low:${LAMBDA_PROXY_LOW},mid:${LAMBDA_PROX
   --aux-loss-warmup-steps 5000 \
   --adaptive-style-routing \
   --router-temperature "${ROUTER_TEMPERATURE}" \
+  --reference-topk "${REFERENCE_TOPK}" \
   --lambda-proxy-low "${LAMBDA_PROXY_LOW}" \
   --lambda-proxy-mid "${LAMBDA_PROXY_MID}" \
   --lambda-proxy-high "${LAMBDA_PROXY_HIGH}" \
@@ -140,11 +146,14 @@ echo "[teacher_style_only] proxy_loss=(low:${LAMBDA_PROXY_LOW},mid:${LAMBDA_PROX
   --lambda-route-balance "${LAMBDA_ROUTE_BALANCE}" \
   --lambda-route-div "${LAMBDA_ROUTE_DIV}" \
   --lambda-route-gate "${LAMBDA_ROUTE_GATE}" \
+  --lambda-ref-sparse "${LAMBDA_REF_SPARSE}" \
+  --lambda-ref-balance "${LAMBDA_REF_BALANCE}" \
+  --lambda-ref-div "${LAMBDA_REF_DIV}" \
   --pretrained-style-encoder "${PRETRAIN_STYLE_CKPT}" \
   --num-workers 8 \
   --sample-every-steps 300 \
   --log-every-steps 100 \
-  --save-every-steps 3000 \
+  --save-every-steps 5000 \
   --save-dir "${SAVE_DIR}" \
   "$@"
 

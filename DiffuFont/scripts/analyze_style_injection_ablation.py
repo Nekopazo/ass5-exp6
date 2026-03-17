@@ -304,6 +304,7 @@ def _summarize_route_metrics(route_stats: dict[str, dict[str, torch.Tensor]]) ->
             continue
         alpha = stats.get("alpha")
         gate = stats.get("gate")
+        beta = stats.get("beta")
         if alpha is not None and alpha.numel() > 0:
             alpha_cpu = alpha.detach().cpu()
             out[f"route_{site}_to_mid"] = float(alpha_cpu[:, 0].mean().item())
@@ -311,6 +312,12 @@ def _summarize_route_metrics(route_stats: dict[str, dict[str, torch.Tensor]]) ->
             out[f"route_{site}_to_up_32"] = float(alpha_cpu[:, 2].mean().item())
         if gate is not None and gate.numel() > 0:
             out[f"route_gate_{site}"] = float(gate.detach().cpu().mean().item())
+        if beta is not None and beta.numel() > 0:
+            beta_cpu = beta.detach().cpu()
+            denom = math.log(max(2, int(beta_cpu.size(-1))))
+            beta_safe = beta_cpu.clamp_min(1e-8)
+            out[f"ref_entropy_{site}"] = float((-(beta_safe * beta_safe.log()).sum(dim=-1) / denom).mean().item())
+            out[f"ref_peak_{site}"] = float(beta_cpu.max(dim=-1).values.mean().item())
     pair_specs = (
         ("mid", "up_16", "route_cos_mid_up_16"),
         ("mid", "up_32", "route_cos_mid_up_32"),
@@ -327,6 +334,23 @@ def _summarize_route_metrics(route_stats: dict[str, dict[str, torch.Tensor]]) ->
             continue
         out[metric_name] = float(
             F.cosine_similarity(alpha_a.detach().cpu(), alpha_b.detach().cpu(), dim=-1).mean().item()
+        )
+    ref_pair_specs = (
+        ("mid", "up_16", "ref_cos_mid_up_16"),
+        ("mid", "up_32", "ref_cos_mid_up_32"),
+        ("up_16", "up_32", "ref_cos_up_16_up_32"),
+    )
+    for site_a, site_b, metric_name in ref_pair_specs:
+        stats_a = route_stats.get(site_a)
+        stats_b = route_stats.get(site_b)
+        if not stats_a or not stats_b:
+            continue
+        beta_a = stats_a.get("beta")
+        beta_b = stats_b.get("beta")
+        if beta_a is None or beta_b is None:
+            continue
+        out[metric_name] = float(
+            F.cosine_similarity(beta_a.detach().cpu(), beta_b.detach().cpu(), dim=-1).mean().item()
         )
     return out
 
@@ -467,7 +491,14 @@ def _build_trainer_from_config(cfg: dict[str, Any], device: torch.device, total_
         content_query_up32_count=int(cfg.get("content_query_up32_count", 4)),
         adaptive_style_routing=bool(cfg.get("adaptive_style_routing", False)),
         router_temperature=float(cfg.get("router_temperature", 1.0)),
+        reference_topk=int(cfg.get("reference_topk", 3)),
     )
+    if hasattr(model, "enable_xformers_memory_efficient_attention"):
+        try:
+            enabled_style = int(model.enable_xformers_memory_efficient_attention())
+            print(f"[analyze] xformers enabled for style_attn={enabled_style}", flush=True)
+        except Exception as e:
+            print(f"[analyze] xformers unavailable, fallback to default attention: {e}", flush=True)
 
     trainer_cls = DiffusionTrainer if str(cfg.get("trainer", "diffusion")) == "diffusion" else FlowMatchingTrainer
     kwargs: dict[str, Any] = {
@@ -486,6 +517,9 @@ def _build_trainer_from_config(cfg: dict[str, Any], device: torch.device, total_
         "lambda_route_balance": float(cfg.get("lambda_route_balance", 0.0)),
         "lambda_route_div": float(cfg.get("lambda_route_div", 0.0)),
         "lambda_route_gate": float(cfg.get("lambda_route_gate", 0.0)),
+        "lambda_ref_sparse": float(cfg.get("lambda_ref_sparse", 0.0)),
+        "lambda_ref_balance": float(cfg.get("lambda_ref_balance", 0.0)),
+        "lambda_ref_div": float(cfg.get("lambda_ref_div", 0.0)),
         "nce_temperature": float(cfg.get("style_nce_temp", 0.07)),
         "aux_loss_warmup_steps": int(cfg.get("aux_loss_warmup_steps", 0)),
         "attn_overlap_margin": float(cfg.get("attn_overlap_margin", 0.80)),

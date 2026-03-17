@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Source-aligned DiffuFont model with optional adaptive style routing."""
+"""Source-aligned DiffuFont model with optional reference-aware style routing."""
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 import torch
@@ -102,33 +103,109 @@ class ContentGuidedRetriever(nn.Module):
         return self.gate.tanh() * out, weights
 
 
+class ReferenceRouter(nn.Module):
+    """Select which style references a site should read from."""
+
+    def __init__(self, token_dim: int):
+        super().__init__()
+        self.token_dim = int(token_dim)
+        hidden_dim = max(64, self.token_dim)
+        pair_dim = self.token_dim * 4
+        self.norm = nn.LayerNorm(pair_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(pair_dim, hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(inplace=True),
+        )
+        self.out = nn.Linear(hidden_dim, 1)
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
+
+    def forward(
+        self,
+        content_queries: torch.Tensor,
+        ref_summary: torch.Tensor,
+        *,
+        ref_mask: Optional[torch.Tensor],
+        temperature: float = 1.0,
+        topk: int = 0,
+    ) -> dict[str, torch.Tensor]:
+        if content_queries.dim() != 3:
+            raise ValueError(f"content_queries must be 3D, got {tuple(content_queries.shape)}")
+        if ref_summary.dim() != 3:
+            raise ValueError(f"ref_summary must be 3D, got {tuple(ref_summary.shape)}")
+        if int(content_queries.size(0)) != int(ref_summary.size(0)):
+            raise ValueError(
+                f"batch mismatch between content_queries and ref_summary: "
+                f"{tuple(content_queries.shape)} vs {tuple(ref_summary.shape)}"
+            )
+        site_feat = content_queries.mean(dim=1)
+        site_feat = site_feat[:, None, :].expand(-1, int(ref_summary.size(1)), -1)
+        pair_feat = torch.cat(
+            [
+                site_feat,
+                ref_summary,
+                site_feat * ref_summary,
+                torch.abs(site_feat - ref_summary),
+            ],
+            dim=-1,
+        )
+        temp = float(max(1e-4, temperature))
+        logits = self.out(self.mlp(self.norm(pair_feat))).squeeze(-1) / temp
+
+        if ref_mask is None:
+            valid = torch.ones_like(logits, dtype=torch.bool)
+        else:
+            if ref_mask.shape != logits.shape:
+                raise ValueError(f"ref_mask must be {tuple(logits.shape)}, got {tuple(ref_mask.shape)}")
+            valid = ref_mask > 0
+
+        valid_any = valid.any(dim=1, keepdim=True)
+        masked_logits = logits.masked_fill(~valid, -1e4)
+
+        topk_i = int(topk)
+        if topk_i > 0 and topk_i < int(masked_logits.size(1)):
+            keep = torch.zeros_like(valid)
+            topk_idx = torch.topk(masked_logits, k=topk_i, dim=-1).indices
+            keep.scatter_(1, topk_idx, True)
+            keep = keep & valid
+            masked_logits = masked_logits.masked_fill(~keep, -1e4)
+
+        beta = torch.softmax(masked_logits, dim=-1)
+        if not bool(valid_any.all().item()):
+            uniform = torch.full_like(beta, 1.0 / float(beta.size(-1)))
+            beta = torch.where(valid_any, beta, uniform)
+
+        return {
+            "beta": beta,
+            "ref_logits": masked_logits,
+        }
+
+
 class SiteAdaptiveRouter(nn.Module):
-    """Route a site's content query across all style memories."""
+    """Mix candidate site contexts using candidate-aware scoring."""
 
     def __init__(self, token_dim: int, num_sources: int, preferred_source: int):
         super().__init__()
         self.token_dim = int(token_dim)
         self.num_sources = int(num_sources)
-        hidden_dim = max(64, self.token_dim // 2)
-        self.route_norm = nn.LayerNorm(self.token_dim)
+        hidden_dim = max(64, self.token_dim)
+        pair_dim = self.token_dim * 4
+        self.route_norm = nn.LayerNorm(pair_dim)
         self.route_mlp = nn.Sequential(
-            nn.Linear(self.token_dim, hidden_dim),
+            nn.Linear(pair_dim, hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(inplace=True),
         )
-        self.route_out = nn.Linear(hidden_dim, self.num_sources)
-        self.gate_norm = nn.LayerNorm(self.token_dim)
-        self.gate_mlp = nn.Sequential(
-            nn.Linear(self.token_dim, hidden_dim),
-            nn.SiLU(inplace=True),
-        )
-        self.gate_out = nn.Linear(hidden_dim, 1)
+        self.route_out = nn.Linear(hidden_dim, 1)
+        self.route_bias = nn.Parameter(torch.zeros(self.num_sources))
         nn.init.zeros_(self.route_out.weight)
         nn.init.zeros_(self.route_out.bias)
         if not (0 <= int(preferred_source) < self.num_sources):
             raise ValueError(f"preferred_source must be in [0,{self.num_sources}), got {preferred_source}")
-        self.route_out.bias.data[int(preferred_source)] = 1.5
-        nn.init.zeros_(self.gate_out.weight)
-        nn.init.zeros_(self.gate_out.bias)
+        self.route_bias.data[int(preferred_source)] = 0.5
 
     def forward(
         self,
@@ -146,15 +223,24 @@ class SiteAdaptiveRouter(nn.Module):
                 f"candidate_contexts source dim mismatch: got {tuple(candidate_contexts.shape)}, expected {self.num_sources}"
             )
         site_feat = content_queries.mean(dim=1)
+        cand_feat = candidate_contexts.mean(dim=2)
+        site_feat = site_feat[:, None, :].expand(-1, self.num_sources, -1)
+        pair_feat = torch.cat(
+            [
+                site_feat,
+                cand_feat,
+                site_feat * cand_feat,
+                torch.abs(site_feat - cand_feat),
+            ],
+            dim=-1,
+        )
         temp = float(max(1e-4, temperature))
-        route_logits = self.route_out(self.route_mlp(self.route_norm(site_feat))) / temp
+        route_logits = self.route_out(self.route_mlp(self.route_norm(pair_feat))).squeeze(-1)
+        route_logits = (route_logits + self.route_bias.view(1, -1)) / temp
         alpha = torch.softmax(route_logits, dim=-1)
-        gate = torch.sigmoid(self.gate_out(self.gate_mlp(self.gate_norm(site_feat))))
         mixed = (candidate_contexts * alpha[:, :, None, None]).sum(dim=1)
-        mixed = mixed * gate[:, None, :]
         return mixed, {
             "alpha": alpha,
-            "gate": gate.squeeze(-1),
             "route_logits": route_logits,
         }
 
@@ -189,6 +275,7 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         content_query_up32_count: int = 4,
         adaptive_style_routing: bool = False,
         router_temperature: float = 1.0,
+        reference_topk: int = 3,
     ):
         super().__init__()
         _ = local_token_count
@@ -206,6 +293,7 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         self.content_query_up32_count = int(content_query_up32_count)
         self.adaptive_style_routing = bool(adaptive_style_routing)
         self.router_temperature = float(max(1e-4, router_temperature))
+        self.reference_topk = max(0, int(reference_topk))
         if self.style_token_dim <= 0:
             raise ValueError("style_token_dim must be > 0")
         if self.style_token_count != 3:
@@ -289,8 +377,33 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
             if self.adaptive_style_routing and self.content_query_up32 is not None and self.retriever_up32 is not None
             else None
         )
+        self.ref_router_mid = (
+            ReferenceRouter(self.style_token_dim)
+            if self.adaptive_style_routing and self.content_query_mid is not None and self.retriever_mid is not None
+            else None
+        )
+        self.ref_router_up16 = (
+            ReferenceRouter(self.style_token_dim)
+            if self.adaptive_style_routing and self.content_query_up16 is not None and self.retriever_up16 is not None
+            else None
+        )
+        self.ref_router_up32 = (
+            ReferenceRouter(self.style_token_dim)
+            if self.adaptive_style_routing and self.content_query_up32 is not None and self.retriever_up32 is not None
+            else None
+        )
         self.memory_source_embed = (
             nn.Parameter(torch.randn(len(ADAPTIVE_ROUTE_SOURCE_NAMES), self.style_token_dim) * 0.02)
+            if self.adaptive_style_routing
+            else None
+        )
+        self.ref_summary_fuse = (
+            nn.Sequential(
+                nn.LayerNorm(self.style_token_dim * len(ADAPTIVE_ROUTE_SOURCE_NAMES)),
+                nn.Linear(self.style_token_dim * len(ADAPTIVE_ROUTE_SOURCE_NAMES), self.style_token_dim),
+                nn.SiLU(inplace=True),
+                nn.Linear(self.style_token_dim, self.style_token_dim),
+            )
             if self.adaptive_style_routing
             else None
         )
@@ -320,7 +433,6 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         )
         self.style_site_drop_prob = 0.0
         self.style_site_drop_min_keep = 1
-        self._style_site_force_keep: frozenset[str] | None = None
         self._last_route_stats: dict[str, dict[str, torch.Tensor]] = {}
 
     @classmethod
@@ -409,6 +521,11 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         loaded = len(sd) - len(unexpected)
         print(f"[load_style_pretrained] loaded={loaded} missing={len(missing)} unexpected={len(unexpected)}")
 
+    def enable_xformers_memory_efficient_attention(self, attention_op=None) -> int:
+        if hasattr(self.unet, "enable_xformers_memory_efficient_attention"):
+            self.unet.enable_xformers_memory_efficient_attention(attention_op=attention_op)
+        return int(self.enable_xformers_memory_efficient_attention_style(attention_op=attention_op))
+
     def _check_hw(self, x: torch.Tensor, name: str) -> None:
         h, w = int(x.shape[-2]), int(x.shape[-1])
         expected = self.unet_input_size
@@ -418,12 +535,6 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
     def set_style_site_dropout(self, prob: float, min_keep: int = 1) -> None:
         self.style_site_drop_prob = float(max(0.0, min(1.0, prob)))
         self.style_site_drop_min_keep = max(1, int(min_keep))
-
-    def set_style_site_force_keep(self, keep_sites: tuple[str, ...] | list[str] | None) -> None:
-        if keep_sites is None:
-            self._style_site_force_keep = None
-            return
-        self._style_site_force_keep = frozenset(str(x) for x in keep_sites)
 
     def _normalize_style_inputs(
         self,
@@ -485,6 +596,41 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
             out[name] = memories[name] + self.memory_source_embed[idx].view(1, 1, -1)
         return out
 
+    def _prepare_route_memories_per_ref(self, style_pack: dict[str, torch.Tensor]) -> Optional[dict[str, torch.Tensor]]:
+        if (
+            "memory_mid_8_ref" not in style_pack
+            or "memory_up_16_ref" not in style_pack
+            or "memory_up_32_ref" not in style_pack
+        ):
+            return None
+        memories = {
+            "mid": style_pack["memory_mid_8_ref"],
+            "up_16": style_pack["memory_up_16_ref"],
+            "up_32": style_pack["memory_up_32_ref"],
+        }
+        if self.memory_source_embed is None:
+            return memories
+        out: dict[str, torch.Tensor] = {}
+        for idx, name in enumerate(ADAPTIVE_ROUTE_SOURCE_NAMES):
+            out[name] = memories[name] + self.memory_source_embed[idx].view(1, 1, 1, -1)
+        return out
+
+    def _build_reference_summary(
+        self,
+        memory_sources_ref: dict[str, torch.Tensor],
+        style_ref_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if self.ref_summary_fuse is None:
+            raise RuntimeError("ref_summary_fuse is not initialized")
+        summary_parts = [
+            memory_sources_ref[source_name].mean(dim=2)
+            for source_name in ADAPTIVE_ROUTE_SOURCE_NAMES
+        ]
+        ref_summary = self.ref_summary_fuse(torch.cat(summary_parts, dim=-1))
+        if style_ref_mask is not None:
+            ref_summary = ref_summary * style_ref_mask[:, :, None].to(device=ref_summary.device, dtype=ref_summary.dtype)
+        return ref_summary
+
     @staticmethod
     def _detach_route_stats(route_stats: dict[str, dict[str, torch.Tensor]]) -> dict[str, dict[str, torch.Tensor]]:
         out: dict[str, dict[str, torch.Tensor]] = {}
@@ -518,9 +664,74 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         routed_ctx = inject_head(mixed_ctx)
         route_stats = {
             "alpha": route_stats["alpha"],
-            "gate": route_stats["gate"],
         }
         return routed_ctx, route_stats
+
+    def _retrieve_ref_weighted_context(
+        self,
+        *,
+        retriever: ContentGuidedRetriever,
+        content_queries: torch.Tensor,
+        memory_per_ref: torch.Tensor,
+        ref_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        if memory_per_ref.dim() != 4:
+            raise ValueError(f"memory_per_ref must be 4D, got {tuple(memory_per_ref.shape)}")
+        b, r, m, d = memory_per_ref.shape
+        q = int(content_queries.size(1))
+        query_flat = (
+            content_queries[:, None, :, :]
+            .expand(-1, r, -1, -1)
+            .reshape(b * r, q, d)
+        )
+        memory_flat = memory_per_ref.reshape(b * r, m, d)
+        guided_flat, _ = retriever(query_flat, memory_flat)
+        guided = guided_flat.view(b, r, q, d)
+        seed = memory_per_ref.mean(dim=2, keepdim=True).expand(-1, -1, q, -1)
+        per_ref_ctx = seed + guided
+        return (per_ref_ctx * ref_weights[:, :, None, None]).sum(dim=1)
+
+    def _route_site_context_ref_aware(
+        self,
+        *,
+        inject_head: nn.Module,
+        retriever: ContentGuidedRetriever,
+        router: SiteAdaptiveRouter,
+        ref_router: ReferenceRouter,
+        content_queries: torch.Tensor,
+        memory_sources_ref: dict[str, torch.Tensor],
+        ref_summary: torch.Tensor,
+        style_ref_mask: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        ref_stats = ref_router(
+            content_queries,
+            ref_summary,
+            ref_mask=style_ref_mask,
+            temperature=self.router_temperature,
+            topk=(0 if self.training else self.reference_topk),
+        )
+        beta = ref_stats["beta"]
+        candidates = []
+        for source_name in ADAPTIVE_ROUTE_SOURCE_NAMES:
+            candidates.append(
+                self._retrieve_ref_weighted_context(
+                    retriever=retriever,
+                    content_queries=content_queries,
+                    memory_per_ref=memory_sources_ref[source_name],
+                    ref_weights=beta,
+                )
+            )
+        candidate_contexts = torch.stack(candidates, dim=1)
+        mixed_ctx, scale_stats = router(
+            content_queries,
+            candidate_contexts,
+            temperature=self.router_temperature,
+        )
+        routed_ctx = inject_head(mixed_ctx)
+        return routed_ctx, {
+            "alpha": scale_stats["alpha"],
+            "beta": beta,
+        }
 
     def _build_content_guided_style_contexts_with_stats(
         self,
@@ -537,11 +748,27 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         up32_ctx = self.inject_up32(memory_up32.mean(dim=1)).unsqueeze(1)
         route_stats: dict[str, dict[str, torch.Tensor]] = {}
         memory_sources = self._prepare_route_memories(style_pack)
+        memory_sources_ref = self._prepare_route_memories_per_ref(style_pack)
+        style_ref_mask = style_pack.get("style_ref_mask", None)
+        ref_summary = None
+        if memory_sources_ref is not None and self.ref_summary_fuse is not None:
+            ref_summary = self._build_reference_summary(memory_sources_ref, style_ref_mask)
 
         if self.content_query_mid is not None and self.retriever_mid is not None:
             content_feat_mid = content_residual_features[4]
             guided_q_mid = self.content_query_mid(content_feat_mid)
-            if self.route_mid is not None:
+            if self.route_mid is not None and self.ref_router_mid is not None and memory_sources_ref is not None and ref_summary is not None:
+                mid_ctx, route_stats["mid"] = self._route_site_context_ref_aware(
+                    inject_head=self.inject_mid,
+                    retriever=self.retriever_mid,
+                    router=self.route_mid,
+                    ref_router=self.ref_router_mid,
+                    content_queries=guided_q_mid,
+                    memory_sources_ref=memory_sources_ref,
+                    ref_summary=ref_summary,
+                    style_ref_mask=style_ref_mask,
+                )
+            elif self.route_mid is not None:
                 mid_ctx, route_stats["mid"] = self._route_site_context(
                     site_name="mid",
                     inject_head=self.inject_mid,
@@ -557,7 +784,18 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         if self.content_query_up16 is not None and self.retriever_up16 is not None:
             content_feat_up16 = content_residual_features[3]
             guided_q_up16 = self.content_query_up16(content_feat_up16)
-            if self.route_up16 is not None:
+            if self.route_up16 is not None and self.ref_router_up16 is not None and memory_sources_ref is not None and ref_summary is not None:
+                up16_ctx, route_stats["up_16"] = self._route_site_context_ref_aware(
+                    inject_head=self.inject_up16,
+                    retriever=self.retriever_up16,
+                    router=self.route_up16,
+                    ref_router=self.ref_router_up16,
+                    content_queries=guided_q_up16,
+                    memory_sources_ref=memory_sources_ref,
+                    ref_summary=ref_summary,
+                    style_ref_mask=style_ref_mask,
+                )
+            elif self.route_up16 is not None:
                 up16_ctx, route_stats["up_16"] = self._route_site_context(
                     site_name="up_16",
                     inject_head=self.inject_up16,
@@ -573,7 +811,18 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         if self.content_query_up32 is not None and self.retriever_up32 is not None:
             content_feat_up32 = content_residual_features[2]
             guided_q_up32 = self.content_query_up32(content_feat_up32)
-            if self.route_up32 is not None:
+            if self.route_up32 is not None and self.ref_router_up32 is not None and memory_sources_ref is not None and ref_summary is not None:
+                up32_ctx, route_stats["up_32"] = self._route_site_context_ref_aware(
+                    inject_head=self.inject_up32,
+                    retriever=self.retriever_up32,
+                    router=self.route_up32,
+                    ref_router=self.ref_router_up32,
+                    content_queries=guided_q_up32,
+                    memory_sources_ref=memory_sources_ref,
+                    ref_summary=ref_summary,
+                    style_ref_mask=style_ref_mask,
+                )
+            elif self.route_up32 is not None:
                 up32_ctx, route_stats["up_32"] = self._route_site_context(
                     site_name="up_32",
                     inject_head=self.inject_up32,
@@ -593,7 +842,6 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         }
         if apply_site_mask:
             style_contexts = self._apply_style_site_dropout(style_contexts)
-            style_contexts = self._apply_style_site_force_mask(style_contexts)
         return style_contexts, route_stats
 
     def _build_content_guided_style_contexts(
@@ -629,15 +877,6 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         for idx, site in enumerate(active_sites):
             if not bool(keep_flags[idx].item()):
                 out[site] = torch.zeros_like(out[site])
-        return out
-
-    def _apply_style_site_force_mask(self, style_contexts: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        if self._style_site_force_keep is None:
-            return style_contexts
-        out = dict(style_contexts)
-        for site, tensor in out.items():
-            if site not in self._style_site_force_keep:
-                out[site] = torch.zeros_like(tensor)
         return out
 
     def _resolve_style_hidden_states(
@@ -691,13 +930,16 @@ class SourcePartRefUNet(nn.Module, HierarchicalStyleEncoderMixin):
         if self.retriever_up32 is not None:
             out["gate_up_32"] = float(self.retriever_up32.gate.detach().tanh().item())
         for site, stats in self._last_route_stats.items():
-            gate = stats.get("gate", None)
             alpha = stats.get("alpha", None)
-            if gate is not None and gate.numel() > 0:
-                out[f"route_gate_{site}"] = float(gate.mean().item())
             if alpha is not None and alpha.numel() > 0:
                 for idx, source_name in enumerate(ADAPTIVE_ROUTE_SOURCE_NAMES):
                     out[f"route_{site}_to_{source_name}"] = float(alpha[:, idx].mean().item())
+            beta = stats.get("beta", None)
+            if beta is not None and beta.numel() > 0:
+                beta_safe = beta.clamp_min(1e-8)
+                denom = math.log(max(2, int(beta.size(-1))))
+                out[f"ref_entropy_{site}"] = float((-(beta_safe * beta_safe.log()).sum(dim=-1) / denom).mean().item())
+                out[f"ref_peak_{site}"] = float(beta.max(dim=-1).values.mean().item())
         return out
 
     def encode_to_latent(self, x_pixel: torch.Tensor) -> torch.Tensor:

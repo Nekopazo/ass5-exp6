@@ -26,6 +26,7 @@ from models.source_part_ref_unet import (
     FIXED_STYLE_TRANSFORMER_SCALES,
     SourcePartRefUNet,
 )
+from models.hierarchical_style_encoder import CrossAttentionWithBias
 from models.source_fontdiffuser.attention import CrossAttention as SourceCrossAttention
 from style_augment import build_base_glyph_transform, build_style_reference_transform
 
@@ -45,7 +46,10 @@ STYLE_ONLY_MAIN_DEFAULTS: Dict[str, float | int] = {
     "lambda_route_sparse": 0.002,
     "lambda_route_balance": 0.005,
     "lambda_route_div": 0.01,
-    "lambda_route_gate": 0.001,
+    "lambda_route_gate": 0.0,
+    "lambda_ref_sparse": 0.002,
+    "lambda_ref_balance": 0.002,
+    "lambda_ref_div": 0.01,
     "attn_overlap_margin": 0.70,
     "attn_entropy_gap": 0.03,
     "style_ref_drop_prob": 0.15,
@@ -65,21 +69,31 @@ STYLE_ONLY_MAIN_DEFAULTS: Dict[str, float | int] = {
     "content_query_up32_count": 4,
     "adaptive_style_routing": 1,
     "router_temperature": 1.0,
+    "reference_topk": 3,
 }
 
 
 def _try_enable_xformers(model: SourcePartRefUNet) -> bool:
     try:
-        model.unet.enable_xformers_memory_efficient_attention()
-        enabled_count = sum(
+        enabled_style = 0
+        if hasattr(model, "enable_xformers_memory_efficient_attention"):
+            enabled_style = int(model.enable_xformers_memory_efficient_attention())
+        elif hasattr(model.unet, "enable_xformers_memory_efficient_attention"):
+            model.unet.enable_xformers_memory_efficient_attention()
+            for module in model.modules():
+                if isinstance(module, CrossAttentionWithBias):
+                    module.set_use_memory_efficient_attention_xformers(True)
+                    enabled_style += 1
+
+        enabled_unet = sum(
             1
             for module in model.unet.modules()
             if isinstance(module, SourceCrossAttention)
             and bool(getattr(module, "_use_memory_efficient_attention_xformers", False))
         )
         print(
-            f"[train] xformers memory-efficient attention enabled "
-            f"(custom_cross_attn_modules={enabled_count})"
+            "[train] xformers memory-efficient attention enabled "
+            f"(unet_cross_attn={enabled_unet}, style_cross_attn={enabled_style})"
         )
         return True
     except Exception as e:
@@ -381,6 +395,9 @@ def main() -> None:
     parser.add_argument("--lambda-route-balance", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_route_balance"]))
     parser.add_argument("--lambda-route-div", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_route_div"]))
     parser.add_argument("--lambda-route-gate", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_route_gate"]))
+    parser.add_argument("--lambda-ref-sparse", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_ref_sparse"]))
+    parser.add_argument("--lambda-ref-balance", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_ref_balance"]))
+    parser.add_argument("--lambda-ref-div", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_ref_div"]))
     parser.add_argument("--style-nce-temp", type=float, default=0.07)
     parser.add_argument("--aux-loss-warmup-steps", type=int, default=int(STYLE_ONLY_MAIN_DEFAULTS["aux_loss_warmup_steps"]))
     parser.add_argument("--attn-overlap-margin", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["attn_overlap_margin"]))
@@ -441,6 +458,12 @@ def main() -> None:
         type=float,
         default=float(STYLE_ONLY_MAIN_DEFAULTS["router_temperature"]),
         help="Softmax temperature for adaptive style routing.",
+    )
+    parser.add_argument(
+        "--reference-topk",
+        type=int,
+        default=int(STYLE_ONLY_MAIN_DEFAULTS["reference_topk"]),
+        help="Top-k references kept by the reference-aware router. <=0 keeps all references.",
     )
     parser.add_argument("--diffusion-steps", type=int, default=1000)
     parser.add_argument(
@@ -722,6 +745,7 @@ def main() -> None:
         content_query_up32_count=int(args.content_query_up32_count),
         adaptive_style_routing=bool(args.adaptive_style_routing),
         router_temperature=float(args.router_temperature),
+        reference_topk=int(args.reference_topk),
     )
 
     _try_enable_xformers(model)
@@ -751,6 +775,9 @@ def main() -> None:
         "lambda_route_balance": float(args.lambda_route_balance),
         "lambda_route_div": float(args.lambda_route_div),
         "lambda_route_gate": float(args.lambda_route_gate),
+        "lambda_ref_sparse": float(args.lambda_ref_sparse),
+        "lambda_ref_balance": float(args.lambda_ref_balance),
+        "lambda_ref_div": float(args.lambda_ref_div),
         "nce_temperature": float(args.style_nce_temp),
         "aux_loss_warmup_steps": int(args.aux_loss_warmup_steps),
         "attn_overlap_margin": float(args.attn_overlap_margin),
