@@ -1,863 +1,431 @@
 #!/usr/bin/env python3
-"""Teacher training entry for DiffuFont (baseline / part_only / style_only)."""
+"""Training entry for the document-defined content+style latent diffusion path."""
 
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
 import json
-import os
-import random
+import math
 from pathlib import Path
-from typing import Any, Dict
-
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
+import random
+from typing import Dict
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Sampler, Subset
+from torch.utils.data import DataLoader
 
-from dataset import FontImageDataset
-from models.model import DiffusionTrainer, FlowMatchingTrainer
-from models.source_part_ref_unet import (
-    FIXED_STYLE_LOCAL_MOD_SCALES,
-    FIXED_STYLE_SITE_ARCH,
-    FIXED_STYLE_TOKEN_CONSUMER_MAP,
-    FIXED_STYLE_TRANSFORMER_SCALES,
-    SourcePartRefUNet,
-)
-from models.hierarchical_style_encoder import CrossAttentionWithBias
-from models.source_fontdiffuser.attention import CrossAttention as SourceCrossAttention
-from style_augment import build_base_glyph_transform, build_style_reference_transform
-
-
-STYLE_ONLY_MAIN_DEFAULTS: Dict[str, float | int] = {
-    "lambda_nce": 0.05,
-    "aux_loss_warmup_steps": 5000,
-    "lambda_slot_nce": 0.03,
-    "lambda_cons": 0.02,
-    "lambda_div": 0.01,
-    "lambda_proxy_low": 0.05,
-    "lambda_proxy_mid": 0.05,
-    "lambda_proxy_high": 0.05,
-    "lambda_attn_sep": 0.01,
-    "lambda_attn_order": 0.0,
-    "lambda_attn_role": 0.0,
-    "lambda_route_sparse": 0.002,
-    "lambda_route_balance": 0.005,
-    "lambda_route_div": 0.01,
-    "lambda_route_gate": 0.0,
-    "lambda_ref_sparse": 0.002,
-    "lambda_ref_balance": 0.002,
-    "lambda_ref_div": 0.01,
-    "attn_overlap_margin": 0.70,
-    "attn_entropy_gap": 0.03,
-    "style_ref_drop_prob": 0.15,
-    "style_ref_drop_min_keep": 4,
-    "style_site_drop_prob": 0.10,
-    "style_site_drop_min_keep": 1,
-    "freeze_style_backbone_steps": 5000,
-    "style_backbone_lr_scale": 0.1,
-    "style_memory_mid_count": 4,
-    "style_memory_up16_count": 6,
-    "style_memory_up32_count": 6,
-    "style_memory_mid_pool_hw": 8,
-    "style_memory_up16_pool_hw": 16,
-    "style_memory_up32_pool_hw": 16,
-    "content_query_mid_count": 2,
-    "content_query_up16_count": 2,
-    "content_query_up32_count": 4,
-    "adaptive_style_routing": 1,
-    "router_temperature": 1.0,
-    "reference_topk": 3,
-}
-
-
-def _try_enable_xformers(model: SourcePartRefUNet) -> bool:
-    try:
-        enabled_style = 0
-        if hasattr(model, "enable_xformers_memory_efficient_attention"):
-            enabled_style = int(model.enable_xformers_memory_efficient_attention())
-        elif hasattr(model.unet, "enable_xformers_memory_efficient_attention"):
-            model.unet.enable_xformers_memory_efficient_attention()
-            for module in model.modules():
-                if isinstance(module, CrossAttentionWithBias):
-                    module.set_use_memory_efficient_attention_xformers(True)
-                    enabled_style += 1
-
-        enabled_unet = sum(
-            1
-            for module in model.unet.modules()
-            if isinstance(module, SourceCrossAttention)
-            and bool(getattr(module, "_use_memory_efficient_attention_xformers", False))
-        )
-        print(
-            "[train] xformers memory-efficient attention enabled "
-            f"(unet_cross_attn={enabled_unet}, style_cross_attn={enabled_style})"
-        )
-        return True
-    except Exception as e:
-        print(f"[train] xformers not available, using default attention: {e}")
-        return False
-
-
-def _try_enable_gradient_checkpointing(model: SourcePartRefUNet) -> bool:
-    try:
-        model.unet.enable_gradient_checkpointing()
-        print("[train] gradient checkpointing enabled")
-        return True
-    except Exception as e:
-        print(f"[train] gradient checkpointing not available: {e}")
-        return False
-
-
-def collate_fn(samples) -> Dict[str, torch.Tensor]:
-    contents = [s["content"] for s in samples]
-    targets = [s["input"] for s in samples]
-
-    font_names = [s["font"] for s in samples]
-    unique_fonts = sorted(set(font_names))
-    font_to_id = {f: i for i, f in enumerate(unique_fonts)}
-    font_ids = torch.tensor([font_to_id[f] for f in font_names], dtype=torch.long)
-
-    batch: Dict[str, torch.Tensor] = {
-        "content": torch.stack(contents),
-        "target": torch.stack(targets),
-        "font_ids": font_ids,
-    }
-
-    has_style = any("style_img" in s for s in samples)
-    if has_style:
-        if not all("style_img" in s for s in samples):
-            raise ValueError("Inconsistent style_img presence in batch")
-        style_img = torch.stack([s["style_img"] for s in samples])
-        batch["style_img"] = style_img
-
-        if all("style_ref_mask" in s for s in samples):
-            batch["style_ref_mask"] = torch.stack([s["style_ref_mask"] for s in samples])
-        elif style_img.dim() == 5:
-            # (B, R, C, H, W)
-            bsz, ref_n = int(style_img.size(0)), int(style_img.size(1))
-            batch["style_ref_mask"] = torch.ones((bsz, ref_n), dtype=torch.float32)
-
-    has_style_v2 = any("style_img_view2" in s for s in samples)
-    if has_style_v2:
-        if not all("style_img_view2" in s for s in samples):
-            raise ValueError("Inconsistent style_img_view2 presence in batch")
-        style_img_v2 = torch.stack([s["style_img_view2"] for s in samples])
-        batch["style_img_view2"] = style_img_v2
-
-        if all("style_ref_mask_view2" in s for s in samples):
-            batch["style_ref_mask_view2"] = torch.stack([s["style_ref_mask_view2"] for s in samples])
-        elif style_img_v2.dim() == 5:
-            bsz2, ref_n2 = int(style_img_v2.size(0)), int(style_img_v2.size(1))
-            batch["style_ref_mask_view2"] = torch.ones((bsz2, ref_n2), dtype=torch.float32)
-
-    return batch
-
-
-def normalize_conditioning_mode(raw_mode: str) -> str:
-    mode = str(raw_mode).strip().lower()
-    alias = {"parts_vector_only": "part_only"}
-    mode = alias.get(mode, mode)
-    valid = {"baseline", "part_only", "style_only"}
-    if mode not in valid:
-        raise ValueError(f"conditioning mode must be one of {sorted(valid)}, got '{raw_mode}'")
-    return mode
-
-
-def mode_uses_style(mode: str) -> bool:
-    return normalize_conditioning_mode(mode) in {"part_only", "style_only"}
-
-
-def resolve_device(device_arg: str) -> torch.device:
-    def _probe_cuda(candidate: str) -> tuple[bool, str | None]:
-        try:
-            dev = torch.device(candidate)
-            _ = torch.empty((1,), device=dev)
-            return True, None
-        except Exception as e:
-            return False, f"{type(e).__name__}: {e}"
-
-    if device_arg == "auto":
-        ok, _ = _probe_cuda("cuda:0")
-        return torch.device("cuda:0" if ok else "cpu")
-
-    req = torch.device(device_arg)
-    if req.type == "cuda":
-        ok, err = _probe_cuda(str(req))
-        if not ok:
-            raise ValueError(f"CUDA device requested but probe failed for {req}: {err}")
-    return req
-
-
-def _to_jsonable(v: Any) -> Any:
-    if isinstance(v, Path):
-        return str(v)
-    if isinstance(v, torch.device):
-        return str(v)
-    return v
+from dataset import FontImageDataset, UniqueFontBatchSampler
+from models.model import DiffusionTrainer, StylePretrainTrainer, VAETrainer
+from models.source_part_ref_dit import SourcePartRefDiT
+from style_augment import build_base_glyph_transform
 
 
 def set_global_seed(seed: int) -> None:
-    s = int(seed)
-    random.seed(s)
-    np.random.seed(s)
-    torch.manual_seed(s)
+    seed = int(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(s)
+        torch.cuda.manual_seed_all(seed)
 
 
-def _seed_worker(worker_id: int) -> None:
-    _ = worker_id
-    ws = torch.initial_seed() % 2**32
-    random.seed(ws)
-    np.random.seed(ws)
-    # Avoid CPU thread oversubscription with many DataLoader workers.
-    torch.set_num_threads(1)
+def seed_worker(worker_id: int) -> None:
+    worker_seed = torch.initial_seed() % (2**32)
+    random.seed(worker_seed + int(worker_id))
+    np.random.seed(worker_seed + int(worker_id))
 
 
-def split_indices_by_font(
+def resolve_device(raw_device: str) -> torch.device:
+    if raw_device == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda:1" if torch.cuda.device_count() > 1 else "cuda:0")
+        return torch.device("cpu")
+    return torch.device(raw_device)
+
+
+def collate_fn(samples) -> Dict[str, torch.Tensor]:
+    batch = {
+        "font": [sample["font"] for sample in samples],
+        "content": torch.stack([sample["content"] for sample in samples], dim=0),
+        "target": torch.stack([sample["target"] for sample in samples], dim=0),
+        "style_img": torch.stack([sample["style_img"] for sample in samples], dim=0),
+        "style_ref_mask": torch.stack([sample["style_ref_mask"] for sample in samples], dim=0),
+    }
+    if "style_img_pos" in samples[0]:
+        batch["style_img_pos"] = torch.stack([sample["style_img_pos"] for sample in samples], dim=0)
+        batch["style_ref_mask_pos"] = torch.stack([sample["style_ref_mask_pos"] for sample in samples], dim=0)
+    return batch
+
+
+def build_dataloader(
     dataset: FontImageDataset,
-    val_ratio: float,
+    *,
+    batch_size: int,
+    num_workers: int,
+    device: torch.device,
     seed: int,
-) -> tuple[list[int], list[int], dict[str, int]]:
-    total_samples = len(dataset.samples)
-    if total_samples <= 0:
-        return [], [], {"total_fonts": 0, "train_fonts": 0, "val_fonts": 0}
-
-    fonts = sorted({font for font, _ in dataset.samples})
-    if val_ratio <= 0.0 or len(fonts) < 2:
-        return (
-            list(range(total_samples)),
-            [],
-            {"total_fonts": len(fonts), "train_fonts": len(fonts), "val_fonts": 0},
+    use_unique_font_batches: bool,
+    shuffle: bool,
+) -> DataLoader:
+    dataloader_kwargs = {
+        "dataset": dataset,
+        "num_workers": int(num_workers),
+        "pin_memory": (device.type == "cuda"),
+        "collate_fn": collate_fn,
+        "worker_init_fn": seed_worker if int(num_workers) > 0 else None,
+    }
+    if use_unique_font_batches:
+        batch_sampler = UniqueFontBatchSampler(
+            dataset,
+            batch_size=int(batch_size),
+            seed=int(seed),
+            drop_last=False,
         )
-
-    rng = random.Random(int(seed) + 2027)
-    rng.shuffle(fonts)
-    val_n = int(round(len(fonts) * float(val_ratio)))
-    val_n = max(1, min(len(fonts) - 1, val_n))
-    val_fonts = set(fonts[:val_n])
-
-    train_indices: list[int] = []
-    val_indices: list[int] = []
-    for i, (font, _) in enumerate(dataset.samples):
-        if font in val_fonts:
-            val_indices.append(i)
-        else:
-            train_indices.append(i)
-
-    if not train_indices:
-        train_indices = [val_indices.pop()]
-    if not val_indices:
-        val_indices = [train_indices.pop()]
-
-    return (
-        train_indices,
-        val_indices,
-        {"total_fonts": len(fonts), "train_fonts": len(fonts) - val_n, "val_fonts": val_n},
+        return DataLoader(batch_sampler=batch_sampler, **dataloader_kwargs)
+    return DataLoader(
+        batch_size=int(batch_size),
+        shuffle=bool(shuffle),
+        **dataloader_kwargs,
     )
 
 
-class NoReplacementFontBatchSampler(Sampler[list[int]]):
-    """Batch sampler: each batch contains unique fonts (no replacement within batch)."""
-
-    def __init__(
-        self,
-        subset: Subset,
-        batch_size: int,
-        seed: int,
-        steps_per_epoch: int,
-        shuffle: bool = True,
-    ) -> None:
-        self.subset = subset
-        self.batch_size = int(batch_size)
-        self.seed = int(seed)
-        self.steps_per_epoch = max(1, int(steps_per_epoch))
-        self.shuffle = bool(shuffle)
-        self._epoch = 0
-
-        if self.batch_size <= 0:
-            raise ValueError("NoReplacementFontBatchSampler batch_size must be > 0")
-
-        base = subset.dataset
-        if not hasattr(base, "samples"):
-            raise ValueError("subset.dataset must expose .samples for font-aware batching")
-
-        font_to_local: dict[str, list[int]] = defaultdict(list)
-        for local_i, global_i in enumerate(subset.indices):
-            font_name = base.samples[int(global_i)][0]
-            font_to_local[str(font_name)].append(int(local_i))
-
-        self.font_to_local_indices = {
-            k: list(v) for k, v in sorted(font_to_local.items(), key=lambda x: x[0])
-        }
-        self.font_pool = list(self.font_to_local_indices.keys())
-        if len(self.font_pool) < self.batch_size:
-            raise ValueError(
-                f"batch_size={self.batch_size} exceeds train font count={len(self.font_pool)} "
-                "(cannot satisfy no-replacement font batch)."
-            )
-
-    def __len__(self) -> int:
-        return int(self.steps_per_epoch)
-
-    def __iter__(self):
-        rng = random.Random(self.seed + self._epoch * 100003)
-        self._epoch += 1
-
-        produced = 0
-        while produced < self.steps_per_epoch:
-            order = list(self.font_pool)
-            if self.shuffle:
-                rng.shuffle(order)
-            pos = 0
-            while (pos + self.batch_size) <= len(order) and produced < self.steps_per_epoch:
-                picked_fonts = order[pos : pos + self.batch_size]
-                batch_indices: list[int] = []
-                for f in picked_fonts:
-                    local_choices = self.font_to_local_indices[f]
-                    batch_indices.append(int(rng.choice(local_choices)))
-                yield batch_indices
-                pos += self.batch_size
-                produced += 1
+def slice_batch(batch: Dict[str, torch.Tensor], count: int) -> Dict[str, torch.Tensor]:
+    output = {}
+    for key, value in batch.items():
+        if isinstance(value, list):
+            output[key] = value[:count]
+        elif torch.is_tensor(value):
+            output[key] = value[:count]
+    return output
 
 
-def build_mixed_visual_batch(
-    train_batch: Dict[str, torch.Tensor],
-    val_batch: Dict[str, torch.Tensor],
-    total_batch_size: int,
+def concat_batches(*batches: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    merged: Dict[str, torch.Tensor] = {}
+    keys = batches[0].keys()
+    for key in keys:
+        values = [batch[key] for batch in batches if key in batch]
+        if not values:
+            continue
+        first = values[0]
+        if isinstance(first, list):
+            merged[key] = [item for value in values for item in value]
+        elif torch.is_tensor(first):
+            merged[key] = torch.cat(values, dim=0)
+    return merged
+
+
+def build_sample_batch(
+    train_dataset: FontImageDataset,
+    val_dataset: FontImageDataset | None,
+    *,
+    device: torch.device,
+    seed: int,
 ) -> Dict[str, torch.Tensor]:
-    train_bs = int(train_batch["content"].size(0))
-    val_bs = int(val_batch["content"].size(0))
-    target_bs = max(2, int(total_batch_size))
-    n_train = min(max(1, target_bs // 2), train_bs)
-    n_val = min(max(1, target_bs - n_train), val_bs)
-
-    train_cut = {k: v[:n_train] for k, v in train_batch.items()}
-    val_cut = {k: v[:n_val] for k, v in val_batch.items()}
-    mixed: Dict[str, torch.Tensor] = {}
-
-    for k in train_cut:
-        if k not in val_cut:
-            continue
-        t = train_cut[k]
-        v = val_cut[k]
-        if not (torch.is_tensor(t) and torch.is_tensor(v)):
-            continue
-        mixed[k] = torch.cat([t, v], dim=0)
-
-    mixed["viz_split_flag"] = torch.cat(
-        [
-            torch.ones((n_train,), dtype=torch.long),
-            torch.zeros((n_val,), dtype=torch.long),
-        ],
-        dim=0,
+    seen_count = min(4, len(train_dataset.font_names))
+    seen_loader = build_dataloader(
+        train_dataset,
+        batch_size=max(1, seen_count),
+        num_workers=0,
+        device=device,
+        seed=seed,
+        use_unique_font_batches=True,
+        shuffle=False,
     )
+    seen_batch = slice_batch(next(iter(seen_loader)), seen_count)
+    if val_dataset is None or len(val_dataset.font_names) == 0:
+        return seen_batch
 
-    if "content" not in mixed:
-        raise RuntimeError("failed to build mixed visualization batch: missing content tensor")
-    return mixed
+    unseen_count = min(4, len(val_dataset.font_names))
+    unseen_loader = build_dataloader(
+        val_dataset,
+        batch_size=max(1, unseen_count),
+        num_workers=0,
+        device=device,
+        seed=seed + 1000,
+        use_unique_font_batches=True,
+        shuffle=False,
+    )
+    unseen_batch = slice_batch(next(iter(unseen_loader)), unseen_count)
+    return concat_batches(seen_batch, unseen_batch)
+
+
+def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
+    content_cross_attn_layers = int(args.content_cross_attn_layers)
+    if content_cross_attn_layers <= 0:
+        content_cross_attn_layers = math.ceil(int(args.dit_depth) * 2 / 3)
+    return SourcePartRefDiT(
+        in_channels=1,
+        image_size=int(args.image_size),
+        latent_channels=int(args.latent_channels),
+        latent_size=int(args.latent_size),
+        encoder_patch_size=int(args.encoder_patch_size),
+        encoder_hidden_dim=int(args.encoder_hidden_dim),
+        encoder_depth=int(args.encoder_depth),
+        encoder_heads=int(args.encoder_heads),
+        dit_hidden_dim=int(args.dit_hidden_dim),
+        dit_depth=int(args.dit_depth),
+        dit_heads=int(args.dit_heads),
+        dit_mlp_ratio=float(args.dit_mlp_ratio),
+        local_style_tokens_per_ref=int(args.local_style_tokens_per_ref),
+        content_cross_attn_layers=content_cross_attn_layers,
+        style_cross_attn_every_n_layers=int(args.style_cross_attn_every_n_layers),
+        contrastive_proj_dim=int(args.contrastive_proj_dim),
+    )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--stage", type=str, default="diffusion", choices=["vae", "style", "diffusion"])
     parser.add_argument("--data-root", type=Path, default=Path("."))
-    parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch", type=int, default=32)
-    parser.add_argument("--image-size", type=int, default=256)
-    parser.add_argument("--num-workers", type=int, default=8)
-    parser.add_argument("--prefetch-factor", type=int, default=2)
-    parser.add_argument("--device", type=str, default="cuda:0")
+    parser.add_argument("--save-dir", type=Path, default=Path("checkpoints"))
+    parser.add_argument("--resume", type=Path, default=None)
+    parser.add_argument("--vae-checkpoint", type=Path, default=None)
+    parser.add_argument("--style-checkpoint", type=Path, default=None)
     parser.add_argument(
-        "--gradient-checkpointing",
+        "--train-vae-jointly",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Enable UNet gradient checkpointing (default: disabled).",
-    )
-
-    parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--trainer", type=str, default="diffusion", choices=["diffusion", "flow_matching"])
-    parser.add_argument("--lambda-fm", type=float, default=1.0)
-    parser.add_argument("--lambda-diff", type=float, default=1.0)
-    parser.add_argument("--lambda-nce", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_nce"]))
-    parser.add_argument("--lambda-slot-nce", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_slot_nce"]))
-    parser.add_argument("--lambda-cons", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_cons"]))
-    parser.add_argument("--lambda-div", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_div"]))
-    parser.add_argument("--lambda-proxy-low", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_proxy_low"]))
-    parser.add_argument("--lambda-proxy-mid", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_proxy_mid"]))
-    parser.add_argument("--lambda-proxy-high", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_proxy_high"]))
-    parser.add_argument("--lambda-attn-sep", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_attn_sep"]))
-    parser.add_argument("--lambda-attn-order", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_attn_order"]))
-    parser.add_argument("--lambda-attn-role", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_attn_role"]))
-    parser.add_argument("--lambda-route-sparse", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_route_sparse"]))
-    parser.add_argument("--lambda-route-balance", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_route_balance"]))
-    parser.add_argument("--lambda-route-div", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_route_div"]))
-    parser.add_argument("--lambda-route-gate", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_route_gate"]))
-    parser.add_argument("--lambda-ref-sparse", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_ref_sparse"]))
-    parser.add_argument("--lambda-ref-balance", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_ref_balance"]))
-    parser.add_argument("--lambda-ref-div", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["lambda_ref_div"]))
-    parser.add_argument("--style-nce-temp", type=float, default=0.07)
-    parser.add_argument("--aux-loss-warmup-steps", type=int, default=int(STYLE_ONLY_MAIN_DEFAULTS["aux_loss_warmup_steps"]))
-    parser.add_argument("--attn-overlap-margin", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["attn_overlap_margin"]))
-    parser.add_argument("--attn-entropy-gap", type=float, default=float(STYLE_ONLY_MAIN_DEFAULTS["attn_entropy_gap"]))
-    parser.add_argument(
-        "--style-memory-mid-count",
-        type=int,
-        default=int(STYLE_ONLY_MAIN_DEFAULTS["style_memory_mid_count"]),
+        help="Only used in diffusion stage. If false, a pretrained VAE checkpoint is required.",
     )
     parser.add_argument(
-        "--style-memory-up16-count",
-        type=int,
-        default=int(STYLE_ONLY_MAIN_DEFAULTS["style_memory_up16_count"]),
-    )
-    parser.add_argument(
-        "--style-memory-up32-count",
-        type=int,
-        default=int(STYLE_ONLY_MAIN_DEFAULTS["style_memory_up32_count"]),
-    )
-    parser.add_argument(
-        "--style-memory-mid-pool-hw",
-        type=int,
-        default=int(STYLE_ONLY_MAIN_DEFAULTS["style_memory_mid_pool_hw"]),
-    )
-    parser.add_argument(
-        "--style-memory-up16-pool-hw",
-        type=int,
-        default=int(STYLE_ONLY_MAIN_DEFAULTS["style_memory_up16_pool_hw"]),
-    )
-    parser.add_argument(
-        "--style-memory-up32-pool-hw",
-        type=int,
-        default=int(STYLE_ONLY_MAIN_DEFAULTS["style_memory_up32_pool_hw"]),
-    )
-    parser.add_argument(
-        "--content-query-mid-count",
-        type=int,
-        default=int(STYLE_ONLY_MAIN_DEFAULTS["content_query_mid_count"]),
-    )
-    parser.add_argument(
-        "--content-query-up16-count",
-        type=int,
-        default=int(STYLE_ONLY_MAIN_DEFAULTS["content_query_up16_count"]),
-    )
-    parser.add_argument(
-        "--content-query-up32-count",
-        type=int,
-        default=int(STYLE_ONLY_MAIN_DEFAULTS["content_query_up32_count"]),
-    )
-    parser.add_argument(
-        "--adaptive-style-routing",
+        "--train-style-jointly",
         action=argparse.BooleanOptionalAction,
-        default=bool(STYLE_ONLY_MAIN_DEFAULTS["adaptive_style_routing"]),
-        help="Enable adaptive all-to-all routing from each style injection site to all style memories.",
-    )
-    parser.add_argument(
-        "--router-temperature",
-        type=float,
-        default=float(STYLE_ONLY_MAIN_DEFAULTS["router_temperature"]),
-        help="Softmax temperature for adaptive style routing.",
-    )
-    parser.add_argument(
-        "--reference-topk",
-        type=int,
-        default=int(STYLE_ONLY_MAIN_DEFAULTS["reference_topk"]),
-        help="Top-k references kept by the reference-aware router. <=0 keeps all references.",
-    )
-    parser.add_argument("--diffusion-steps", type=int, default=1000)
-    parser.add_argument(
-        "--total-steps",
-        type=int,
-        default=0,
-        help="Total optimizer-update steps for LR scheduling. <=0 means epochs*steps_per_epoch/grad_accum.",
-    )
-    parser.add_argument(
-        "--lr-warmup-steps",
-        type=int,
-        default=5000,
-        help="Linear warmup steps before cosine decay.",
-    )
-    parser.add_argument(
-        "--lr-min-scale",
-        type=float,
-        default=1e-3,
-        help="Minimum LR multiplier at the end of cosine decay.",
+        default=False,
+        help="Only used in diffusion stage. If false, a pretrained style checkpoint is required.",
     )
 
-    parser.add_argument("--max-fonts", type=int, default=0)
-    parser.add_argument(
-        "--val-ratio",
-        type=float,
-        default=0.1,
-        help="Validation split ratio by font identity. 0 disables val split.",
-    )
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--batch", type=int, default=32)
+    parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument("--device", type=str, default="cuda:1")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument(
-        "--teacher-line",
-        type=str,
-        default="part_only",
-        choices=["baseline", "part_only", "style_only"],
-        help="Teacher line to train.",
-    )
-    parser.add_argument(
-        "--conditioning-profile",
-        type=str,
-        default=None,
-        choices=["baseline", "parts_vector_only", "part_only", "style_only"],
-        help="Legacy alias; if set it overrides --teacher-line.",
-    )
+    parser.add_argument("--font-split", type=str, default="train", choices=["train", "test", "all"])
+    parser.add_argument("--font-split-seed", type=int, default=None)
+    parser.add_argument("--font-train-ratio", type=float, default=0.9)
+    parser.add_argument("--max-fonts", type=int, default=0)
     parser.add_argument("--style-ref-count", type=int, default=8)
-    parser.add_argument(
-        "--reference-cluster-json",
-        type=Path,
-        default=Path("CharacterData/reference_cluster.json"),
-    )
-    parser.add_argument(
-        "--style-ref-drop-prob",
-        type=float,
-        default=float(STYLE_ONLY_MAIN_DEFAULTS["style_ref_drop_prob"]),
-        help="Reference dropout probability in main training (1.md suggests 0.1~0.2).",
-    )
-    parser.add_argument(
-        "--style-ref-drop-min-keep",
-        type=int,
-        default=int(STYLE_ONLY_MAIN_DEFAULTS["style_ref_drop_min_keep"]),
-        help="Minimum kept references after dropout when style refs are used.",
-    )
-    parser.add_argument(
-        "--style-site-drop-prob",
-        type=float,
-        default=float(STYLE_ONLY_MAIN_DEFAULTS["style_site_drop_prob"]),
-        help="Drop probability for style injection sites during training.",
-    )
-    parser.add_argument(
-        "--style-site-drop-min-keep",
-        type=int,
-        default=int(STYLE_ONLY_MAIN_DEFAULTS["style_site_drop_min_keep"]),
-        help="Minimum kept style injection sites after site dropout.",
-    )
-    parser.add_argument(
-        "--freeze-style-backbone-steps",
-        type=int,
-        default=int(STYLE_ONLY_MAIN_DEFAULTS["freeze_style_backbone_steps"]),
-        help=(
-            "Freeze the entire style backbone until this step, then unfreeze low and high stages together."
-        ),
-    )
-    parser.add_argument(
-        "--style-backbone-lr-scale",
-        type=float,
-        default=float(STYLE_ONLY_MAIN_DEFAULTS["style_backbone_lr_scale"]),
-        help="LR scale applied to the full style backbone parameter group after unfreezing.",
-    )
+    parser.add_argument("--image-size", type=int, default=128)
 
-    parser.add_argument("--sample-every-steps", type=int, default=300)
-    parser.add_argument("--sample-solver", type=str, default="dpm", choices=["dpm", "ddim"])
-    parser.add_argument("--sample-inference-steps", type=int, default=20)
+    parser.add_argument("--latent-channels", type=int, default=4)
+    parser.add_argument("--latent-size", type=int, default=16)
+    parser.add_argument("--encoder-patch-size", type=int, default=8)
+    parser.add_argument("--encoder-hidden-dim", type=int, default=512)
+    parser.add_argument("--encoder-depth", type=int, default=4)
+    parser.add_argument("--encoder-heads", type=int, default=8)
+    parser.add_argument("--dit-hidden-dim", type=int, default=512)
+    parser.add_argument("--dit-depth", type=int, default=12)
+    parser.add_argument("--dit-heads", type=int, default=8)
+    parser.add_argument("--dit-mlp-ratio", type=float, default=4.0)
+    parser.add_argument("--local-style-tokens-per-ref", type=int, default=8)
+    parser.add_argument("--content-cross-attn-layers", type=int, default=-1)
+    parser.add_argument("--style-cross-attn-every-n-layers", type=int, default=2)
+    parser.add_argument("--contrastive-proj-dim", type=int, default=128)
+
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--timesteps", type=int, default=1000)
+    parser.add_argument("--total-steps", type=int, default=0)
     parser.add_argument("--log-every-steps", type=int, default=100)
-    parser.add_argument("--detailed-log", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--save-every-epochs", type=int, default=0)
-    parser.add_argument("--save-every-steps", type=int, default=5000)
-    parser.add_argument("--save-dir", type=str, default="checkpoints")
-    parser.add_argument("--split-save-components", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--val-every-steps", type=int, default=100)
+    parser.add_argument("--val-max-batches", type=int, default=16)
+    parser.add_argument("--save-every-steps", type=int, default=0)
+    parser.add_argument("--sample-every-steps", type=int, default=0)
 
-    parser.add_argument("--style-start-channel", type=int, default=16)
-    parser.add_argument("--style-token-dim", type=int, default=256)
-    parser.add_argument("--style-token-count", type=int, default=3, help="Fixed at 3 (low/mid/high).")
-    parser.add_argument("--pretrained-style-encoder", type=str, default=None)
+    parser.add_argument("--vae-lambda-rec", type=float, default=1.0)
+    parser.add_argument("--vae-lambda-perc", type=float, default=0.1)
+    parser.add_argument("--vae-lambda-kl", type=float, default=1e-4)
 
-    parser.add_argument("--resume", type=str, default=None)
-    parser.add_argument(
-        "--grad-accum",
-        type=int,
-        default=1,
-        help="Gradient accumulation steps. Effective batch = batch * grad_accum.",
-    )
+    parser.add_argument("--diff-lambda-diff", type=float, default=1.0)
+    parser.add_argument("--diff-lambda-rec", type=float, default=0.0)
+    parser.add_argument("--diff-lambda-perc", type=float, default=0.0)
+    parser.add_argument("--diff-lambda-kl", type=float, default=0.0)
+    parser.add_argument("--diff-lambda-ctr", type=float, default=0.0)
+    parser.add_argument("--contrastive-temperature", type=float, default=0.1)
+    parser.add_argument("--contrastive-warmup-steps", type=int, default=5000)
+    parser.add_argument("--style-lr-scale", type=float, default=0.1)
+    parser.add_argument("--style-unfreeze-step", type=int, default=5000)
+    parser.add_argument("--style-unfreeze-last-encoder-blocks", type=int, default=1)
     args = parser.parse_args()
-
-    active_mode = normalize_conditioning_mode(
-        args.conditioning_profile if args.conditioning_profile is not None else args.teacher_line
-    )
-    use_style_image = mode_uses_style(active_mode)
 
     set_global_seed(int(args.seed))
     device = resolve_device(args.device)
-    print(f"[train] device={device} precision=bf16 seed={int(args.seed)}")
+    print(f"[train] stage={args.stage} device={device} seed={int(args.seed)}")
+    font_split_seed = int(args.seed) if args.font_split_seed is None else int(args.font_split_seed)
+    log_every_steps = max(1, int(args.log_every_steps))
+    val_every_steps = max(1, int(args.val_every_steps))
+    save_every_steps = int(args.save_every_steps)
+    if save_every_steps <= 0:
+        save_every_steps = 1000 if args.stage in {"vae", "style"} else 5000
+    sample_every_steps = int(args.sample_every_steps)
+    if sample_every_steps <= 0:
+        sample_every_steps = 300 if args.stage == "diffusion" else 0
 
-    run_cfg: Dict[str, Any] = {k: _to_jsonable(v) for k, v in vars(args).items()}
-    run_cfg.update(
-        {
-            "stage": "teacher_only",
-            "active_conditioning_mode": active_mode,
-            "use_style_image": bool(use_style_image),
-            "use_part_bank": False,
-            "adaptive_style_routing": bool(args.adaptive_style_routing),
-            "adaptive_route_sources": ["mid", "up_16", "up_32"],
-            "fixed_style_transformer_scales": list(FIXED_STYLE_TRANSFORMER_SCALES),
-            "fixed_style_local_mod_scales": list(FIXED_STYLE_LOCAL_MOD_SCALES),
-            "fixed_style_token_consumers": {
-                k: list(v) for k, v in FIXED_STYLE_TOKEN_CONSUMER_MAP.items()
-            },
-            "fixed_style_site_arch": dict(FIXED_STYLE_SITE_ARCH),
-        }
-    )
-
-    glyph_transform = build_base_glyph_transform(image_size=128)
-    style_transform = build_style_reference_transform(image_size=128)
-
+    include_positive_style = args.stage == "style" or float(args.diff_lambda_ctr) > 0.0
+    glyph_transform = build_base_glyph_transform(image_size=int(args.image_size))
     dataset = FontImageDataset(
         project_root=args.data_root,
-        max_fonts=args.max_fonts,
-        use_style_image=bool(use_style_image),
-        use_part_bank=False,
+        max_fonts=int(args.max_fonts),
+        style_ref_count=int(args.style_ref_count),
+        include_positive_style=include_positive_style,
         random_seed=int(args.seed),
+        font_split=str(args.font_split),
+        font_split_seed=font_split_seed,
+        font_train_ratio=float(args.font_train_ratio),
         transform=glyph_transform,
-        style_transform=style_transform,
-        cache_style_image=False,
-        style_ref_count=(int(args.style_ref_count) if use_style_image else 1),
-        reference_cluster_json=args.reference_cluster_json,
+        style_transform=glyph_transform,
     )
-    run_cfg.update(
-        {
-            "style_ref_count_active": int(args.style_ref_count) if use_style_image else 0,
-            "style_transform": "resize_only",
-            "cache_style_image": False,
-            "style_ref_drop_prob_active": float(args.style_ref_drop_prob) if use_style_image else 0.0,
-            "style_ref_drop_min_keep_active": int(args.style_ref_drop_min_keep) if use_style_image else 0,
-            "style_site_drop_prob_active": float(args.style_site_drop_prob) if use_style_image else 0.0,
-            "style_site_drop_min_keep_active": int(args.style_site_drop_min_keep) if use_style_image else 0,
-        }
-    )
-
-    train_indices, val_indices, split_stats = split_indices_by_font(
-        dataset=dataset,
-        val_ratio=float(args.val_ratio),
+    val_dataset = None
+    if str(args.font_split) == "train":
+        val_dataset = FontImageDataset(
+            project_root=args.data_root,
+            max_fonts=int(args.max_fonts),
+            style_ref_count=int(args.style_ref_count),
+            include_positive_style=include_positive_style,
+            random_seed=int(args.seed),
+            font_split="test",
+            font_split_seed=font_split_seed,
+            font_train_ratio=float(args.font_train_ratio),
+            transform=glyph_transform,
+            style_transform=glyph_transform,
+        )
+    use_unique_font_batches = args.stage == "style"
+    dataloader = build_dataloader(
+        dataset,
+        batch_size=int(args.batch),
+        num_workers=int(args.num_workers),
+        device=device,
         seed=int(args.seed),
+        use_unique_font_batches=use_unique_font_batches,
+        shuffle=True,
     )
-    train_subset = Subset(dataset, train_indices)
-    val_subset = Subset(dataset, val_indices) if val_indices else None
-    print(
-        "[train] split=by-font "
-        f"train_fonts={split_stats['train_fonts']} val_fonts={split_stats['val_fonts']} "
-        f"train_samples={len(train_indices)} val_samples={len(val_indices)}"
-    )
-    run_cfg.update(
-        {
-            "split_strategy": "by_font",
-            "val_ratio": float(args.val_ratio),
-            "split_total_fonts": int(split_stats["total_fonts"]),
-            "split_train_fonts": int(split_stats["train_fonts"]),
-            "split_val_fonts": int(split_stats["val_fonts"]),
-            "split_train_samples": int(len(train_indices)),
-            "split_val_samples": int(len(val_indices)),
-        }
-    )
-
-    loader_gen = torch.Generator()
-    loader_gen.manual_seed(int(args.seed))
-
-    target_steps_per_epoch = max(1, len(train_indices) // max(1, int(args.batch)))
-    loader_kwargs: Dict[str, Any] = {
-        "dataset": train_subset,
-        "num_workers": int(args.num_workers),
-        "pin_memory": True,
-        "collate_fn": collate_fn,
-    }
-    if use_style_image:
-        train_batch_sampler = NoReplacementFontBatchSampler(
-            subset=train_subset,
+    val_dataloader = None
+    if val_dataset is not None:
+        val_dataloader = build_dataloader(
+            val_dataset,
             batch_size=int(args.batch),
-            seed=int(args.seed) + 101,
-            steps_per_epoch=target_steps_per_epoch,
-            shuffle=True,
-        )
-        loader_kwargs["batch_sampler"] = train_batch_sampler
-    else:
-        loader_kwargs["batch_size"] = int(args.batch)
-        loader_kwargs["shuffle"] = True
-        loader_kwargs["generator"] = loader_gen
-    if int(args.num_workers) > 0:
-        loader_kwargs["worker_init_fn"] = _seed_worker
-    if int(args.num_workers) > 0 and int(args.prefetch_factor) > 0:
-        loader_kwargs["prefetch_factor"] = int(args.prefetch_factor)
-    train_loader = DataLoader(**loader_kwargs)
-    run_cfg.update(
-        {
-            "train_batch_sampler": "no_replacement_font" if use_style_image else "random_sample_shuffle",
-            "train_steps_per_epoch_target": int(target_steps_per_epoch),
-        }
-    )
-
-    val_loader = None
-    if val_subset is not None and len(val_subset) > 0:
-        val_loader_kwargs: Dict[str, Any] = {
-            "dataset": val_subset,
-            "batch_size": min(int(args.batch), len(val_subset)),
-            "shuffle": False,
-            "num_workers": int(args.num_workers),
-            "pin_memory": True,
-            "collate_fn": collate_fn,
-        }
-        if int(args.num_workers) > 0:
-            val_loader_kwargs["worker_init_fn"] = _seed_worker
-        if int(args.num_workers) > 0 and int(args.prefetch_factor) > 0:
-            val_loader_kwargs["prefetch_factor"] = int(args.prefetch_factor)
-        val_loader = DataLoader(**val_loader_kwargs)
-
-    steps_per_epoch = len(train_loader)
-    total_train_steps = steps_per_epoch * args.epochs
-    if total_train_steps <= 0:
-        raise ValueError(f"Invalid steps: steps_per_epoch={steps_per_epoch}, epochs={args.epochs}")
-
-    effective_train_steps = total_train_steps // max(1, int(args.grad_accum))
-    total_steps = args.total_steps if args.total_steps > 0 else effective_train_steps
-    print(
-        "[train] "
-        f"mode={active_mode} style_attn={FIXED_STYLE_TRANSFORMER_SCALES} "
-        f"style_local_mod={FIXED_STYLE_LOCAL_MOD_SCALES} "
-        f"adaptive_route={bool(args.adaptive_style_routing)} route_temp={float(args.router_temperature):.3f} "
-        f"style_memory=(mid:{int(args.style_memory_mid_count)},up16:{int(args.style_memory_up16_count)},up32:{int(args.style_memory_up32_count)}) "
-        f"content_queries=(mid:{int(args.content_query_mid_count)},up16:{int(args.content_query_up16_count)},up32:{int(args.content_query_up32_count)}) "
-        f"steps_per_epoch={steps_per_epoch} total_steps={total_steps} grad_accum={args.grad_accum} "
-        f"lr_warmup_steps={int(args.lr_warmup_steps)} lr_min_scale={float(args.lr_min_scale):g}"
-    )
-
-    model = SourcePartRefUNet(
-        in_channels=1,
-        image_size=args.image_size,
-        content_start_channel=64,
-        style_start_channel=int(args.style_start_channel),
-        unet_channels=(64, 128, 256, 512),
-        content_encoder_downsample_size=4,
-        channel_attn=True,
-        conditioning_profile=active_mode,
-        style_token_dim=int(args.style_token_dim),
-        style_token_count=int(args.style_token_count),
-        style_memory_mid_count=int(args.style_memory_mid_count),
-        style_memory_up16_count=int(args.style_memory_up16_count),
-        style_memory_up32_count=int(args.style_memory_up32_count),
-        style_memory_mid_pool_hw=int(args.style_memory_mid_pool_hw),
-        style_memory_up16_pool_hw=int(args.style_memory_up16_pool_hw),
-        style_memory_up32_pool_hw=int(args.style_memory_up32_pool_hw),
-        content_query_mid_count=int(args.content_query_mid_count),
-        content_query_up16_count=int(args.content_query_up16_count),
-        content_query_up32_count=int(args.content_query_up32_count),
-        adaptive_style_routing=bool(args.adaptive_style_routing),
-        router_temperature=float(args.router_temperature),
-        reference_topk=int(args.reference_topk),
-    )
-
-    _try_enable_xformers(model)
-    if bool(args.gradient_checkpointing):
-        _try_enable_gradient_checkpointing(model)
-    else:
-        print("[train] gradient checkpointing disabled")
-
-    if args.pretrained_style_encoder:
-        model.load_style_pretrained(args.pretrained_style_encoder)
-        print(f"[train] Loaded pretrained style encoder from {args.pretrained_style_encoder}")
-
-    trainer_cls = DiffusionTrainer if args.trainer == "diffusion" else FlowMatchingTrainer
-    trainer_kwargs: Dict[str, Any] = {
-        "lr": args.lr,
-        "lambda_nce": float(args.lambda_nce),
-        "lambda_slot_nce": float(args.lambda_slot_nce),
-        "lambda_cons": float(args.lambda_cons),
-        "lambda_div": float(args.lambda_div),
-        "lambda_proxy_low": float(args.lambda_proxy_low),
-        "lambda_proxy_mid": float(args.lambda_proxy_mid),
-        "lambda_proxy_high": float(args.lambda_proxy_high),
-        "lambda_attn_sep": float(args.lambda_attn_sep),
-        "lambda_attn_order": float(args.lambda_attn_order),
-        "lambda_attn_role": float(args.lambda_attn_role),
-        "lambda_route_sparse": float(args.lambda_route_sparse),
-        "lambda_route_balance": float(args.lambda_route_balance),
-        "lambda_route_div": float(args.lambda_route_div),
-        "lambda_route_gate": float(args.lambda_route_gate),
-        "lambda_ref_sparse": float(args.lambda_ref_sparse),
-        "lambda_ref_balance": float(args.lambda_ref_balance),
-        "lambda_ref_div": float(args.lambda_ref_div),
-        "nce_temperature": float(args.style_nce_temp),
-        "aux_loss_warmup_steps": int(args.aux_loss_warmup_steps),
-        "attn_overlap_margin": float(args.attn_overlap_margin),
-        "attn_entropy_gap": float(args.attn_entropy_gap),
-        "T": args.diffusion_steps,
-        "total_steps": total_steps,
-        "lr_warmup_steps": int(args.lr_warmup_steps),
-        "lr_min_scale": float(args.lr_min_scale),
-        "save_every_steps": (args.save_every_steps if args.save_every_steps > 0 else None),
-        "log_every_steps": (args.log_every_steps if args.log_every_steps > 0 else None),
-        "detailed_log": args.detailed_log,
-        "grad_accum_steps": max(1, int(args.grad_accum)),
-        "conditioning_mode": active_mode,
-        "part_drop_prob": 0.0,
-        "style_ref_drop_prob": float(args.style_ref_drop_prob) if use_style_image else 0.0,
-        "style_ref_drop_min_keep": int(args.style_ref_drop_min_keep) if use_style_image else 1,
-        "style_site_drop_prob": float(args.style_site_drop_prob) if use_style_image else 0.0,
-        "style_site_drop_min_keep": int(args.style_site_drop_min_keep) if use_style_image else 1,
-        "freeze_part_encoder_steps": 0,
-        "freeze_style_backbone_steps": int(args.freeze_style_backbone_steps) if use_style_image else 0,
-        "style_backbone_lr_scale": float(args.style_backbone_lr_scale),
-    }
-    if args.trainer == "flow_matching":
-        trainer_kwargs["lambda_fm"] = args.lambda_fm
-    else:
-        trainer_kwargs["lambda_mse"] = args.lambda_diff
-
-    trainer = trainer_cls(model, device, **trainer_kwargs)
-    trainer.sample_solver = str(args.sample_solver).lower()
-    trainer.sample_inference_steps = int(args.sample_inference_steps)
-    trainer.save_split_components = bool(args.split_save_components)
-
-    if args.resume:
-        trainer.load(args.resume)
-        print(f"Resumed from {args.resume}")
-
-    try:
-        if args.trainer == "diffusion" and val_loader is not None:
-            train_viz_batch = next(iter(train_loader))
-            val_viz_batch = next(iter(val_loader))
-            fixed_batch = build_mixed_visual_batch(
-                train_batch=train_viz_batch,
-                val_batch=val_viz_batch,
-                total_batch_size=int(args.batch),
-            )
-        else:
-            fixed_batch = next(iter(train_loader))
-    except Exception as e:
-        print(
-            "[train] failed to fetch fixed sample batch from selected DataLoader; "
-            f"fallback to single-process loader. reason={type(e).__name__}: {e}"
-        )
-        fallback_dataset = val_subset if (args.trainer == "diffusion" and val_subset is not None) else train_subset
-        sample_loader = DataLoader(
-            fallback_dataset,
-            batch_size=min(int(args.batch), 8),
-            shuffle=False,
             num_workers=int(args.num_workers),
-            pin_memory=True,
-            collate_fn=collate_fn,
+            device=device,
+            seed=int(args.seed) + 1,
+            use_unique_font_batches=use_unique_font_batches,
+            shuffle=False,
         )
-        fixed_batch = next(iter(sample_loader))
+    if use_unique_font_batches:
+        print(f"[train] using unique-font batch sampler for contrastive training, batch={int(args.batch)}")
 
-    trainer.sample_every_steps = args.sample_every_steps
-    trainer.sample_batch = fixed_batch
-    trainer.sample_dir = Path(args.save_dir) / "samples"
+    total_steps = int(args.total_steps)
+    if total_steps <= 0:
+        if args.stage in {"vae", "style"}:
+            total_steps = 5000
+        else:
+            total_steps = max(1, len(dataloader) * int(args.epochs))
+    resolved_content_cross_attn_layers = int(args.content_cross_attn_layers)
+    if resolved_content_cross_attn_layers <= 0:
+        resolved_content_cross_attn_layers = math.ceil(int(args.dit_depth) * 2 / 3)
+    style_unfreeze_step = int(args.style_unfreeze_step)
+    if args.stage == "diffusion" and style_unfreeze_step < 0:
+        style_unfreeze_step = 5000
+    resolved_epochs = max(1, int(args.epochs))
+    if len(dataloader) > 0:
+        resolved_epochs = max(resolved_epochs, math.ceil(total_steps / len(dataloader)))
 
-    save_dir_path = Path(args.save_dir)
-    save_dir_path.mkdir(parents=True, exist_ok=True)
-    (save_dir_path / "train_run_config.json").write_text(
-        json.dumps(run_cfg, ensure_ascii=False, indent=2, sort_keys=True),
+    model = build_model(args)
+
+    if args.stage == "diffusion" and args.resume is None and not bool(args.train_vae_jointly) and args.vae_checkpoint is None:
+        raise ValueError("Diffusion stage requires --vae-checkpoint unless --train-vae-jointly is enabled.")
+    if args.stage == "diffusion" and args.resume is None and not bool(args.train_style_jointly) and args.style_checkpoint is None:
+        raise ValueError("Diffusion stage requires --style-checkpoint unless --train-style-jointly is enabled.")
+    if args.vae_checkpoint is not None:
+        model.load_vae_checkpoint(args.vae_checkpoint)
+        print(f"[train] loaded VAE checkpoint: {args.vae_checkpoint}")
+    if args.style_checkpoint is not None and args.resume is None:
+        model.load_style_checkpoint(args.style_checkpoint)
+        print(f"[train] loaded style checkpoint: {args.style_checkpoint}")
+
+    if args.stage == "vae":
+        trainer = VAETrainer(
+            model,
+            device,
+            lr=float(args.lr),
+            total_steps=total_steps,
+            lambda_rec=float(args.vae_lambda_rec),
+            lambda_perc=float(args.vae_lambda_perc),
+            lambda_kl=float(args.vae_lambda_kl),
+            log_every_steps=log_every_steps,
+            save_every_steps=save_every_steps,
+            val_every_steps=val_every_steps,
+            val_max_batches=int(args.val_max_batches),
+        )
+    elif args.stage == "style":
+        trainer = StylePretrainTrainer(
+            model,
+            device,
+            lr=float(args.lr),
+            total_steps=total_steps,
+            contrastive_temperature=float(args.contrastive_temperature),
+            log_every_steps=log_every_steps,
+            save_every_steps=save_every_steps,
+            val_every_steps=val_every_steps,
+            val_max_batches=int(args.val_max_batches),
+        )
+    else:
+        trainer = DiffusionTrainer(
+            model,
+            device,
+            lr=float(args.lr),
+            timesteps=int(args.timesteps),
+            total_steps=total_steps,
+            lambda_diff=float(args.diff_lambda_diff),
+            lambda_rec=float(args.diff_lambda_rec),
+            lambda_perc=float(args.diff_lambda_perc),
+            lambda_kl=float(args.diff_lambda_kl),
+            lambda_ctr=float(args.diff_lambda_ctr),
+            contrastive_temperature=float(args.contrastive_temperature),
+            contrastive_warmup_steps=int(args.contrastive_warmup_steps),
+            style_lr_scale=float(args.style_lr_scale),
+            style_unfreeze_step=style_unfreeze_step,
+            style_unfreeze_last_encoder_blocks=int(args.style_unfreeze_last_encoder_blocks),
+            freeze_vae=not bool(args.train_vae_jointly),
+            freeze_style=not bool(args.train_style_jointly),
+            log_every_steps=log_every_steps,
+            save_every_steps=save_every_steps,
+            val_every_steps=val_every_steps,
+            val_max_batches=int(args.val_max_batches),
+        )
+
+    if args.resume is not None:
+        trainer.load(args.resume)
+        print(f"[train] resumed from {args.resume}")
+
+    first_batch = next(iter(dataloader))
+    trainer.sample_batch = (
+        build_sample_batch(dataset, val_dataset, device=device, seed=int(args.seed))
+        if args.stage == "diffusion"
+        else first_batch
+    )
+    trainer.sample_every_steps = sample_every_steps if sample_every_steps > 0 else None
+    trainer.sample_dir = args.save_dir / "samples"
+
+    run_config = {key: (str(value) if isinstance(value, Path) else value) for key, value in vars(args).items()}
+    run_config["resolved_device"] = str(device)
+    run_config["resolved_font_split_seed"] = int(font_split_seed)
+    run_config["resolved_log_every_steps"] = int(log_every_steps)
+    run_config["resolved_val_every_steps"] = int(val_every_steps)
+    run_config["resolved_save_every_steps"] = int(save_every_steps)
+    run_config["resolved_sample_every_steps"] = int(sample_every_steps)
+    run_config["resolved_epochs"] = int(resolved_epochs)
+    run_config["resolved_content_cross_attn_layers"] = int(resolved_content_cross_attn_layers)
+    run_config["resolved_style_unfreeze_step"] = int(style_unfreeze_step)
+    run_config["train_fonts"] = int(len(dataset.font_names))
+    run_config["train_samples"] = int(len(dataset.samples))
+    run_config["val_fonts"] = 0 if val_dataset is None else int(len(val_dataset.font_names))
+    run_config["val_samples"] = 0 if val_dataset is None else int(len(val_dataset.samples))
+    run_config["computed_total_steps"] = int(total_steps)
+    args.save_dir.mkdir(parents=True, exist_ok=True)
+    (args.save_dir / "train_config.json").write_text(
+        json.dumps(run_config, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
 
-    trainer.fit(
-        train_loader,
-        epochs=args.epochs,
-        save_every=(args.save_every_epochs if args.save_every_epochs > 0 else None),
-        save_dir=args.save_dir,
-    )
+    trainer.fit(dataloader, epochs=resolved_epochs, save_dir=args.save_dir, val_dataloader=val_dataloader)
 
 
 if __name__ == "__main__":

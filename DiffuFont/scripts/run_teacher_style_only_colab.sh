@@ -4,157 +4,221 @@ set -euo pipefail
 ROOT="/scratch/yangximing/code/ass5-exp6/DiffuFont"
 PYTHON_BIN="/scratch/yangximing/miniconda3/envs/sg3/bin/python"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
 RUN_MODE="daemon"
 LOG_FILE=""
 PID_FILE=""
+SAVE_DIR="checkpoints/diffusion_$(date '+%Y%m%d_%H%M%S')"
+
 RESUME_CKPT=""
-SAVE_DIR_OVERRIDE=""
-PRETRAIN_STYLE_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/style_encoder_pretrain_midmem_5000.pt"
+VAE_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/vae_pretrain_b32_r8_s5000_20260317_202946/best.pt"
+STYLE_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/style_pretrain_b32_r8_s5000_20260317_194504/best.pt"
 DEVICE_ARG="cuda:1"
+SEED=42
+FONT_SPLIT="train"
+FONT_SPLIT_SEED=""
+FONT_TRAIN_RATIO="0.9"
+
 TARGET_STEPS=100000
+SAVE_EVERY=5000
+SAMPLE_EVERY=300
+LR="2e-4"
+
 STYLE_REF_COUNT=8
-ROUTER_TEMPERATURE="1.0"
-REFERENCE_TOPK="3"
-LAMBDA_PROXY_LOW="0.05"
-LAMBDA_PROXY_MID="0.05"
-LAMBDA_PROXY_HIGH="0.05"
-LAMBDA_ATTN_SEP="0.01"
-LAMBDA_ATTN_ORDER="0.0"
-LAMBDA_ATTN_ROLE="0.0"
-LAMBDA_ROUTE_SPARSE="0.002"
-LAMBDA_ROUTE_BALANCE="0.005"
-LAMBDA_ROUTE_DIV="0.01"
-LAMBDA_ROUTE_GATE="0.0"
-LAMBDA_REF_SPARSE="0.002"
-LAMBDA_REF_BALANCE="0.002"
-LAMBDA_REF_DIV="0.01"
+BATCH_SIZE=64
+NUM_WORKERS=8
+MAX_FONTS=0
+IMAGE_SIZE=128
+
+LATENT_CHANNELS=4
+LATENT_SIZE=16
+ENCODER_PATCH_SIZE=8
+ENCODER_HIDDEN_DIM=512
+ENCODER_DEPTH=4
+ENCODER_HEADS=8
+DIT_HIDDEN_DIM=512
+DIT_DEPTH=12
+DIT_HEADS=8
+DIT_MLP_RATIO="4.0"
+
+TRAIN_VAE_JOINTLY="0"
+TRAIN_STYLE_JOINTLY="0"
+EXTRA_TRAIN_ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --foreground) RUN_MODE="foreground"; shift ;;
-    --daemon)     RUN_MODE="daemon";     shift ;;
-    --log-file)   LOG_FILE="${2:?--log-file requires a value}"; shift 2 ;;
-    --pid-file)   PID_FILE="${2:?--pid-file requires a value}"; shift 2 ;;
-    --resume)     RESUME_CKPT="${2:?--resume requires a value}"; shift 2 ;;
-    --save-dir)   SAVE_DIR_OVERRIDE="${2:?--save-dir requires a value}"; shift 2 ;;
-    --pretrained-style-encoder) PRETRAIN_STYLE_CKPT="${2:?--pretrained-style-encoder requires a value}"; shift 2 ;;
-    --device)     DEVICE_ARG="${2:?--device requires a value}"; shift 2 ;;
-    -h|--help)
-      echo "Usage: $0 [--foreground|--daemon] [--log-file PATH] [--pid-file PATH] [--resume CKPT] [--save-dir DIR] [--pretrained-style-encoder CKPT] [--device DEV]"
-      exit 0 ;;
-    *) echo "[teacher_style_only] unknown arg: $1" >&2; exit 2 ;;
+    --daemon) RUN_MODE="daemon"; shift ;;
+    --log-file) LOG_FILE="${2:?}"; shift 2 ;;
+    --pid-file) PID_FILE="${2:?}"; shift 2 ;;
+    --save-dir) SAVE_DIR="${2:?}"; shift 2 ;;
+    --resume) RESUME_CKPT="${2:?}"; shift 2 ;;
+    --vae-checkpoint) VAE_CKPT="${2:?}"; shift 2 ;;
+    --style-checkpoint) STYLE_CKPT="${2:?}"; shift 2 ;;
+    --train-vae-jointly) TRAIN_VAE_JOINTLY="1"; shift ;;
+    --train-style-jointly) TRAIN_STYLE_JOINTLY="1"; shift ;;
+    --device) DEVICE_ARG="${2:?}"; shift 2 ;;
+    --seed) SEED="${2:?}"; shift 2 ;;
+    --font-split) FONT_SPLIT="${2:?}"; shift 2 ;;
+    --font-split-seed) FONT_SPLIT_SEED="${2:?}"; shift 2 ;;
+    --font-train-ratio) FONT_TRAIN_RATIO="${2:?}"; shift 2 ;;
+    --target-steps) TARGET_STEPS="${2:?}"; shift 2 ;;
+    --save-every-steps) SAVE_EVERY="${2:?}"; shift 2 ;;
+    --sample-every-steps) SAMPLE_EVERY="${2:?}"; shift 2 ;;
+    --style-ref-count) STYLE_REF_COUNT="${2:?}"; shift 2 ;;
+    --batch) BATCH_SIZE="${2:?}"; shift 2 ;;
+    --num-workers) NUM_WORKERS="${2:?}"; shift 2 ;;
+    --max-fonts) MAX_FONTS="${2:?}"; shift 2 ;;
+    --image-size) IMAGE_SIZE="${2:?}"; shift 2 ;;
+    --latent-channels) LATENT_CHANNELS="${2:?}"; shift 2 ;;
+    --latent-size) LATENT_SIZE="${2:?}"; shift 2 ;;
+    --encoder-patch-size) ENCODER_PATCH_SIZE="${2:?}"; shift 2 ;;
+    --encoder-hidden-dim) ENCODER_HIDDEN_DIM="${2:?}"; shift 2 ;;
+    --encoder-depth) ENCODER_DEPTH="${2:?}"; shift 2 ;;
+    --encoder-heads) ENCODER_HEADS="${2:?}"; shift 2 ;;
+    --dit-hidden-dim) DIT_HIDDEN_DIM="${2:?}"; shift 2 ;;
+    --dit-depth) DIT_DEPTH="${2:?}"; shift 2 ;;
+    --dit-heads) DIT_HEADS="${2:?}"; shift 2 ;;
+    --dit-mlp-ratio) DIT_MLP_RATIO="${2:?}"; shift 2 ;;
+    --) shift; EXTRA_TRAIN_ARGS+=("$@"); break ;;
+    *) EXTRA_TRAIN_ARGS+=("$1"); shift ;;
   esac
 done
 
 cd "${ROOT}"
 mkdir -p logs checkpoints
 
-RUN_TS="$(date '+%Y%m%d_%H%M%S')"
-SAVE_DIR="checkpoints/teacher_style_only_${RUN_TS}"
-if [[ -n "${SAVE_DIR_OVERRIDE}" ]]; then
-  SAVE_DIR="${SAVE_DIR_OVERRIDE}"
-fi
+[[ -z "${LOG_FILE}" ]] && LOG_FILE="logs/$(basename "${SAVE_DIR}").log"
+[[ -z "${PID_FILE}" ]] && PID_FILE="logs/$(basename "${SAVE_DIR}").pid"
 
-[[ -z "${LOG_FILE}" ]] && LOG_FILE="logs/teacher_style_only_${RUN_TS}.log"
-[[ -z "${PID_FILE}" ]] && PID_FILE="logs/teacher_style_only.pid"
 if [[ -n "${RESUME_CKPT}" && ! -f "${RESUME_CKPT}" ]]; then
-  echo "[teacher_style_only] resume checkpoint not found: ${RESUME_CKPT}" >&2
+  exit 2
+fi
+if [[ -n "${VAE_CKPT}" && ! -f "${VAE_CKPT}" ]]; then
+  exit 2
+fi
+if [[ -n "${STYLE_CKPT}" && ! -f "${STYLE_CKPT}" ]]; then
   exit 2
 fi
 
 if [[ "${RUN_MODE}" == "daemon" ]]; then
-  _daemon_args=(--foreground --log-file "${LOG_FILE}" --pid-file "${PID_FILE}")
+  daemon_args=(
+    --foreground
+    --log-file "${LOG_FILE}"
+    --pid-file "${PID_FILE}"
+    --save-dir "${SAVE_DIR}"
+    --device "${DEVICE_ARG}"
+    --seed "${SEED}"
+    --font-split "${FONT_SPLIT}"
+    --font-train-ratio "${FONT_TRAIN_RATIO}"
+    --target-steps "${TARGET_STEPS}"
+    --save-every-steps "${SAVE_EVERY}"
+    --sample-every-steps "${SAMPLE_EVERY}"
+    --style-ref-count "${STYLE_REF_COUNT}"
+    --batch "${BATCH_SIZE}"
+    --num-workers "${NUM_WORKERS}"
+    --max-fonts "${MAX_FONTS}"
+    --image-size "${IMAGE_SIZE}"
+    --latent-channels "${LATENT_CHANNELS}"
+    --latent-size "${LATENT_SIZE}"
+    --encoder-patch-size "${ENCODER_PATCH_SIZE}"
+    --encoder-hidden-dim "${ENCODER_HIDDEN_DIM}"
+    --encoder-depth "${ENCODER_DEPTH}"
+    --encoder-heads "${ENCODER_HEADS}"
+    --dit-hidden-dim "${DIT_HIDDEN_DIM}"
+    --dit-depth "${DIT_DEPTH}"
+    --dit-heads "${DIT_HEADS}"
+    --dit-mlp-ratio "${DIT_MLP_RATIO}"
+  )
+  if [[ -n "${FONT_SPLIT_SEED}" ]]; then
+    daemon_args+=(--font-split-seed "${FONT_SPLIT_SEED}")
+  fi
   if [[ -n "${RESUME_CKPT}" ]]; then
-    _daemon_args+=(--resume "${RESUME_CKPT}")
+    daemon_args+=(--resume "${RESUME_CKPT}")
   fi
-  if [[ -n "${SAVE_DIR_OVERRIDE}" ]]; then
-    _daemon_args+=(--save-dir "${SAVE_DIR_OVERRIDE}")
+  if [[ -n "${VAE_CKPT}" ]]; then
+    daemon_args+=(--vae-checkpoint "${VAE_CKPT}")
   fi
-  if [[ -n "${PRETRAIN_STYLE_CKPT}" ]]; then
-    _daemon_args+=(--pretrained-style-encoder "${PRETRAIN_STYLE_CKPT}")
+  if [[ -n "${STYLE_CKPT}" ]]; then
+    daemon_args+=(--style-checkpoint "${STYLE_CKPT}")
   fi
-  if [[ -n "${DEVICE_ARG}" ]]; then
-    _daemon_args+=(--device "${DEVICE_ARG}")
+  if [[ "${TRAIN_VAE_JOINTLY}" == "1" ]]; then
+    daemon_args+=(--train-vae-jointly)
   fi
-  nohup bash "${SCRIPT_PATH}" "${_daemon_args[@]}" \
-    > /dev/null 2>&1 < /dev/null &
-  DAEMON_PID=$!
-  echo "${DAEMON_PID}" > "${PID_FILE}"
-  echo "[teacher_style_only] started in background pid=${DAEMON_PID}"
-  echo "[teacher_style_only] pid_file=${ROOT}/${PID_FILE}"
-  echo "[teacher_style_only] log_file=${ROOT}/${LOG_FILE}"
+  if [[ "${TRAIN_STYLE_JOINTLY}" == "1" ]]; then
+    daemon_args+=(--train-style-jointly)
+  fi
+  if [[ "${#EXTRA_TRAIN_ARGS[@]}" -gt 0 ]]; then
+    daemon_args+=(-- "${EXTRA_TRAIN_ARGS[@]}")
+  fi
+  nohup bash "${SCRIPT_PATH}" "${daemon_args[@]}" > /dev/null 2>&1 < /dev/null &
+  echo "$!" > "${PID_FILE}"
   exit 0
+fi
+
+if [[ "${TRAIN_VAE_JOINTLY}" != "1" && -z "${RESUME_CKPT}" && -z "${VAE_CKPT}" ]]; then
+  exit 2
+fi
+if [[ "${TRAIN_STYLE_JOINTLY}" != "1" && -z "${RESUME_CKPT}" && -z "${STYLE_CKPT}" ]]; then
+  exit 2
 fi
 
 exec > >(tee -a "${LOG_FILE}") 2>&1
 echo "$$" > "${PID_FILE}"
 
-echo "[teacher_style_only] start $(date '+%Y-%m-%d %H:%M:%S')"
-echo "[teacher_style_only] root=${ROOT} pid=$$ device=${DEVICE_ARG} python=${PYTHON_BIN} save_dir=${SAVE_DIR}"
+cmd=(
+  "${PYTHON_BIN}" -u train.py
+  --stage diffusion
+  --data-root "${ROOT}"
+  --save-dir "${SAVE_DIR}"
+  --device "${DEVICE_ARG}"
+  --seed "${SEED}"
+  --font-split "${FONT_SPLIT}"
+  --font-train-ratio "${FONT_TRAIN_RATIO}"
+  --lr "${LR}"
+  --batch "${BATCH_SIZE}"
+  --num-workers "${NUM_WORKERS}"
+  --style-ref-count "${STYLE_REF_COUNT}"
+  --max-fonts "${MAX_FONTS}"
+  --image-size "${IMAGE_SIZE}"
+  --latent-channels "${LATENT_CHANNELS}"
+  --latent-size "${LATENT_SIZE}"
+  --encoder-patch-size "${ENCODER_PATCH_SIZE}"
+  --encoder-hidden-dim "${ENCODER_HIDDEN_DIM}"
+  --encoder-depth "${ENCODER_DEPTH}"
+  --encoder-heads "${ENCODER_HEADS}"
+  --dit-hidden-dim "${DIT_HIDDEN_DIM}"
+  --dit-depth "${DIT_DEPTH}"
+  --dit-heads "${DIT_HEADS}"
+  --dit-mlp-ratio "${DIT_MLP_RATIO}"
+  --epochs 1000000
+  --total-steps "${TARGET_STEPS}"
+  --log-every-steps 100
+  --val-every-steps 100
+  --save-every-steps "${SAVE_EVERY}"
+  --sample-every-steps "${SAMPLE_EVERY}"
+)
+
+if [[ -n "${FONT_SPLIT_SEED}" ]]; then
+  cmd+=(--font-split-seed "${FONT_SPLIT_SEED}")
+fi
 if [[ -n "${RESUME_CKPT}" ]]; then
-  echo "[teacher_style_only] resume_ckpt=${RESUME_CKPT} (will continue from checkpoint step)"
+  cmd+=(--resume "${RESUME_CKPT}")
+fi
+if [[ -n "${VAE_CKPT}" ]]; then
+  cmd+=(--vae-checkpoint "${VAE_CKPT}")
+fi
+if [[ -n "${STYLE_CKPT}" ]]; then
+  cmd+=(--style-checkpoint "${STYLE_CKPT}")
+fi
+if [[ "${TRAIN_VAE_JOINTLY}" == "1" ]]; then
+  cmd+=(--train-vae-jointly)
+fi
+if [[ "${TRAIN_STYLE_JOINTLY}" == "1" ]]; then
+  cmd+=(--train-style-jointly)
+fi
+if [[ "${#EXTRA_TRAIN_ARGS[@]}" -gt 0 ]]; then
+  cmd+=("${EXTRA_TRAIN_ARGS[@]}")
 fi
 
-if [[ -z "${PRETRAIN_STYLE_CKPT}" ]]; then
-  if [[ -f "checkpoints/style_encoder_pretrain_best.pt" ]]; then
-    PRETRAIN_STYLE_CKPT="checkpoints/style_encoder_pretrain_best.pt"
-  else
-    PRETRAIN_STYLE_CKPT="$(ls -1t checkpoints/style_encoder_pretrain_*.pt 2>/dev/null | head -n 1 || true)"
-  fi
-fi
-if [[ -z "${PRETRAIN_STYLE_CKPT}" || ! -f "${PRETRAIN_STYLE_CKPT}" ]]; then
-  echo "[teacher_style_only] pretrained style checkpoint not found. pass --pretrained-style-encoder CKPT" >&2
-  exit 2
-fi
-echo "[teacher_style_only] pretrained_style_ckpt=${PRETRAIN_STYLE_CKPT}"
-if [[ -n "${RESUME_CKPT}" ]]; then
-  set -- --resume "${RESUME_CKPT}"
-else
-  set --
-fi
-
-echo "[teacher_style_only] adaptive_style_routing=on router_temperature=${ROUTER_TEMPERATURE}"
-echo "[teacher_style_only] route_loss=(sparse:${LAMBDA_ROUTE_SPARSE},balance:${LAMBDA_ROUTE_BALANCE},div:${LAMBDA_ROUTE_DIV},gate:${LAMBDA_ROUTE_GATE})"
-echo "[teacher_style_only] ref_loss=(sparse:${LAMBDA_REF_SPARSE},balance:${LAMBDA_REF_BALANCE},div:${LAMBDA_REF_DIV}) reference_topk=${REFERENCE_TOPK}"
-echo "[teacher_style_only] proxy_loss=(low:${LAMBDA_PROXY_LOW},mid:${LAMBDA_PROXY_MID},high:${LAMBDA_PROXY_HIGH}) attn=(sep:${LAMBDA_ATTN_SEP},order:${LAMBDA_ATTN_ORDER},role:${LAMBDA_ATTN_ROLE})"
-
-"${PYTHON_BIN}" -u train.py \
-  --teacher-line style_only \
-  --trainer diffusion \
-  --device "${DEVICE_ARG}" \
-  --batch 32 \
-  --grad-accum 1 \
-  --lr 2e-4 \
-  --total-steps "${TARGET_STEPS}" \
-  --val-ratio 0.1 \
-  --style-ref-count "${STYLE_REF_COUNT}" \
-  --style-ref-drop-prob 0.15 \
-  --style-ref-drop-min-keep 4 \
-  --style-site-drop-prob 0.10 \
-  --style-site-drop-min-keep 1 \
-  --aux-loss-warmup-steps 5000 \
-  --adaptive-style-routing \
-  --router-temperature "${ROUTER_TEMPERATURE}" \
-  --reference-topk "${REFERENCE_TOPK}" \
-  --lambda-proxy-low "${LAMBDA_PROXY_LOW}" \
-  --lambda-proxy-mid "${LAMBDA_PROXY_MID}" \
-  --lambda-proxy-high "${LAMBDA_PROXY_HIGH}" \
-  --lambda-attn-sep "${LAMBDA_ATTN_SEP}" \
-  --lambda-attn-order "${LAMBDA_ATTN_ORDER}" \
-  --lambda-attn-role "${LAMBDA_ATTN_ROLE}" \
-  --lambda-route-sparse "${LAMBDA_ROUTE_SPARSE}" \
-  --lambda-route-balance "${LAMBDA_ROUTE_BALANCE}" \
-  --lambda-route-div "${LAMBDA_ROUTE_DIV}" \
-  --lambda-route-gate "${LAMBDA_ROUTE_GATE}" \
-  --lambda-ref-sparse "${LAMBDA_REF_SPARSE}" \
-  --lambda-ref-balance "${LAMBDA_REF_BALANCE}" \
-  --lambda-ref-div "${LAMBDA_REF_DIV}" \
-  --pretrained-style-encoder "${PRETRAIN_STYLE_CKPT}" \
-  --num-workers 8 \
-  --sample-every-steps 300 \
-  --log-every-steps 100 \
-  --save-every-steps 5000 \
-  --save-dir "${SAVE_DIR}" \
-  "$@"
-
-echo "[teacher_style_only] done $(date '+%Y-%m-%d %H:%M:%S')"
+"${cmd[@]}"

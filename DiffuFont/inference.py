@@ -1,328 +1,177 @@
 #!/usr/bin/env python3
-"""
-Multi-font comparison inference for DiffuFont.
-
-Generates a grid image comparing model outputs across multiple fonts.
-Each row = one font, each column = one target character.
-Columns are: content glyph | ground-truth | generation.
-"""
+"""Inference entry for the content+style latent diffusion path."""
 
 from __future__ import annotations
 
 import argparse
-import json
-import random
 from pathlib import Path
-from typing import Dict, List, Optional
+import random
+from typing import Dict, List
 
+from PIL import Image, ImageDraw, ImageFont
 import torch
-from torchvision import transforms as T
-from torchvision.utils import make_grid, save_image
-from PIL import Image, ImageDraw, ImageFont as PILImageFont
 
 from dataset import FontImageDataset
-from models.model import DiffusionTrainer, FlowMatchingTrainer
-from models.source_part_ref_unet import SourcePartRefUNet
+from models.model import DiffusionTrainer
+from models.source_part_ref_dit import SourcePartRefDiT
+from style_augment import build_base_glyph_transform
 
 
-def normalize_conditioning_mode(raw_mode: str) -> str:
-    mode = str(raw_mode).strip().lower()
-    if mode == "parts_vector_only":
-        mode = "part_only"
-    valid = {"baseline", "part_only", "style_only"}
-    if mode not in valid:
-        raise ValueError(f"conditioning mode must be one of {sorted(valid)}, got '{raw_mode}'")
-    return mode
-
-
-def mode_uses_parts(mode: str) -> bool:
-    _ = normalize_conditioning_mode(mode)
-    return False
-
-
-def mode_uses_style(mode: str) -> bool:
-    return normalize_conditioning_mode(mode) in {"part_only", "style_only"}
-
-
-def load_model_and_trainer(
-    ckpt_path: str,
-    device: torch.device,
-    trainer_type: str = "diffusion",
-    conditioning_profile: str = "part_only",
-    image_size: int = 256,
-    style_start_channel: int = 16,
-    style_token_dim: int = 256,
-    diffusion_steps: int = 1000,
-) -> DiffusionTrainer | FlowMatchingTrainer:
-    """Build model and trainer, then load checkpoint weights."""
-    mode = normalize_conditioning_mode(conditioning_profile)
-    model = SourcePartRefUNet(
-        in_channels=1,
-        image_size=image_size,
-        content_start_channel=64,
-        style_start_channel=style_start_channel,
-        unet_channels=(64, 128, 256, 512),
-        content_encoder_downsample_size=4,
-        channel_attn=True,
-        conditioning_profile=mode,
-        style_token_dim=style_token_dim,
-    )
-    if hasattr(model, "enable_xformers_memory_efficient_attention"):
-        try:
-            enabled_style = int(model.enable_xformers_memory_efficient_attention())
-            print(f"[inference] xformers enabled for style_attn={enabled_style}")
-        except Exception as e:
-            print(f"[inference] xformers unavailable, fallback to default attention: {e}")
-    trainer_cls = DiffusionTrainer if trainer_type == "diffusion" else FlowMatchingTrainer
-    trainer_kwargs = {
-        "lr": 1e-4,
-        "T": diffusion_steps,
-        "total_steps": 1,
-        "conditioning_mode": mode,
-    }
-    if trainer_type == "flow_matching":
-        trainer_kwargs["lambda_fm"] = 1.0
-    trainer = trainer_cls(model, device, **trainer_kwargs)
-    trainer.load(ckpt_path)
+def load_trainer(checkpoint_path: Path, device: torch.device) -> DiffusionTrainer:
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    if "model_config" not in checkpoint:
+        raise RuntimeError("Checkpoint is missing 'model_config'; regenerate it with the refactored training path.")
+    model = SourcePartRefDiT(**checkpoint["model_config"])
+    trainer = DiffusionTrainer(model, device, total_steps=1, freeze_vae=False)
+    trainer.model.load_state_dict(checkpoint["model_state"], strict=True)
     trainer.model.eval()
-    print(f"[inference] loaded checkpoint from {ckpt_path} (step={trainer.global_step})")
     return trainer
 
-def _tensor_to_pil(t: torch.Tensor) -> Image.Image:
-    """Convert [-1,1] tensor (C,H,W) to PIL Image."""
-    t = (t.clamp(-1, 1) + 1) / 2  # -> [0,1]
-    t = t.cpu()
-    if t.dim() == 3:
-        import torchvision.transforms.functional as TF
-        return TF.to_pil_image(t)
-    return Image.fromarray((t.squeeze().numpy() * 255).astype("uint8"))
+
+def tensor_to_pil(tensor: torch.Tensor, size: int = 128) -> Image.Image:
+    x = tensor.detach().cpu().float()
+    if x.dim() == 3:
+        x = x[0]
+    x = ((x.clamp(-1.0, 1.0) + 1.0) * 127.5).round().byte().numpy()
+    return Image.fromarray(x, mode="L").resize((size, size), Image.Resampling.LANCZOS)
+
+
+def find_sample_index(dataset: FontImageDataset, font_name: str, char: str) -> int:
+    for idx, (font, char_index) in enumerate(dataset.samples):
+        if font == font_name and dataset.char_list[char_index] == char:
+            return idx
+    raise KeyError(f"Missing sample for font='{font_name}' char='{char}'")
 
 
 @torch.no_grad()
 def run_inference(
-    trainer: DiffusionTrainer | FlowMatchingTrainer,
+    trainer: DiffusionTrainer,
     dataset: FontImageDataset,
+    *,
     font_names: List[str],
-    char_list: List[str],
-    num_inference_steps: int = 20,
-) -> Dict[str, Dict[str, dict]]:
-    """
-    Returns: {font_name: {char: {"content": Tensor, "gt": Tensor, "gen": Tensor}}}
-    """
-    transform = T.Compose([T.Resize((128, 128), interpolation=T.InterpolationMode.BILINEAR, antialias=True), T.ToTensor(), T.Normalize(0.5, 0.5)])
-    device = trainer.device
-    results: Dict[str, Dict[str, dict]] = {}
-
-    for font in font_names:
-        results[font] = {}
-        for ch in char_list:
-            # Find the sample index for this font+char
-            idx = None
-            for i, (fn, ci) in enumerate(dataset.samples):
-                if fn == font and dataset.char_list[ci] == ch:
-                    idx = i
-                    break
-            if idx is None:
-                print(f"[inference] WARNING: font={font} char={ch} not found in dataset, skipping.")
-                continue
-
-            sample = dataset[idx]
-            content = sample["content"].unsqueeze(0).to(device)
-            gt = sample["input"]
-            style_img = sample["style_img"].unsqueeze(0).to(device) if "style_img" in sample else None
-
-            part_imgs = None
-            part_mask = None
-            if "parts" in sample:
-                part_imgs = sample["parts"].unsqueeze(0).to(device)
-                part_mask = sample["part_mask"].unsqueeze(0).to(device)
-
-            if isinstance(trainer, FlowMatchingTrainer):
-                gen = trainer.flow_sample(
-                    content, c=num_inference_steps,
-                    style_img=style_img,
-                    part_imgs=part_imgs, part_mask=part_mask,
-                )
-            else:
-                gen = trainer.dpm_solver_sample(
-                    content,
-                    style_img=style_img,
-                    num_inference_steps=num_inference_steps,
-                    part_imgs=part_imgs,
-                    part_mask=part_mask,
-                )
-
-            results[font][ch] = {
-                "content": sample["content"].cpu(),
-                "gt": gt.cpu(),
-                "gen": gen.squeeze(0).cpu(),
+    chars: List[str],
+    inference_steps: int,
+) -> Dict[str, Dict[str, Dict[str, torch.Tensor]]]:
+    results: Dict[str, Dict[str, Dict[str, torch.Tensor]]] = {}
+    for font_name in font_names:
+        font_rows: Dict[str, Dict[str, torch.Tensor]] = {}
+        for char in chars:
+            sample = dataset[find_sample_index(dataset, font_name, char)]
+            content = sample["content"].unsqueeze(0)
+            style = sample["style_img"].unsqueeze(0)
+            style_ref_mask = sample["style_ref_mask"].unsqueeze(0)
+            generation = trainer.ddim_sample(
+                content,
+                style_img=style,
+                style_ref_mask=style_ref_mask,
+                num_inference_steps=int(inference_steps),
+            )
+            font_rows[char] = {
+                "content": sample["content"],
+                "style": sample["style_img"][0],
+                "target": sample["target"],
+                "generation": generation.squeeze(0).cpu(),
             }
-
+        results[font_name] = font_rows
     return results
 
 
-def build_comparison_grid(
-    results: Dict[str, Dict[str, dict]],
+def build_grid(
+    results: Dict[str, Dict[str, Dict[str, torch.Tensor]]],
+    *,
     font_names: List[str],
-    char_list: List[str],
-    cell_size: int = 128,
+    chars: List[str],
+    cell_size: int,
 ) -> Image.Image:
-    """Build a comparison grid: rows = fonts, per-char columns = [content | GT | gen]."""
-    n_fonts = len(font_names)
-    n_chars = len(char_list)
-    cols = n_chars * 3  # content, GT, gen
-    label_w = 180  # left column for font names
-    header_h = 40  # top row for char labels
-    grid_w = label_w + cols * cell_size
-    grid_h = header_h + n_fonts * cell_size
-
-    canvas = Image.new("RGB", (grid_w, grid_h), color=(255, 255, 255))
+    label_w = 180
+    header_h = 44
+    per_char_cols = 4
+    width = label_w + len(chars) * per_char_cols * cell_size
+    height = header_h + len(font_names) * cell_size
+    canvas = Image.new("RGB", (width, height), color=(255, 255, 255))
     draw = ImageDraw.Draw(canvas)
-
     try:
-        fnt = PILImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
     except Exception:
-        fnt = PILImageFont.load_default()
+        font = ImageFont.load_default()
 
-    # Header: char labels with sub-labels
-    for ci, ch in enumerate(char_list):
-        x0 = label_w + ci * 3 * cell_size
-        for si, sub in enumerate(["cont", "GT", "gen"]):
-            cx = x0 + si * cell_size + cell_size // 2
-            draw.text((cx - 15, 10), f"{ch}\n{sub}", fill=(0, 0, 0), font=fnt)
+    for char_idx, char in enumerate(chars):
+        x0 = label_w + char_idx * per_char_cols * cell_size
+        for offset, label in enumerate(("content", "style", "gt", "gen")):
+            draw.text((x0 + offset * cell_size + 4, 8), f"{char}\n{label}", fill=(0, 0, 0), font=font)
 
-    # Body
-    for fi, font in enumerate(font_names):
-        y0 = header_h + fi * cell_size
-        # Font label
-        short_name = font if len(font) <= 20 else font[:17] + "..."
-        draw.text((5, y0 + cell_size // 2 - 10), short_name, fill=(0, 0, 0), font=fnt)
-
-        for ci, ch in enumerate(char_list):
-            entry = results.get(font, {}).get(ch)
-            if entry is None:
-                continue
-            x0 = label_w + ci * 3 * cell_size
-            for si, key in enumerate(["content", "gt", "gen"]):
-                img = _tensor_to_pil(entry[key]).resize((cell_size, cell_size), Image.LANCZOS)
-                canvas.paste(img, (x0 + si * cell_size, y0))
-
+    for row_idx, font_name in enumerate(font_names):
+        y0 = header_h + row_idx * cell_size
+        draw.text((6, y0 + cell_size // 2 - 8), font_name[:18], fill=(0, 0, 0), font=font)
+        for char_idx, char in enumerate(chars):
+            row = results[font_name][char]
+            images = (row["content"], row["style"], row["target"], row["generation"])
+            x0 = label_w + char_idx * per_char_cols * cell_size
+            for offset, tensor in enumerate(images):
+                canvas.paste(tensor_to_pil(tensor, size=cell_size).convert("RGB"), (x0 + offset * cell_size, y0))
     return canvas
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Multi-font comparison inference for DiffuFont")
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to trainer checkpoint (.pt)")
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--data-root", type=Path, default=Path("."))
-    parser.add_argument("--output", type=str, default="inference_comparison.png")
-    parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--trainer", type=str, default="diffusion", choices=["diffusion", "flow_matching"])
-    parser.add_argument("--conditioning-profile", type=str, default="part_only",
-                        choices=["baseline", "parts_vector_only", "part_only", "style_only"])
-    parser.add_argument("--image-size", type=int, default=256)
-    parser.add_argument("--diffusion-steps", type=int, default=1000)
-    parser.add_argument("--inference-steps", type=int, default=20, help="Sampling steps")
-    parser.add_argument("--num-fonts", type=int, default=4, help="Number of fonts to compare")
-    parser.add_argument("--num-chars", type=int, default=6, help="Number of characters per font")
-    parser.add_argument("--font-names", type=str, default=None,
-                        help="Comma-separated font names to use (overrides --num-fonts)")
-    parser.add_argument("--chars", type=str, default=None,
-                        help="Comma-separated characters to generate (overrides --num-chars)")
-    parser.add_argument("--cell-size", type=int, default=128)
+    parser.add_argument("--output", type=Path, default=Path("outputs/inference_grid.png"))
+    parser.add_argument("--device", type=str, default="cuda:1")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--style-start-channel", type=int, default=16)
-    parser.add_argument("--style-token-dim", type=int, default=256)
-
-    # PartBank
-    parser.add_argument("--part-bank-manifest", type=str, default="DataPreparation/PartBank/manifest.json")
-    parser.add_argument("--part-bank-lmdb", type=str, default="DataPreparation/LMDB/PartBank.lmdb")
-    parser.add_argument("--part-set-max", type=int, default=8)
-    parser.add_argument("--part-image-size", type=int, default=40)
-
+    parser.add_argument("--max-fonts", type=int, default=0)
+    parser.add_argument("--style-ref-count", type=int, default=8)
+    parser.add_argument("--num-fonts", type=int, default=4)
+    parser.add_argument("--num-chars", type=int, default=6)
+    parser.add_argument("--font-names", type=str, default="")
+    parser.add_argument("--chars", type=str, default="")
+    parser.add_argument("--inference-steps", type=int, default=50)
+    parser.add_argument("--cell-size", type=int, default=128)
     args = parser.parse_args()
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
 
-    device = torch.device(args.device)
-    profile = normalize_conditioning_mode(args.conditioning_profile)
-    use_part_bank = mode_uses_parts(profile)
-    use_style_image = mode_uses_style(profile)
+    random.seed(int(args.seed))
+    torch.manual_seed(int(args.seed))
+    if args.device == "auto":
+        if torch.cuda.is_available():
+            device = torch.device("cuda:1" if torch.cuda.device_count() > 1 else "cuda:0")
+        else:
+            device = torch.device("cpu")
+    else:
+        device = torch.device(args.device)
 
-    # Load dataset (for data access)
-    transform = T.Compose([T.Resize((128, 128), interpolation=T.InterpolationMode.BILINEAR, antialias=True), T.ToTensor(), T.Normalize(0.5, 0.5)])
+    glyph_transform = build_base_glyph_transform(image_size=128)
     dataset = FontImageDataset(
         project_root=args.data_root,
-        use_style_image=use_style_image,
-        use_part_bank=use_part_bank,
-        part_bank_manifest=args.part_bank_manifest,
-        part_bank_lmdb=args.part_bank_lmdb,
-        part_set_max=args.part_set_max,
-        part_image_size=args.part_image_size,
-        transform=transform,
+        max_fonts=int(args.max_fonts),
+        style_ref_count=int(args.style_ref_count),
+        random_seed=int(args.seed),
+        transform=glyph_transform,
+        style_transform=glyph_transform,
     )
+    trainer = load_trainer(args.checkpoint, device)
 
-    # Determine fonts and chars
-    all_fonts = sorted(set(fn for fn, _ in dataset.samples))
-    if args.font_names:
-        font_names = [f.strip() for f in args.font_names.split(",")]
-        missing = [f for f in font_names if f not in all_fonts]
-        if missing:
-            print(f"[inference] WARNING: fonts not found in dataset: {missing}")
-            font_names = [f for f in font_names if f in all_fonts]
+    all_fonts = sorted(dataset.font_names)
+    if args.font_names.strip():
+        font_names = [name.strip() for name in args.font_names.split(",") if name.strip()]
     else:
-        n = min(args.num_fonts, len(all_fonts))
-        font_names = random.sample(all_fonts, n)
+        font_names = random.sample(all_fonts, k=min(int(args.num_fonts), len(all_fonts)))
 
-    if args.chars:
-        char_list = [c.strip() for c in args.chars.split(",")]
+    if args.chars.strip():
+        chars = [char.strip() for char in args.chars.split(",") if char.strip()]
     else:
-        n = min(args.num_chars, len(dataset.char_list))
-        char_list = random.sample(dataset.char_list, n)
+        chars = random.sample(dataset.char_list, k=min(int(args.num_chars), len(dataset.char_list)))
 
-    print(f"[inference] fonts ({len(font_names)}): {font_names}")
-    print(f"[inference] chars ({len(char_list)}): {char_list}")
-
-    # Load model
-    trainer = load_model_and_trainer(
-        ckpt_path=args.checkpoint,
-        device=device,
-        trainer_type=args.trainer,
-        conditioning_profile=args.conditioning_profile,
-        image_size=args.image_size,
-        style_start_channel=int(args.style_start_channel),
-        style_token_dim=args.style_token_dim,
-        diffusion_steps=args.diffusion_steps,
-    )
-
-    # Run inference
     results = run_inference(
-        trainer=trainer,
-        dataset=dataset,
+        trainer,
+        dataset,
         font_names=font_names,
-        char_list=char_list,
-        num_inference_steps=args.inference_steps,
+        chars=chars,
+        inference_steps=int(args.inference_steps),
     )
-
-    # Build and save comparison grid
-    grid_img = build_comparison_grid(results, font_names, char_list, cell_size=args.cell_size)
-    out_path = Path(args.output)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    grid_img.save(str(out_path))
-    print(f"[inference] saved comparison grid to {out_path}")
-
-    # Also save individual per-font strips
-    ind_dir = out_path.parent / "individual"
-    ind_dir.mkdir(parents=True, exist_ok=True)
-    for font in font_names:
-        font_results = results.get(font, {})
-        if not font_results:
-            continue
-        gen_tensors = [font_results[ch]["gen"] for ch in char_list if ch in font_results]
-        if gen_tensors:
-            strip = make_grid(torch.stack(gen_tensors), nrow=len(gen_tensors), padding=2, normalize=True, value_range=(-1, 1))
-            save_image(strip, ind_dir / f"{font}_generated.png")
-
-    print(f"[inference] individual font strips saved to {ind_dir}/")
+    grid = build_grid(results, font_names=font_names, chars=chars, cell_size=int(args.cell_size))
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    grid.save(args.output)
+    print(f"[inference] saved {args.output}")
 
 
 if __name__ == "__main__":
