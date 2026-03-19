@@ -1,0 +1,28 @@
+{
+  "requested": [
+    "方正卓越体 简_Xi.TTF",
+    "方正兰亭纤黑.ttf",
+    "方正雅士黑 简 Light.TTF",
+    "SourceHanSerifCN-Medium.otf",
+    "SourceHanSerifCN-Medium.otf"
+  ],
+  "removed": [
+    {
+      "name": "方正卓越体 简_Xi.TTF",
+      "size": 1503392
+    },
+    {
+      "name": "方正兰亭纤黑.ttf",
+      "size": 8030000
+    },
+    {
+      "name": "方正雅士黑 简 Light.TTF",
+      "size": 1872028
+    },
+    {
+      "name": "SourceHanSerifCN-Medium.otf",
+      "size": 11743620
+    }
+  ],
+  "missing": []
+}

@@ -2,7 +2,7 @@
 """Glyph transforms used by DiffuFont.
 
 The current pipeline intentionally avoids style augmentation. Both content and
-style branches use the same resize-only grayscale transform.
+style branches expect native 128x128 grayscale glyphs and only normalize them.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ from typing import Any
 import numpy as np
 from PIL import Image
 import torch
-import torch.nn.functional as F
 
 
 def _to_gray_tensor01(img: Any) -> torch.Tensor:
@@ -58,20 +57,19 @@ def _to_gray_tensor01(img: Any) -> torch.Tensor:
 
 
 class BaseGlyphTransform:
-    """Resize grayscale glyphs and normalize to [-1, 1]."""
+    """Validate grayscale glyph size and normalize to [-1, 1]."""
 
     def __init__(self, image_size: int = 128):
         self.image_size = int(image_size)
 
     def __call__(self, img: Any) -> torch.Tensor:
-        x = _to_gray_tensor01(img).unsqueeze(0)
-        x = F.interpolate(
-            x,
-            size=(self.image_size, self.image_size),
-            mode="bilinear",
-            align_corners=False,
-        )
-        return x.squeeze(0).mul(2.0).sub(1.0)
+        x = _to_gray_tensor01(img)
+        if x.shape[-2:] != (self.image_size, self.image_size):
+            raise ValueError(
+                f"expected glyph size {(self.image_size, self.image_size)}, "
+                f"got {tuple(int(v) for v in x.shape[-2:])}"
+            )
+        return x.mul(2.0).sub(1.0)
 
 
 def build_base_glyph_transform(image_size: int = 128) -> BaseGlyphTransform:

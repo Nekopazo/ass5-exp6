@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 import json
+import math
 from pathlib import Path
 import time
 from typing import Dict, Optional
@@ -69,48 +70,6 @@ def _metrics_to_floats(metrics: Dict[str, torch.Tensor | float | int]) -> Dict[s
         else:
             output[key] = float(value)
     return output
-
-
-class NoiseScheduler:
-    def __init__(self, timesteps: int = 1000, beta_start: float = 1e-4, beta_end: float = 0.02) -> None:
-        self.timesteps = int(timesteps)
-        betas = torch.linspace(beta_start, beta_end, self.timesteps, dtype=torch.float32)
-        alphas = 1.0 - betas
-        alpha_bars = torch.cumprod(alphas, dim=0)
-
-        self.betas = betas
-        self.alphas = alphas
-        self.alpha_bars = alpha_bars
-        self.sqrt_alpha_bars = torch.sqrt(alpha_bars)
-        self.sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - alpha_bars)
-
-    def to(self, device: torch.device) -> "NoiseScheduler":
-        for name in ("betas", "alphas", "alpha_bars", "sqrt_alpha_bars", "sqrt_one_minus_alpha_bars"):
-            setattr(self, name, getattr(self, name).to(device))
-        return self
-
-    def add_noise(
-        self,
-        clean: torch.Tensor,
-        timesteps: torch.Tensor,
-        noise: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if noise is None:
-            noise = torch.randn_like(clean)
-        sqrt_alpha = self.sqrt_alpha_bars[timesteps].view(-1, 1, 1, 1)
-        sqrt_one_minus_alpha = self.sqrt_one_minus_alpha_bars[timesteps].view(-1, 1, 1, 1)
-        noisy = sqrt_alpha * clean + sqrt_one_minus_alpha * noise
-        return noisy, noise
-
-    def predict_start_from_noise(
-        self,
-        noisy: torch.Tensor,
-        timesteps: torch.Tensor,
-        noise: torch.Tensor,
-    ) -> torch.Tensor:
-        sqrt_alpha = self.sqrt_alpha_bars[timesteps].view(-1, 1, 1, 1)
-        sqrt_one_minus_alpha = self.sqrt_one_minus_alpha_bars[timesteps].view(-1, 1, 1, 1)
-        return (noisy - sqrt_one_minus_alpha * noise) / sqrt_alpha.clamp_min(1e-6)
 
 
 class _BaseTrainer:
@@ -456,16 +415,18 @@ class StylePretrainTrainer(_BaseTrainer):
             style_ref_mask_pos = style_ref_mask_pos.to(self.device)
 
         with self._autocast_context():
-            _, _, _, anchor_style_embed = self.model.encode_style(
+            anchor_style_pack = self.model.encode_style(
                 style_img=style,
                 style_ref_mask=style_ref_mask,
                 return_contrastive=True,
             )
-            _, _, _, positive_style_embed = self.model.encode_style(
+            positive_style_pack = self.model.encode_style(
                 style_img=style_pos,
                 style_ref_mask=style_ref_mask_pos,
                 return_contrastive=True,
             )
+            anchor_style_embed = anchor_style_pack["contrastive_style"]
+            positive_style_embed = positive_style_pack["contrastive_style"]
             if anchor_style_embed is None or positive_style_embed is None:
                 raise RuntimeError("Style contrastive embeddings were not produced.")
             loss_ctr = info_nce_loss(anchor_style_embed, positive_style_embed, self.contrastive_temperature)
@@ -513,27 +474,23 @@ class StylePretrainTrainer(_BaseTrainer):
         return
 
 
-class DiffusionTrainer(_BaseTrainer):
+class FlowTrainer(_BaseTrainer):
     def __init__(
         self,
         model: nn.Module,
         device: torch.device,
         *,
         lr: float = 1e-4,
-        timesteps: int = 1000,
         total_steps: int = 100_000,
-        lambda_diff: float = 1.0,
-        lambda_rec: float = 0.0,
-        lambda_perc: float = 0.0,
-        lambda_kl: float = 0.0,
-        lambda_ctr: float = 0.0,
-        contrastive_temperature: float = 0.1,
-        contrastive_warmup_steps: int = 5000,
+        lambda_flow: float = 1.0,
         style_lr_scale: float = 0.1,
         style_unfreeze_step: int = 0,
         style_unfreeze_last_encoder_blocks: int = 1,
         freeze_vae: bool = True,
         freeze_style: bool = True,
+        flow_sample_steps: int = 24,
+        lr_warmup_steps: int = 0,
+        lr_min_scale: float = 1.0,
         log_every_steps: int = 100,
         save_every_steps: Optional[int] = None,
         val_every_steps: Optional[int] = None,
@@ -554,20 +511,16 @@ class DiffusionTrainer(_BaseTrainer):
             val_max_batches=val_max_batches,
             track_best_on_val=False,
         )
-        self.scheduler = NoiseScheduler(int(timesteps)).to(device)
-        self.lambda_diff = float(lambda_diff)
-        self.lambda_rec = float(lambda_rec)
-        self.lambda_perc = float(lambda_perc)
-        self.lambda_kl = float(lambda_kl)
-        self.lambda_ctr = float(lambda_ctr)
-        self.contrastive_temperature = float(contrastive_temperature)
-        self.contrastive_warmup_steps = max(0, int(contrastive_warmup_steps))
+        self.lambda_flow = float(lambda_flow)
         self.base_lr = float(lr)
         self.freeze_vae = bool(freeze_vae)
         self.freeze_style = bool(freeze_style)
         self.style_lr_scale = max(0.0, float(style_lr_scale))
         self.style_unfreeze_step = max(0, int(style_unfreeze_step))
         self.style_unfreeze_last_encoder_blocks = max(0, int(style_unfreeze_last_encoder_blocks))
+        self.flow_sample_steps = max(1, int(flow_sample_steps))
+        self.lr_warmup_steps = max(0, int(lr_warmup_steps))
+        self.lr_min_scale = float(min(max(0.0, float(lr_min_scale)), 1.0))
         self.style_finetune_active = not self.freeze_style
         self.style_grad_enabled = not self.freeze_style
         self.style_finetune_param_names: list[str] = []
@@ -586,8 +539,26 @@ class DiffusionTrainer(_BaseTrainer):
         if style_params:
             param_groups.append({"params": style_params, "lr": self.base_lr * self.style_lr_scale})
         if not param_groups:
-            raise RuntimeError("No trainable parameters found for diffusion training.")
+            raise RuntimeError("No trainable parameters found for flow training.")
         self.optimizer = torch.optim.AdamW(param_groups, lr=self.base_lr, weight_decay=0.05)
+        self.group_base_lrs = [float(group["lr"]) for group in self.optimizer.param_groups]
+        self._set_learning_rate_for_step(0)
+
+    def _lr_scale_for_step(self, step: int) -> float:
+        step = max(0, int(step))
+        if self.lr_warmup_steps > 0 and step < self.lr_warmup_steps:
+            return float(step + 1) / float(self.lr_warmup_steps)
+        if self.total_steps <= self.lr_warmup_steps:
+            return 1.0
+        progress = float(step - self.lr_warmup_steps) / float(max(1, self.total_steps - self.lr_warmup_steps))
+        progress = min(max(progress, 0.0), 1.0)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return self.lr_min_scale + (1.0 - self.lr_min_scale) * cosine
+
+    def _set_learning_rate_for_step(self, step: int) -> None:
+        lr_scale = self._lr_scale_for_step(step)
+        for group, base_lr in zip(self.optimizer.param_groups, self.group_base_lrs):
+            group["lr"] = float(base_lr) * lr_scale
 
     def _maybe_activate_partial_style_finetune(self, *, step_for_state: Optional[int] = None) -> None:
         if not self.freeze_style or self.style_finetune_active:
@@ -606,6 +577,8 @@ class DiffusionTrainer(_BaseTrainer):
                 "lr": self.base_lr * self.style_lr_scale,
             }
         )
+        self.group_base_lrs.append(self.base_lr * self.style_lr_scale)
+        self._set_learning_rate_for_step(self.global_step)
         self.style_finetune_active = True
         self.style_grad_enabled = True
         self.style_finetune_param_names = [name for name, _ in named_params]
@@ -613,21 +586,11 @@ class DiffusionTrainer(_BaseTrainer):
         if len(self.style_finetune_param_names) > 4:
             preview_names = f"{preview_names}, ..."
         print(
-            "[diffusion] enabled partial style finetuning "
+            "[flow] enabled partial style finetuning "
             f"at step={current_step} lr={self.base_lr * self.style_lr_scale:.2e} "
             f"params={len(self.style_finetune_param_names)} [{preview_names}]",
             flush=True,
         )
-
-    def _current_contrastive_weight(self) -> float:
-        if self.lambda_ctr <= 0.0:
-            return 0.0
-        if self.contrastive_warmup_steps <= 0:
-            return self.lambda_ctr
-        if self.global_step + 1 >= self.contrastive_warmup_steps:
-            return self.lambda_ctr
-        alpha = float(self.global_step + 1) / float(self.contrastive_warmup_steps)
-        return alpha * self.lambda_ctr
 
     def _encode_latent(
         self,
@@ -645,18 +608,12 @@ class DiffusionTrainer(_BaseTrainer):
         self,
         style: torch.Tensor,
         style_ref_mask: Optional[torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        if not self.style_grad_enabled:
-            with torch.no_grad():
-                return self.model.encode_style(
-                    style_img=style,
-                    style_ref_mask=style_ref_mask,
-                    return_contrastive=(self.lambda_ctr > 0.0),
-                )
+    ) -> dict[str, Optional[torch.Tensor]]:
         return self.model.encode_style(
             style_img=style,
             style_ref_mask=style_ref_mask,
-            return_contrastive=(self.lambda_ctr > 0.0),
+            return_contrastive=False,
+            detach_style_encoder=(not self.style_grad_enabled),
         )
 
     def _compute_losses(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor | float]:
@@ -668,67 +625,32 @@ class DiffusionTrainer(_BaseTrainer):
             style_ref_mask = style_ref_mask.to(self.device)
 
         with self._autocast_context():
-            z0, mu, logvar = self._encode_latent(target)
-            timesteps = torch.randint(0, self.scheduler.timesteps, (z0.size(0),), device=self.device)
-            zt, noise = self.scheduler.add_noise(z0, timesteps)
-            content_tokens = self.model.encode_content(content)
-            style_tokens, style_global, style_token_mask, anchor_style_embed = self._encode_style_conditions(
+            z1, _, _ = self._encode_latent(target)
+            z0 = torch.randn_like(z1)
+            timesteps = torch.rand(z1.size(0), device=self.device)
+            t_view = timesteps.view(-1, 1, 1, 1).to(dtype=z1.dtype)
+            zt = (1.0 - t_view) * z0 + t_view * z1
+            target_flow = z1 - z0
+            content_features = self.model.encode_content_features(content)
+            content_tokens = self.model.content_proj(content_features)
+            style_pack = self._encode_style_conditions(
                 style,
                 style_ref_mask,
             )
-            noise_pred = self.model.predict_noise(
+            pred_flow = self.model.predict_flow(
                 zt,
                 timesteps,
                 content_tokens=content_tokens,
-                style_tokens=style_tokens,
-                style_global=style_global,
-                style_token_mask=style_token_mask,
+                style_tokens=style_pack["style_tokens"],
+                style_global=style_pack["style_global"],
+                style_token_mask=style_pack["style_token_mask"],
             )
-            loss_diff = F.mse_loss(noise_pred, noise)
-
-            loss_rec = target.new_zeros(())
-            loss_perc = target.new_zeros(())
-            if self.lambda_rec > 0.0 or self.lambda_perc > 0.0:
-                z0_pred = self.scheduler.predict_start_from_noise(zt, timesteps, noise_pred).clamp(-4.0, 4.0)
-                recon = self.model.decode_from_latent(z0_pred)
-                if self.lambda_rec > 0.0:
-                    loss_rec = F.l1_loss(recon, target)
-                if self.lambda_perc > 0.0:
-                    loss_perc = glyph_perceptual_loss(recon, target)
-
-            loss_kl = kl_divergence_loss(mu, logvar) if self.lambda_kl > 0.0 and not self.freeze_vae else target.new_zeros(())
-            loss_ctr = target.new_zeros(())
-            active_lambda_ctr = self._current_contrastive_weight()
-            if active_lambda_ctr > 0.0:
-                style_pos = batch.get("style_img_pos")
-                style_ref_mask_pos = batch.get("style_ref_mask_pos")
-                if style_pos is None:
-                    raise RuntimeError("Diffusion contrastive loss requires style_img_pos in the batch.")
-                style_pos = style_pos.to(self.device)
-                if style_ref_mask_pos is not None:
-                    style_ref_mask_pos = style_ref_mask_pos.to(self.device)
-                _, _, _, positive_style_embed = self._encode_style_conditions(
-                    style_pos,
-                    style_ref_mask_pos,
-                )
-                if anchor_style_embed is None or positive_style_embed is None:
-                    raise RuntimeError("Diffusion contrastive loss requires style embeddings.")
-                loss_ctr = info_nce_loss(anchor_style_embed, positive_style_embed, self.contrastive_temperature)
-            loss = (
-                self.lambda_diff * loss_diff
-                + self.lambda_rec * loss_rec
-                + self.lambda_perc * loss_perc
-                + self.lambda_kl * loss_kl
-                + active_lambda_ctr * loss_ctr
-            )
+            loss_flow = F.mse_loss(pred_flow, target_flow)
+            loss = self.lambda_flow * loss_flow
         return {
             "loss": loss,
-            "loss_diff": loss_diff,
-            "loss_rec": loss_rec,
-            "loss_perc": loss_perc,
-            "loss_kl": loss_kl,
-            "loss_ctr": loss_ctr,
-            "lambda_ctr": active_lambda_ctr,
+            "loss_flow": loss_flow,
+            "t_mean": timesteps.mean(),
             "style_finetune_active": float(self.style_finetune_active),
         }
 
@@ -739,6 +661,7 @@ class DiffusionTrainer(_BaseTrainer):
         metrics = self._compute_losses(batch)
         metrics["loss"].backward()
         self.optimizer.step()
+        self._set_learning_rate_for_step(self.global_step + 1)
         return _metrics_to_floats(metrics)
 
     def eval_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
@@ -748,13 +671,13 @@ class DiffusionTrainer(_BaseTrainer):
             return _metrics_to_floats(self._compute_losses(batch))
 
     @torch.no_grad()
-    def ddim_sample(
+    def flow_sample(
         self,
         content: torch.Tensor,
         *,
         style_img: torch.Tensor,
         style_ref_mask: Optional[torch.Tensor] = None,
-        num_inference_steps: int = 50,
+        num_inference_steps: Optional[int] = None,
     ) -> torch.Tensor:
         self.model.eval()
         content = content.to(self.device)
@@ -770,39 +693,39 @@ class DiffusionTrainer(_BaseTrainer):
             self.model.latent_size,
             device=self.device,
         )
-        step_count = max(1, int(num_inference_steps))
-        step_indices = torch.linspace(
-            self.scheduler.timesteps - 1,
-            0,
-            steps=step_count,
-            device=self.device,
-        ).long()
-
-        for idx, timestep in enumerate(step_indices):
-            t = torch.full((batch_size,), int(timestep.item()), device=self.device, dtype=torch.long)
-            noise_pred = self.model(
+        step_count = self.flow_sample_steps if num_inference_steps is None else max(1, int(num_inference_steps))
+        dt = 1.0 / float(step_count)
+        content_features = self.model.encode_content_features(content)
+        content_tokens = self.model.content_proj(content_features)
+        style_pack = self.model.encode_style(
+            style_img=style_img,
+            style_ref_mask=style_ref_mask,
+            return_contrastive=False,
+            detach_style_encoder=False,
+        )
+        for step_idx in range(step_count):
+            t = torch.full(
+                (batch_size,),
+                float(step_idx) / float(step_count),
+                device=self.device,
+                dtype=torch.float32,
+            )
+            pred_flow = self.model.predict_flow(
                 sample,
                 t,
-                content,
-                style_img=style_img,
-                style_ref_mask=style_ref_mask,
+                content_tokens=content_tokens,
+                style_tokens=style_pack["style_tokens"],
+                style_global=style_pack["style_global"],
+                style_token_mask=style_pack["style_token_mask"],
             )
-            x0_pred = self.scheduler.predict_start_from_noise(sample, t, noise_pred).clamp(-4.0, 4.0)
-
-            if idx == len(step_indices) - 1:
-                sample = x0_pred
-                continue
-
-            prev_timestep = step_indices[idx + 1]
-            alpha_prev = self.scheduler.alpha_bars[prev_timestep].view(1, 1, 1, 1)
-            sample = alpha_prev.sqrt() * x0_pred + (1.0 - alpha_prev).sqrt() * noise_pred
+            sample = sample + dt * pred_flow
 
         return self.model.decode_from_latent(sample).clamp(-1.0, 1.0)
 
     def save(self, path: str | Path) -> None:
         torch.save(
             {
-                "stage": "diffusion",
+                "stage": "flow",
                 "model_state": self.model.state_dict(),
                 "model_config": self.model.export_config(),
                 "optimizer_state": self.optimizer.state_dict(),
@@ -815,36 +738,18 @@ class DiffusionTrainer(_BaseTrainer):
     def load(self, path: str | Path) -> None:
         checkpoint = torch.load(path, map_location=self.device)
         if "model_state" not in checkpoint:
-            raise RuntimeError("Diffusion checkpoint is missing 'model_state'.")
-        load_report = self.model.load_state_dict_compat(checkpoint["model_state"])
-        if load_report["resized_keys"]:
-            print("[diffusion] resized checkpoint tensors: " + ", ".join(load_report["resized_keys"]), flush=True)
-        if load_report["skipped_unknown_keys"] or load_report["skipped_incompatible_keys"]:
-            raise RuntimeError(
-                "Diffusion checkpoint state mismatch before load: "
-                f"unknown={load_report['skipped_unknown_keys']} "
-                f"incompatible={load_report['skipped_incompatible_keys']}"
-            )
-        allowed_missing_keys = {
-            name
-            for name, _ in self.model.named_parameters()
-            if name.endswith("style_residual_gate")
-        }
-        disallowed_missing = [key for key in load_report["missing_keys"] if key not in allowed_missing_keys]
-        if disallowed_missing or load_report["unexpected_keys"]:
-            raise RuntimeError(
-                "Diffusion checkpoint state mismatch: "
-                f"missing={disallowed_missing} unexpected={load_report['unexpected_keys']}"
-            )
+            raise RuntimeError("Flow checkpoint is missing 'model_state'.")
+        self.model.load_state_dict(checkpoint["model_state"], strict=True)
         resume_step = int(checkpoint.get("step", 0))
         self._maybe_activate_partial_style_finetune(step_for_state=resume_step)
         if "optimizer_state" in checkpoint:
             try:
                 self.optimizer.load_state_dict(checkpoint["optimizer_state"])
             except ValueError as exc:
-                print(f"[diffusion] skipped optimizer state load: {exc}", flush=True)
+                print(f"[flow] skipped optimizer state load: {exc}", flush=True)
         self.global_step = resume_step
         self.current_epoch = int(checkpoint.get("epoch", 0))
+        self._set_learning_rate_for_step(self.global_step)
 
     @torch.no_grad()
     def sample_and_save(self, batch: Dict[str, torch.Tensor], out_dir: Path) -> None:
@@ -855,11 +760,11 @@ class DiffusionTrainer(_BaseTrainer):
         style_ref_mask = batch.get("style_ref_mask")
         if style_ref_mask is not None:
             style_ref_mask = style_ref_mask[:8].to(self.device)
-        sample = self.ddim_sample(
+        sample = self.flow_sample(
             content,
             style_img=style,
             style_ref_mask=style_ref_mask,
-            num_inference_steps=20,
+            num_inference_steps=self.flow_sample_steps,
         )
         vis = torch.cat([(content + 1.0) * 0.5, (target + 1.0) * 0.5, (sample + 1.0) * 0.5], dim=0)
         save_image(vis, out_dir / f"sample_step_{self.global_step}.png", nrow=content.size(0))

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Profile peak CUDA memory by major training stage for one diffusion step."""
+"""Profile peak CUDA memory by major training stage for one flow step."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from dataset import FontImageDataset, UniqueFontBatchSampler
-from models.model import DiffusionTrainer, glyph_perceptual_loss, info_nce_loss
+from models.model import FlowTrainer
 from models.source_part_ref_dit import SourcePartRefDiT
 from style_augment import build_base_glyph_transform
 
@@ -39,8 +39,6 @@ def collate_fn(samples):
         "target": torch.stack([sample["target"] for sample in samples], dim=0),
         "style_img": torch.stack([sample["style_img"] for sample in samples], dim=0),
         "style_ref_mask": torch.stack([sample["style_ref_mask"] for sample in samples], dim=0),
-        "style_img_pos": torch.stack([sample["style_img_pos"] for sample in samples], dim=0),
-        "style_ref_mask_pos": torch.stack([sample["style_ref_mask_pos"] for sample in samples], dim=0),
     }
 
 
@@ -92,7 +90,7 @@ def main() -> None:
         project_root=args.data_root,
         max_fonts=int(args.max_fonts),
         style_ref_count=int(args.style_ref_count),
-        include_positive_style=True,
+        include_positive_style=False,
         random_seed=int(args.seed),
         font_split=str(args.font_split),
         font_split_seed=font_split_seed,
@@ -124,26 +122,22 @@ def main() -> None:
         encoder_hidden_dim=512,
         encoder_depth=4,
         encoder_heads=8,
+        local_style_tokens_per_ref=16,
         dit_hidden_dim=512,
         dit_depth=12,
         dit_heads=8,
         dit_mlp_ratio=4.0,
+        style_cross_attn_every_n_layers=1,
     )
     model.load_vae_checkpoint(args.vae_checkpoint)
-    trainer = DiffusionTrainer(
+    trainer = FlowTrainer(
         model,
         device,
         lr=1e-4,
-        timesteps=1000,
         total_steps=1,
-        lambda_diff=1.0,
-        lambda_rec=0.5,
-        lambda_perc=0.1,
-        lambda_kl=0.0,
-        lambda_ctr=0.02,
-        contrastive_temperature=0.1,
-        contrastive_warmup_steps=5000,
+        lambda_flow=1.0,
         freeze_vae=True,
+        flow_sample_steps=24,
         log_every_steps=1,
         save_every_steps=None,
     )
@@ -153,27 +147,39 @@ def main() -> None:
     target = batch["target"].to(device)
     content = batch["content"].to(device)
     style = batch["style_img"].to(device)
-    style_pos = batch["style_img_pos"].to(device)
     style_ref_mask = batch["style_ref_mask"].to(device)
-    style_ref_mask_pos = batch["style_ref_mask_pos"].to(device)
 
     records: list[dict] = []
     torch.cuda.empty_cache()
     with trainer._autocast_context():
-        z0, _, _ = stage_record(device, "vae_encode", lambda: trainer._encode_latent(target), records)
-        timesteps = torch.randint(0, trainer.scheduler.timesteps, (z0.size(0),), device=device)
-        zt, noise = stage_record(device, "noise_add", lambda: trainer.scheduler.add_noise(z0, timesteps), records)
-        content_tokens = stage_record(device, "content_encode", lambda: trainer.model.encode_content(content), records)
-        style_tokens, style_global, style_token_mask, anchor_style_embed = stage_record(
+        z1, _, _ = stage_record(device, "vae_encode", lambda: trainer._encode_latent(target), records)
+        z0 = stage_record(device, "noise_sample", lambda: torch.randn_like(z1), records)
+        timesteps = stage_record(device, "time_sample", lambda: torch.rand(z1.size(0), device=device), records)
+        t_view = timesteps.view(-1, 1, 1, 1).to(dtype=z1.dtype)
+        zt = stage_record(device, "flow_interpolate", lambda: (1.0 - t_view) * z0 + t_view * z1, records)
+        target_flow = stage_record(device, "flow_target", lambda: z1 - z0, records)
+        content_features = stage_record(device, "content_encode_features", lambda: trainer.model.encode_content_features(content), records)
+        content_tokens = stage_record(device, "content_project", lambda: trainer.model.content_proj(content_features), records)
+        style_pack = stage_record(
             device,
-            "style_encode_anchor",
-            lambda: trainer.model.encode_style(style_img=style, style_ref_mask=style_ref_mask),
+            "style_encode",
+            lambda: trainer.model.encode_style(
+                style_img=style,
+                style_ref_mask=style_ref_mask,
+                return_contrastive=False,
+                detach_style_encoder=(not trainer.style_grad_enabled),
+            ),
             records,
         )
-        noise_pred = stage_record(
+        style_tokens = style_pack["style_tokens"]
+        style_global = style_pack["style_global"]
+        style_token_mask = style_pack["style_token_mask"]
+        if style_tokens is None or style_token_mask is None or style_global is None:
+            raise RuntimeError("profile_memory requires style tokens.")
+        pred_flow = stage_record(
             device,
             "dit_backbone",
-            lambda: trainer.model.predict_noise(
+            lambda: trainer.model.predict_flow(
                 zt,
                 timesteps,
                 content_tokens=content_tokens,
@@ -183,29 +189,7 @@ def main() -> None:
             ),
             records,
         )
-        loss_diff = stage_record(device, "diff_loss", lambda: torch.nn.functional.mse_loss(noise_pred, noise), records)
-        z0_pred = stage_record(
-            device,
-            "predict_x0",
-            lambda: trainer.scheduler.predict_start_from_noise(zt, timesteps, noise_pred).clamp(-4.0, 4.0),
-            records,
-        )
-        recon = stage_record(device, "vae_decode", lambda: trainer.model.decode_from_latent(z0_pred), records)
-        loss_rec = stage_record(device, "recon_l1", lambda: torch.nn.functional.l1_loss(recon, target), records)
-        loss_perc = stage_record(device, "recon_perc", lambda: glyph_perceptual_loss(recon, target), records)
-        _, _, _, positive_style_embed = stage_record(
-            device,
-            "style_encode_positive",
-            lambda: trainer.model.encode_style(style_img=style_pos, style_ref_mask=style_ref_mask_pos),
-            records,
-        )
-        loss_ctr = stage_record(
-            device,
-            "contrastive_loss",
-            lambda: info_nce_loss(anchor_style_embed, positive_style_embed, trainer.contrastive_temperature),
-            records,
-        )
-        loss = loss_diff + 0.5 * loss_rec + 0.1 * loss_perc + (trainer._current_contrastive_weight() * loss_ctr)
+        loss = stage_record(device, "flow_loss", lambda: torch.nn.functional.mse_loss(pred_flow, target_flow), records)
 
     stage_record(device, "backward", lambda: loss.backward(), records)
     trainer.optimizer.step()

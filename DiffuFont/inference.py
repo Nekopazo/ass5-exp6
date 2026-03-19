@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inference entry for the content+style latent diffusion path."""
+"""Inference entry for the content+style latent flow path."""
 
 from __future__ import annotations
 
@@ -12,17 +12,21 @@ from PIL import Image, ImageDraw, ImageFont
 import torch
 
 from dataset import FontImageDataset
-from models.model import DiffusionTrainer
+from models.model import FlowTrainer
 from models.source_part_ref_dit import SourcePartRefDiT
 from style_augment import build_base_glyph_transform
 
 
-def load_trainer(checkpoint_path: Path, device: torch.device) -> DiffusionTrainer:
+def load_trainer(checkpoint_path: Path, device: torch.device) -> FlowTrainer:
     checkpoint = torch.load(checkpoint_path, map_location=device)
+    if checkpoint.get("stage") != "flow":
+        raise RuntimeError(f"Checkpoint is not a flow checkpoint: {checkpoint_path}")
     if "model_config" not in checkpoint:
-        raise RuntimeError("Checkpoint is missing 'model_config'; regenerate it with the refactored training path.")
+        raise RuntimeError("Checkpoint is missing 'model_config'.")
     model = SourcePartRefDiT(**checkpoint["model_config"])
-    trainer = DiffusionTrainer(model, device, total_steps=1, freeze_vae=False)
+    trainer = FlowTrainer(model, device, total_steps=1, freeze_vae=False)
+    if "model_state" not in checkpoint:
+        raise RuntimeError("Flow checkpoint is missing model weights.")
     trainer.model.load_state_dict(checkpoint["model_state"], strict=True)
     trainer.model.eval()
     return trainer
@@ -45,7 +49,7 @@ def find_sample_index(dataset: FontImageDataset, font_name: str, char: str) -> i
 
 @torch.no_grad()
 def run_inference(
-    trainer: DiffusionTrainer,
+    trainer: FlowTrainer,
     dataset: FontImageDataset,
     *,
     font_names: List[str],
@@ -60,7 +64,7 @@ def run_inference(
             content = sample["content"].unsqueeze(0)
             style = sample["style_img"].unsqueeze(0)
             style_ref_mask = sample["style_ref_mask"].unsqueeze(0)
-            generation = trainer.ddim_sample(
+            generation = trainer.flow_sample(
                 content,
                 style_img=style,
                 style_ref_mask=style_ref_mask,
@@ -125,7 +129,7 @@ def main() -> None:
     parser.add_argument("--num-chars", type=int, default=6)
     parser.add_argument("--font-names", type=str, default="")
     parser.add_argument("--chars", type=str, default="")
-    parser.add_argument("--inference-steps", type=int, default=50)
+    parser.add_argument("--inference-steps", type=int, default=24)
     parser.add_argument("--cell-size", type=int, default=128)
     args = parser.parse_args()
 

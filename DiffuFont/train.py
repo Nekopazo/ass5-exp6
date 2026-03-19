@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Training entry for the document-defined content+style latent diffusion path."""
+"""Training entry for the document-defined content+style latent flow path."""
 
 from __future__ import annotations
 
@@ -15,7 +15,8 @@ import torch
 from torch.utils.data import DataLoader
 
 from dataset import FontImageDataset, UniqueFontBatchSampler
-from models.model import DiffusionTrainer, StylePretrainTrainer, VAETrainer
+from models.model import FlowTrainer, StylePretrainTrainer, VAETrainer
+from models.sdpa_attention import describe_torch_sdpa_backends, enable_torch_sdpa_backends
 from models.source_part_ref_dit import SourcePartRefDiT
 from style_augment import build_base_glyph_transform
 
@@ -175,7 +176,7 @@ def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stage", type=str, default="diffusion", choices=["vae", "style", "diffusion"])
+    parser.add_argument("--stage", type=str, default="flow", choices=["vae", "style", "flow"])
     parser.add_argument("--data-root", type=Path, default=Path("."))
     parser.add_argument("--save-dir", type=Path, default=Path("checkpoints"))
     parser.add_argument("--resume", type=Path, default=None)
@@ -185,13 +186,13 @@ def main() -> None:
         "--train-vae-jointly",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Only used in diffusion stage. If false, a pretrained VAE checkpoint is required.",
+        help="Only used in flow stage. If false, a pretrained VAE checkpoint is required.",
     )
     parser.add_argument(
         "--train-style-jointly",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Only used in diffusion stage. If false, a pretrained style checkpoint is required.",
+        help="Only used in flow stage. If false, a pretrained style checkpoint is required.",
     )
 
     parser.add_argument("--epochs", type=int, default=10)
@@ -216,13 +217,14 @@ def main() -> None:
     parser.add_argument("--dit-depth", type=int, default=12)
     parser.add_argument("--dit-heads", type=int, default=8)
     parser.add_argument("--dit-mlp-ratio", type=float, default=4.0)
-    parser.add_argument("--local-style-tokens-per-ref", type=int, default=8)
-    parser.add_argument("--content-cross-attn-layers", type=int, default=-1)
-    parser.add_argument("--style-cross-attn-every-n-layers", type=int, default=2)
+    parser.add_argument("--local-style-tokens-per-ref", type=int, default=16)
+    parser.add_argument("--content-cross-attn-layers", type=int, default=8)
+    parser.add_argument("--style-cross-attn-every-n-layers", type=int, default=1)
     parser.add_argument("--contrastive-proj-dim", type=int, default=128)
 
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--timesteps", type=int, default=1000)
+    parser.add_argument("--lr-warmup-steps", type=int, default=0)
+    parser.add_argument("--lr-min-scale", type=float, default=1.0)
     parser.add_argument("--total-steps", type=int, default=0)
     parser.add_argument("--log-every-steps", type=int, default=100)
     parser.add_argument("--val-every-steps", type=int, default=100)
@@ -234,21 +236,19 @@ def main() -> None:
     parser.add_argument("--vae-lambda-perc", type=float, default=0.1)
     parser.add_argument("--vae-lambda-kl", type=float, default=1e-4)
 
-    parser.add_argument("--diff-lambda-diff", type=float, default=1.0)
-    parser.add_argument("--diff-lambda-rec", type=float, default=0.0)
-    parser.add_argument("--diff-lambda-perc", type=float, default=0.0)
-    parser.add_argument("--diff-lambda-kl", type=float, default=0.0)
-    parser.add_argument("--diff-lambda-ctr", type=float, default=0.0)
+    parser.add_argument("--flow-lambda", type=float, default=1.0)
+    parser.add_argument("--flow-sample-steps", type=int, default=24)
     parser.add_argument("--contrastive-temperature", type=float, default=0.1)
-    parser.add_argument("--contrastive-warmup-steps", type=int, default=5000)
     parser.add_argument("--style-lr-scale", type=float, default=0.1)
     parser.add_argument("--style-unfreeze-step", type=int, default=5000)
     parser.add_argument("--style-unfreeze-last-encoder-blocks", type=int, default=1)
     args = parser.parse_args()
 
     set_global_seed(int(args.seed))
+    enable_torch_sdpa_backends()
     device = resolve_device(args.device)
     print(f"[train] stage={args.stage} device={device} seed={int(args.seed)}")
+    print(f"[train] attention_backend={describe_torch_sdpa_backends()}")
     font_split_seed = int(args.seed) if args.font_split_seed is None else int(args.font_split_seed)
     log_every_steps = max(1, int(args.log_every_steps))
     val_every_steps = max(1, int(args.val_every_steps))
@@ -257,9 +257,9 @@ def main() -> None:
         save_every_steps = 1000 if args.stage in {"vae", "style"} else 5000
     sample_every_steps = int(args.sample_every_steps)
     if sample_every_steps <= 0:
-        sample_every_steps = 300 if args.stage == "diffusion" else 0
+        sample_every_steps = 300 if args.stage == "flow" else 0
 
-    include_positive_style = args.stage == "style" or float(args.diff_lambda_ctr) > 0.0
+    include_positive_style = args.stage == "style"
     glyph_transform = build_base_glyph_transform(image_size=int(args.image_size))
     dataset = FontImageDataset(
         project_root=args.data_root,
@@ -287,14 +287,15 @@ def main() -> None:
             transform=glyph_transform,
             style_transform=glyph_transform,
         )
-    use_unique_font_batches = args.stage == "style"
+    train_use_unique_font_batches = args.stage == "style"
+    val_use_unique_font_batches = args.stage == "style"
     dataloader = build_dataloader(
         dataset,
         batch_size=int(args.batch),
         num_workers=int(args.num_workers),
         device=device,
         seed=int(args.seed),
-        use_unique_font_batches=use_unique_font_batches,
+        use_unique_font_batches=train_use_unique_font_batches,
         shuffle=True,
     )
     val_dataloader = None
@@ -305,11 +306,16 @@ def main() -> None:
             num_workers=int(args.num_workers),
             device=device,
             seed=int(args.seed) + 1,
-            use_unique_font_batches=use_unique_font_batches,
+            use_unique_font_batches=val_use_unique_font_batches,
             shuffle=False,
         )
-    if use_unique_font_batches:
+    if train_use_unique_font_batches:
         print(f"[train] using unique-font batch sampler for contrastive training, batch={int(args.batch)}")
+    if val_use_unique_font_batches and val_dataset is not None:
+        print(
+            "[train] using unique-font batch sampler for contrastive validation, "
+            f"effective_batch<={min(int(args.batch), len(val_dataset.font_names))}"
+        )
 
     total_steps = int(args.total_steps)
     if total_steps <= 0:
@@ -321,7 +327,7 @@ def main() -> None:
     if resolved_content_cross_attn_layers <= 0:
         resolved_content_cross_attn_layers = math.ceil(int(args.dit_depth) * 2 / 3)
     style_unfreeze_step = int(args.style_unfreeze_step)
-    if args.stage == "diffusion" and style_unfreeze_step < 0:
+    if args.stage == "flow" and style_unfreeze_step < 0:
         style_unfreeze_step = 5000
     resolved_epochs = max(1, int(args.epochs))
     if len(dataloader) > 0:
@@ -329,10 +335,10 @@ def main() -> None:
 
     model = build_model(args)
 
-    if args.stage == "diffusion" and args.resume is None and not bool(args.train_vae_jointly) and args.vae_checkpoint is None:
-        raise ValueError("Diffusion stage requires --vae-checkpoint unless --train-vae-jointly is enabled.")
-    if args.stage == "diffusion" and args.resume is None and not bool(args.train_style_jointly) and args.style_checkpoint is None:
-        raise ValueError("Diffusion stage requires --style-checkpoint unless --train-style-jointly is enabled.")
+    if args.stage == "flow" and args.resume is None and not bool(args.train_vae_jointly) and args.vae_checkpoint is None:
+        raise ValueError("Flow stage requires --vae-checkpoint unless --train-vae-jointly is enabled.")
+    if args.stage == "flow" and args.resume is None and not bool(args.train_style_jointly) and args.style_checkpoint is None:
+        raise ValueError("Flow stage requires --style-checkpoint unless --train-style-jointly is enabled.")
     if args.vae_checkpoint is not None:
         model.load_vae_checkpoint(args.vae_checkpoint)
         print(f"[train] loaded VAE checkpoint: {args.vae_checkpoint}")
@@ -367,24 +373,20 @@ def main() -> None:
             val_max_batches=int(args.val_max_batches),
         )
     else:
-        trainer = DiffusionTrainer(
+        trainer = FlowTrainer(
             model,
             device,
             lr=float(args.lr),
-            timesteps=int(args.timesteps),
             total_steps=total_steps,
-            lambda_diff=float(args.diff_lambda_diff),
-            lambda_rec=float(args.diff_lambda_rec),
-            lambda_perc=float(args.diff_lambda_perc),
-            lambda_kl=float(args.diff_lambda_kl),
-            lambda_ctr=float(args.diff_lambda_ctr),
-            contrastive_temperature=float(args.contrastive_temperature),
-            contrastive_warmup_steps=int(args.contrastive_warmup_steps),
+            lambda_flow=float(args.flow_lambda),
             style_lr_scale=float(args.style_lr_scale),
             style_unfreeze_step=style_unfreeze_step,
             style_unfreeze_last_encoder_blocks=int(args.style_unfreeze_last_encoder_blocks),
             freeze_vae=not bool(args.train_vae_jointly),
             freeze_style=not bool(args.train_style_jointly),
+            flow_sample_steps=int(args.flow_sample_steps),
+            lr_warmup_steps=int(args.lr_warmup_steps),
+            lr_min_scale=float(args.lr_min_scale),
             log_every_steps=log_every_steps,
             save_every_steps=save_every_steps,
             val_every_steps=val_every_steps,
@@ -398,7 +400,7 @@ def main() -> None:
     first_batch = next(iter(dataloader))
     trainer.sample_batch = (
         build_sample_batch(dataset, val_dataset, device=device, seed=int(args.seed))
-        if args.stage == "diffusion"
+        if args.stage == "flow"
         else first_batch
     )
     trainer.sample_every_steps = sample_every_steps if sample_every_steps > 0 else None

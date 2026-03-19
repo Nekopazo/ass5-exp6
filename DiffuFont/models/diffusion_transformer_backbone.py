@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Latent DiT backbone for content+style glyph diffusion."""
+"""Latent DiT backbone for content+style glyph flow generation."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .xformers_attention import MemoryEfficientAttention
+from .sdpa_attention import SDPAAttention
 
 
 def _build_1d_sincos_pos_embed(embed_dim: int, positions: torch.Tensor) -> torch.Tensor:
@@ -82,9 +82,9 @@ class GlyphDiTBlock(nn.Module):
         self.norm_style = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
         self.norm_mlp = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
 
-        self.self_attn = MemoryEfficientAttention(hidden_dim, num_heads)
-        self.content_attn = MemoryEfficientAttention(hidden_dim, num_heads)
-        self.style_attn = MemoryEfficientAttention(hidden_dim, num_heads)
+        self.self_attn = SDPAAttention(hidden_dim, num_heads)
+        self.content_attn = SDPAAttention(hidden_dim, num_heads)
+        self.style_attn = SDPAAttention(hidden_dim, num_heads)
         self.mlp = FeedForward(hidden_dim, mlp_ratio)
         self.style_residual_gate = nn.Parameter(torch.tensor(0.1, dtype=torch.float32))
 
@@ -160,7 +160,7 @@ class DiffusionTransformerBackbone(nn.Module):
         num_heads: int = 8,
         mlp_ratio: float = 4.0,
         content_cross_attn_layers: int | None = None,
-        style_cross_attn_every_n_layers: int = 2,
+        style_cross_attn_every_n_layers: int = 1,
     ) -> None:
         super().__init__()
         self.latent_channels = int(latent_channels)

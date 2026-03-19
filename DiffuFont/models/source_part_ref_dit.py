@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional
 
@@ -11,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .diffusion_transformer_backbone import DiffusionTransformerBackbone, build_2d_sincos_pos_embed
-from .xformers_attention import MemoryEfficientAttention
+from .sdpa_attention import SDPAAttention
 
 
 def _group_count(channels: int) -> int:
@@ -110,7 +111,7 @@ class EncoderBlock(nn.Module):
         super().__init__()
         inner_dim = int(hidden_dim * mlp_ratio)
         self.norm1 = nn.LayerNorm(hidden_dim)
-        self.attn = MemoryEfficientAttention(hidden_dim, num_heads)
+        self.attn = SDPAAttention(hidden_dim, num_heads)
         self.norm2 = nn.LayerNorm(hidden_dim)
         self.mlp = nn.Sequential(
             nn.Linear(hidden_dim, inner_dim),
@@ -190,7 +191,7 @@ class AttentionTokenPool(nn.Module):
         self.output_tokens = int(output_tokens)
         self.query = nn.Parameter(torch.randn(1, self.output_tokens, hidden_dim) * 0.02)
         self.token_norm = nn.LayerNorm(hidden_dim)
-        self.attn = MemoryEfficientAttention(hidden_dim, num_heads)
+        self.attn = SDPAAttention(hidden_dim, num_heads)
         self.out_norm = nn.LayerNorm(hidden_dim)
 
     def forward(
@@ -227,7 +228,6 @@ class SourcePartRefDiT(nn.Module):
         "local_style_pool.",
         "style_global_proj.",
     )
-
     def __init__(
         self,
         *,
@@ -243,9 +243,9 @@ class SourcePartRefDiT(nn.Module):
         dit_depth: int = 12,
         dit_heads: int = 8,
         dit_mlp_ratio: float = 4.0,
-        local_style_tokens_per_ref: int = 8,
+        local_style_tokens_per_ref: int = 16,
         content_cross_attn_layers: int = 8,
-        style_cross_attn_every_n_layers: int = 2,
+        style_cross_attn_every_n_layers: int = 1,
         contrastive_proj_dim: int = 128,
     ) -> None:
         super().__init__()
@@ -292,8 +292,8 @@ class SourcePartRefDiT(nn.Module):
         )
         self.local_style_pool = AttentionTokenPool(
             hidden_dim=self.encoder_hidden_dim,
-            num_heads=self.encoder_heads,
             output_tokens=self.local_style_tokens_per_ref,
+            num_heads=self.encoder_heads,
         )
         self.backbone = DiffusionTransformerBackbone(
             latent_channels=self.latent_channels,
@@ -365,18 +365,9 @@ class SourcePartRefDiT(nn.Module):
 
     def load_vae_checkpoint(self, path: str | Path) -> None:
         checkpoint = torch.load(str(path), map_location="cpu")
-        if isinstance(checkpoint, dict) and "vae_state" in checkpoint:
-            state_dict = checkpoint["vae_state"]
-        elif isinstance(checkpoint, dict) and "model_state" in checkpoint:
-            state_dict = {
-                key.removeprefix("vae."): value
-                for key, value in checkpoint["model_state"].items()
-                if key.startswith("vae.")
-            }
-        elif isinstance(checkpoint, dict):
-            state_dict = checkpoint
-        else:
-            raise RuntimeError(f"Unsupported VAE checkpoint format: {type(checkpoint)}")
+        if not isinstance(checkpoint, dict) or "vae_state" not in checkpoint:
+            raise RuntimeError(f"VAE checkpoint must contain 'vae_state': {path}")
+        state_dict = checkpoint["vae_state"]
         self.vae.load_state_dict(state_dict, strict=True)
 
     @classmethod
@@ -390,88 +381,25 @@ class SourcePartRefDiT(nn.Module):
             if self._is_style_state_key(key)
         }
 
-    def _prepare_compatible_state_dict(
-        self,
-        state_dict: dict[str, torch.Tensor],
-    ) -> tuple[dict[str, torch.Tensor], list[str], list[str], list[str]]:
-        current_state = self.state_dict()
-        adapted_state: dict[str, torch.Tensor] = {}
-        resized_keys: list[str] = []
-        skipped_unknown_keys: list[str] = []
-        skipped_incompatible_keys: list[str] = []
-        for key, value in state_dict.items():
-            if key not in current_state:
-                skipped_unknown_keys.append(key)
-                continue
-            target_value = current_state[key]
-            if tuple(value.shape) == tuple(target_value.shape):
-                adapted_state[key] = value
-                continue
-            if (
-                key == "local_style_pool.query"
-                and value.ndim == 3
-                and target_value.ndim == 3
-                and value.size(0) == target_value.size(0)
-                and value.size(2) == target_value.size(2)
-            ):
-                if value.size(1) >= target_value.size(1):
-                    adapted_state[key] = value[:, : target_value.size(1), :].contiguous()
-                else:
-                    repeat_factor = (target_value.size(1) + value.size(1) - 1) // value.size(1)
-                    adapted_state[key] = value.repeat(1, repeat_factor, 1)[:, : target_value.size(1), :].contiguous()
-                resized_keys.append(f"{key}: {tuple(value.shape)} -> {tuple(target_value.shape)}")
-                continue
-            skipped_incompatible_keys.append(f"{key}: {tuple(value.shape)} != {tuple(target_value.shape)}")
-        return adapted_state, resized_keys, skipped_unknown_keys, skipped_incompatible_keys
-
-    def load_state_dict_compat(
-        self,
-        state_dict: dict[str, torch.Tensor],
-    ) -> dict[str, list[str]]:
-        adapted_state, resized_keys, skipped_unknown_keys, skipped_incompatible_keys = self._prepare_compatible_state_dict(state_dict)
-        missing_keys, unexpected_keys = self.load_state_dict(adapted_state, strict=False)
-        return {
-            "missing_keys": list(missing_keys),
-            "unexpected_keys": list(unexpected_keys),
-            "resized_keys": resized_keys,
-            "skipped_unknown_keys": skipped_unknown_keys,
-            "skipped_incompatible_keys": skipped_incompatible_keys,
-        }
-
     def load_style_checkpoint(self, path: str | Path) -> None:
         checkpoint = torch.load(str(path), map_location="cpu")
-        if isinstance(checkpoint, dict) and "style_state" in checkpoint:
-            state_dict = checkpoint["style_state"]
-        elif isinstance(checkpoint, dict) and "model_state" in checkpoint:
-            state_dict = {
-                key: value
-                for key, value in checkpoint["model_state"].items()
-                if self._is_style_state_key(key)
-            }
-        elif isinstance(checkpoint, dict):
-            state_dict = {
-                key: value
-                for key, value in checkpoint.items()
-                if self._is_style_state_key(key)
-            }
-        else:
-            raise RuntimeError(f"Unsupported style checkpoint format: {type(checkpoint)}")
+        if not isinstance(checkpoint, dict) or "style_state" not in checkpoint:
+            raise RuntimeError(f"Style checkpoint must contain 'style_state': {path}")
+        state_dict = checkpoint["style_state"]
 
         if not state_dict:
             raise RuntimeError(f"No style encoder weights found in checkpoint: {path}")
-        load_report = self.load_state_dict_compat(state_dict)
-        if load_report["resized_keys"]:
-            print("[style] resized checkpoint tensors: " + ", ".join(load_report["resized_keys"]), flush=True)
-        if load_report["skipped_unknown_keys"]:
-            print(
-                "[style] skipped unknown checkpoint keys: " + ", ".join(load_report["skipped_unknown_keys"]),
-                flush=True,
-            )
-        if load_report["skipped_incompatible_keys"]:
-            print(
-                "[style] skipped incompatible checkpoint keys: " + ", ".join(load_report["skipped_incompatible_keys"]),
-                flush=True,
-            )
+        missing_keys, unexpected_keys = self.load_state_dict(state_dict, strict=False)
+        unexpected_style_keys = [key for key in unexpected_keys if self._is_style_state_key(key)]
+        if unexpected_style_keys:
+            raise RuntimeError(f"Unexpected style checkpoint keys: {unexpected_style_keys}")
+        missing_style_keys = [
+            key
+            for key in missing_keys
+            if self._is_style_state_key(key)
+        ]
+        if missing_style_keys:
+            raise RuntimeError(f"Missing style checkpoint keys: {missing_style_keys}")
 
     def freeze_vae(self) -> None:
         for param in self.vae.parameters():
@@ -506,15 +434,19 @@ class SourcePartRefDiT(nn.Module):
         return trainable_params
 
     def encode_content(self, content_img: torch.Tensor) -> torch.Tensor:
+        return self.content_proj(self.encode_content_features(content_img))
+
+    def encode_content_features(self, content_img: torch.Tensor) -> torch.Tensor:
         content_tokens, _ = self.content_encoder(content_img)
-        return self.content_proj(content_tokens)
+        return content_tokens
 
     def encode_style(
         self,
         style_img: torch.Tensor,
         style_ref_mask: Optional[torch.Tensor] = None,
         return_contrastive: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        detach_style_encoder: bool = False,
+    ) -> dict[str, Optional[torch.Tensor]]:
         if style_img.dim() == 4:
             style_img = style_img.unsqueeze(1)
         if style_img.dim() != 5:
@@ -522,10 +454,6 @@ class SourcePartRefDiT(nn.Module):
 
         batch, refs, channels, height, width = style_img.shape
         flat_style = style_img.view(batch * refs, channels, height, width)
-        local_tokens, global_tokens = self.style_encoder(flat_style)
-        local_tokens = local_tokens.view(batch, refs, local_tokens.size(1), local_tokens.size(2))
-        global_tokens = global_tokens.view(batch, refs, global_tokens.size(-1))
-
         if style_ref_mask is None:
             ref_valid_mask = torch.ones((batch, refs), device=style_img.device, dtype=torch.bool)
         else:
@@ -535,20 +463,32 @@ class SourcePartRefDiT(nn.Module):
             ref_valid_mask = ref_valid_mask.clone()
             ref_valid_mask[empty_rows, 0] = True
 
-        global_style = self.global_style_pool(global_tokens, valid_mask=ref_valid_mask).squeeze(1)
+        style_token_mask = ref_valid_mask.unsqueeze(-1).expand(batch, refs, self.local_style_tokens_per_ref).reshape(batch, -1)
+        style_context = torch.no_grad() if detach_style_encoder else nullcontext()
+        with style_context:
+            local_tokens, global_tokens = self.style_encoder(flat_style)
+            local_tokens = local_tokens.view(batch, refs, local_tokens.size(1), local_tokens.size(2))
+            global_tokens = global_tokens.view(batch, refs, global_tokens.size(-1))
+            global_style = self.global_style_pool(global_tokens, valid_mask=ref_valid_mask).squeeze(1)
+            style_global = self.style_global_proj(global_style)
+            pooled_local = self.local_style_pool(local_tokens.reshape(batch * refs, local_tokens.size(2), local_tokens.size(3)))
+            pooled_local = pooled_local.view(batch, refs, self.local_style_tokens_per_ref, self.encoder_hidden_dim)
+            projected_local = self.style_proj(pooled_local)
+            projected_local = projected_local * ref_valid_mask.unsqueeze(-1).unsqueeze(-1).to(dtype=projected_local.dtype)
+            style_tokens = projected_local.reshape(batch, -1, projected_local.size(-1))
+            style_tokens = style_tokens * style_token_mask.unsqueeze(-1).to(dtype=style_tokens.dtype)
 
-        pooled_local = self.local_style_pool(local_tokens.view(batch * refs, local_tokens.size(2), local_tokens.size(3)))
-        pooled_local = pooled_local.view(batch, refs, pooled_local.size(1), pooled_local.size(2))
-        style_token_mask = ref_valid_mask.unsqueeze(-1).expand(batch, refs, pooled_local.size(2)).reshape(batch, -1)
-        pooled_local = pooled_local.reshape(batch, -1, pooled_local.size(-1))
-        pooled_local = pooled_local * style_token_mask.unsqueeze(-1).to(dtype=pooled_local.dtype)
-        style_global = self.style_global_proj(global_style)
         contrastive_style = None
         if return_contrastive:
             contrastive_style = F.normalize(self.style_contrastive_head(style_global), dim=-1)
-        return self.style_proj(pooled_local), style_global, style_token_mask, contrastive_style
+        return {
+            "style_tokens": style_tokens,
+            "style_global": style_global,
+            "style_token_mask": style_token_mask,
+            "contrastive_style": contrastive_style,
+        }
 
-    def predict_noise(
+    def predict_flow(
         self,
         x_t_latent: torch.Tensor,
         timesteps: torch.Tensor,
@@ -576,16 +516,17 @@ class SourcePartRefDiT(nn.Module):
         style_img: torch.Tensor,
         style_ref_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        content_tokens = self.encode_content(content_img)
-        style_tokens, style_global, style_token_mask, _ = self.encode_style(
+        content_features = self.encode_content_features(content_img)
+        content_tokens = self.content_proj(content_features)
+        style_pack = self.encode_style(
             style_img,
             style_ref_mask=style_ref_mask,
         )
-        return self.predict_noise(
+        return self.predict_flow(
             x_t_latent,
             timesteps,
             content_tokens=content_tokens,
-            style_tokens=style_tokens,
-            style_global=style_global,
-            style_token_mask=style_token_mask,
+            style_tokens=style_pack["style_tokens"],
+            style_global=style_pack["style_global"],
+            style_token_mask=style_pack["style_token_mask"],
         )

@@ -230,8 +230,8 @@ def main() -> None:
     parser.add_argument("--font-dir", type=Path, default=Path("DataPreparation/Font"))
     parser.add_argument("--font-indices", type=str, default=None, help="Comma-separated font indices from FontList")
 
-    parser.add_argument("--char-size", type=int, default=240)
-    parser.add_argument("--canvas-size", type=int, default=256)
+    parser.add_argument("--char-size", type=int, default=120)
+    parser.add_argument("--canvas-size", type=int, default=128)
     parser.add_argument("--x-offset", type=int, default=0)
     parser.add_argument("--y-offset", type=int, default=0)
     parser.add_argument("--out-dir", type=Path, default=Path("DataPreparation/Generated"))

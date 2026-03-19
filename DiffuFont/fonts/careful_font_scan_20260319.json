@@ -1,0 +1,1788 @@
+{
+  "font_count": 254,
+  "exact_same_filename_groups": {},
+  "same_stem_groups": {},
+  "casefold_same_filename_groups": {},
+  "casefold_same_stem_groups": {},
+  "exact_hash_groups": {},
+  "files": [
+    {
+      "name": "GF_ofl_mashanzheng_MaShanZheng-Regular.ttf",
+      "stem": "GF_ofl_mashanzheng_MaShanZheng-Regular",
+      "suffix": ".ttf",
+      "size": 5858048,
+      "sha256": "424aac479b0844fe2bd2117f1328331f8126253a14184335890152ac16de24e9"
+    },
+    {
+      "name": "GF_ofl_notosanssc_NotoSansSC[wght].ttf",
+      "stem": "GF_ofl_notosanssc_NotoSansSC[wght]",
+      "suffix": ".ttf",
+      "size": 17772300,
+      "sha256": "a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da"
+    },
+    {
+      "name": "HarmonyOS_Sans_SC_Light.ttf",
+      "stem": "HarmonyOS_Sans_SC_Light",
+      "suffix": ".ttf",
+      "size": 8336364,
+      "sha256": "dd366290b40861bc6ced85801e850ab66d6fe4c5b33bc43095a9747fa29288d8"
+    },
+    {
+      "name": "HarmonyOS_Sans_SC_Regular.ttf",
+      "stem": "HarmonyOS_Sans_SC_Regular",
+      "suffix": ".ttf",
+      "size": 8261128,
+      "sha256": "297b088424be212207df2ce8b98e335468b782aa6b96832af0b8b773d711e2b1"
+    },
+    {
+      "name": "HarmonyOS_Sans_SC_Thin.ttf",
+      "stem": "HarmonyOS_Sans_SC_Thin",
+      "suffix": ".ttf",
+      "size": 8408996,
+      "sha256": "a88d9065dc144bf462e6553e308e9d5256bfe1a068abb47a3ee1081d636ea91a"
+    },
+    {
+      "name": "MiSans-ExtraLight.otf",
+      "stem": "MiSans-ExtraLight",
+      "suffix": ".otf",
+      "size": 6683192,
+      "sha256": "bbbc6fb307711b3ec7e621027e0a835d248eb31ebca78e704ce9b3e62676ffa9"
+    },
+    {
+      "name": "MiSans-Light.otf",
+      "stem": "MiSans-Light",
+      "suffix": ".otf",
+      "size": 6629860,
+      "sha256": "d4df0f3f5b0e52bbbc7f7865b1a67bed97d6c4380deb5a8ddd2319688ab510e1"
+    },
+    {
+      "name": "MiSans-Regular.otf",
+      "stem": "MiSans-Regular",
+      "suffix": ".otf",
+      "size": 6499984,
+      "sha256": "962c1755fbfe9e0ac9762c9ec954784dcf0beb8cc2731537abddf8371b164b9a"
+    },
+    {
+      "name": "MiSans-Thin.otf",
+      "stem": "MiSans-Thin",
+      "suffix": ".otf",
+      "size": 6724924,
+      "sha256": "fa771c1adc0db9e6ed127d057333a5879e945f9db7309f9756c24293e9381a86"
+    },
+    {
+      "name": "SIMFANG.TTF",
+      "stem": "SIMFANG",
+      "suffix": ".TTF",
+      "size": 10580176,
+      "sha256": "eda36eecde18b26627f4abcfe5ccfaae65da43edb2c47e7e631b30b3a6fa8af8"
+    },
+    {
+      "name": "SIMHEI.TTF",
+      "stem": "SIMHEI",
+      "suffix": ".TTF",
+      "size": 9755440,
+      "sha256": "356495b9b8fbe3b8818d8ea8602e9e28bf94ac4134d7c6c2cc3c33639ed36718"
+    },
+    {
+      "name": "SIMLI.TTF",
+      "stem": "SIMLI",
+      "suffix": ".TTF",
+      "size": 9223160,
+      "sha256": "e5a3a1e2e2cb6fee66d1e7f821b5c04f3ad7792f1e5b3cac545c2e52173e908d"
+    },
+    {
+      "name": "STFANGSO.TTF",
+      "stem": "STFANGSO",
+      "suffix": ".TTF",
+      "size": 11362788,
+      "sha256": "e6326459e8e60e436c7d60e34d273bda3ba4eea2d2a5b309ff8f1b73200f2e38"
+    },
+    {
+      "name": "STKAITI.TTF",
+      "stem": "STKAITI",
+      "suffix": ".TTF",
+      "size": 12736196,
+      "sha256": "a29c99c161fc43ce6aba2d7c152065359c2cb3019be4ae6248171178cb7d04d5"
+    },
+    {
+      "name": "STLITI.TTF",
+      "stem": "STLITI",
+      "suffix": ".TTF",
+      "size": 4111960,
+      "sha256": "cf135c073d731ef7e7ae86e715b7efccad41fe915d620bff393a07d70a190865"
+    },
+    {
+      "name": "STSONG.TTF",
+      "stem": "STSONG",
+      "suffix": ".TTF",
+      "size": 11697600,
+      "sha256": "c5cc2ed5e2c0e6385013fe82d950eee6960d805bd602b86c53ff454783f382c4"
+    },
+    {
+      "name": "STXIHEI.TTF",
+      "stem": "STXIHEI",
+      "suffix": ".TTF",
+      "size": 9768704,
+      "sha256": "f4ccbf1caf92f38ee8f8d63edf7cf78856fdf964982d719632ef3f6960ab9fea"
+    },
+    {
+      "name": "STXINGKA.TTF",
+      "stem": "STXINGKA",
+      "suffix": ".TTF",
+      "size": 4016288,
+      "sha256": "7f901dfb0526d542740264fb5ba8dfe483293ad060270d273593e2f04a69d080"
+    },
+    {
+      "name": "STXINWEI.TTF",
+      "stem": "STXINWEI",
+      "suffix": ".TTF",
+      "size": 4051204,
+      "sha256": "7f2fb3442bec38afecc78e1548a9d154cc225d4cfd9cbc0f8c469311ab43e36a"
+    },
+    {
+      "name": "STZHONGS.TTF",
+      "stem": "STZHONGS",
+      "suffix": ".TTF",
+      "size": 12135284,
+      "sha256": "e822a3f2859a6cc982f04c6ad1eabc18371ce26d6874b710188a30c35dced0f1"
+    },
+    {
+      "name": "SourceHanSansCN-Bold#1.otf",
+      "stem": "SourceHanSansCN-Bold#1",
+      "suffix": ".otf",
+      "size": 8556600,
+      "sha256": "50552768bc1760f70f57a3eaf110cd9219c0b49cee28698a8f62f8ba46f56357"
+    },
+    {
+      "name": "SourceHanSansCN-Heavy#1.otf",
+      "stem": "SourceHanSansCN-Heavy#1",
+      "suffix": ".otf",
+      "size": 8869364,
+      "sha256": "33dfc1cfd41e56b07ee7048a077c3d1e8e7b9024f9b50e0e73c4b5c44268a299"
+    },
+    {
+      "name": "SourceHanSansCN-Light#1.otf",
+      "stem": "SourceHanSansCN-Light#1",
+      "suffix": ".otf",
+      "size": 8312540,
+      "sha256": "d5348cdaea1b59c00e38ea2d74333eade4439ad50191f0fd5137716240c81b5a"
+    },
+    {
+      "name": "SourceHanSansCN-Medium#1.otf",
+      "stem": "SourceHanSansCN-Medium#1",
+      "suffix": ".otf",
+      "size": 8358876,
+      "sha256": "5fad5a83f0e0acce9c4b47b167dc88c84eb96f9a88d6ad3502a5933b4220ca93"
+    },
+    {
+      "name": "SourceHanSansCN-Regular#1.otf",
+      "stem": "SourceHanSansCN-Regular#1",
+      "suffix": ".otf",
+      "size": 8344732,
+      "sha256": "d846badcbe9d008c2e508d79346f19e6ca883461a368dc7eecfdf8efa1046c7b"
+    },
+    {
+      "name": "SourceHanSerifCN-Bold.otf",
+      "stem": "SourceHanSerifCN-Bold",
+      "suffix": ".otf",
+      "size": 12115968,
+      "sha256": "72c4dcbe39b664ad4e3673b7699ae7f1fb899e8e0b7cd80579f896b21e74cf3c"
+    },
+    {
+      "name": "SourceHanSerifCN-Heavy.otf",
+      "stem": "SourceHanSerifCN-Heavy",
+      "suffix": ".otf",
+      "size": 11865140,
+      "sha256": "845a30ef999d2befb25406ae6940d5c50daf2e5f4108b202a8451da13773ad5f"
+    },
+    {
+      "name": "SourceHanSerifCN-Medium.otf",
+      "stem": "SourceHanSerifCN-Medium",
+      "suffix": ".otf",
+      "size": 11743620,
+      "sha256": "4028d82a30ee1fbacc8fcaa6f5599099c28263c88df7f6261db52fcbeddf1359"
+    },
+    {
+      "name": "SourceHanSerifCN-Regular.otf",
+      "stem": "SourceHanSerifCN-Regular",
+      "suffix": ".otf",
+      "size": 11632772,
+      "sha256": "719e74efe094060d1fdff4cb0a6df6d8ef264d4c2abd8bb0410e16c67eb96dec"
+    },
+    {
+      "name": "SourceHanSerifCN-SemiBold.otf",
+      "stem": "SourceHanSerifCN-SemiBold",
+      "suffix": ".otf",
+      "size": 11784692,
+      "sha256": "c5fe444e6f0f2c47e6a5ca577172bd43b97bd3f393bddf81a304f09dca19496d"
+    },
+    {
+      "name": "华康俪金黑W8_P.TTF",
+      "stem": "华康俪金黑W8_P",
+      "suffix": ".TTF",
+      "size": 1997928,
+      "sha256": "12208c08e7ce921a0caaa997a4aab65a46fae00526dc147a2e99607324ca0076"
+    },
+    {
+      "name": "华康圆体W7(JULY).TTF",
+      "stem": "华康圆体W7(JULY)",
+      "suffix": ".TTF",
+      "size": 2915096,
+      "sha256": "b18a29b8c6591c4d04d030d31805e579bc4310d0de54a543c648ac9f977a1072"
+    },
+    {
+      "name": "华康少女体 .TTF",
+      "stem": "华康少女体 ",
+      "suffix": ".TTF",
+      "size": 3917384,
+      "sha256": "2d6fdff406baf72ce7bfe5257a4c80b8c6946dba9d41d8fea250612e7744c213"
+    },
+    {
+      "name": "华康布丁体W12(P).TTF",
+      "stem": "华康布丁体W12(P)",
+      "suffix": ".TTF",
+      "size": 3896388,
+      "sha256": "ccb134d53f8e6b9be69e72661af73cdd96dbc0e639fb313cd3598526d33331a4"
+    },
+    {
+      "name": "华康楷体W5-A.TTF",
+      "stem": "华康楷体W5-A",
+      "suffix": ".TTF",
+      "size": 22309504,
+      "sha256": "14fd01e4f2f5dbf06908da36add19e6bc91d092389d7ae842edc6f13158ba9ba"
+    },
+    {
+      "name": "华康海报体简W12_P.TTF",
+      "stem": "华康海报体简W12_P",
+      "suffix": ".TTF",
+      "size": 2560596,
+      "sha256": "42f762abee44b58e90e336a614f796e8c53601feade78b259c93c1ea97c4581d"
+    },
+    {
+      "name": "方正FW欢乐体 简.TTF",
+      "stem": "方正FW欢乐体 简",
+      "suffix": ".TTF",
+      "size": 1796908,
+      "sha256": "63efe51cb7f8415b1dd1c76799bc029c50b65950fddf1449c811bd5ff03566f1"
+    },
+    {
+      "name": "方正FW童趣POP体 简.TTF",
+      "stem": "方正FW童趣POP体 简",
+      "suffix": ".TTF",
+      "size": 2420184,
+      "sha256": "1b8aade58cb90dd440c9e982cffa21564c093243e185a2028e95c8fd0643d12c"
+    },
+    {
+      "name": "方正丁子同行楷 简.TTF",
+      "stem": "方正丁子同行楷 简",
+      "suffix": ".TTF",
+      "size": 7623796,
+      "sha256": "e3a95826895321628f984df3a887aa91d119cd98388a2e43eac5073db7b7b3e6"
+    },
+    {
+      "name": "方正三宝体 简.TTF",
+      "stem": "方正三宝体 简",
+      "suffix": ".TTF",
+      "size": 1553180,
+      "sha256": "315a948f3bb0bac9ef708b602109d1a5373e2f2f60d483f73687662f10f544e8"
+    },
+    {
+      "name": "方正三宝体 简_Xi.TTF",
+      "stem": "方正三宝体 简_Xi",
+      "suffix": ".TTF",
+      "size": 1558396,
+      "sha256": "5908138c308a43479e5077691866f4786dc245341c8b00d409d0250fb95fad2b"
+    },
+    {
+      "name": "方正三宝体 简_Xian.TTF",
+      "stem": "方正三宝体 简_Xian",
+      "suffix": ".TTF",
+      "size": 1562396,
+      "sha256": "289393e08334f443b6e828be27457f34c224dd29b896ea4d3310976dcc0a7f04"
+    },
+    {
+      "name": "方正中俊黑简体.ttf",
+      "stem": "方正中俊黑简体",
+      "suffix": ".ttf",
+      "size": 2038048,
+      "sha256": "92cc593393ce52b6af48ff70671283faee1065d44facb647adec2ba1b7f5b213"
+    },
+    {
+      "name": "方正中倩简体.ttf",
+      "stem": "方正中倩简体",
+      "suffix": ".ttf",
+      "size": 2686772,
+      "sha256": "9b37ddb92452c126c33e4fc56fc9ed91b8145f73ed88d050f3cacce5529b1de5"
+    },
+    {
+      "name": "方正中等线简体.ttf",
+      "stem": "方正中等线简体",
+      "suffix": ".ttf",
+      "size": 3104248,
+      "sha256": "914e42e5fe0413f8de4c0a4c868b3abc4bab43f0728a3cbed823bd0e5457bc9a"
+    },
+    {
+      "name": "方正中雅宋.ttf",
+      "stem": "方正中雅宋",
+      "suffix": ".ttf",
+      "size": 3436464,
+      "sha256": "644d34ec9e89943f8b04f34a13d27dfde979171974269aaf12784b336ff26600"
+    },
+    {
+      "name": "方正书宋简体.ttf",
+      "stem": "方正书宋简体",
+      "suffix": ".ttf",
+      "size": 2763072,
+      "sha256": "c10fc97e195530e1835ac9ce4157003ef5a761f49c2c520e0150f3f8c339d00a"
+    },
+    {
+      "name": "方正仿宋简体.TTF",
+      "stem": "方正仿宋简体",
+      "suffix": ".TTF",
+      "size": 3595788,
+      "sha256": "3a50734ddfff1aaeac68bbc49ee2d4c611620b21ad3e33b8f0cc5cce40ab6b68"
+    },
+    {
+      "name": "方正体坛粗黑简体.TTF",
+      "stem": "方正体坛粗黑简体",
+      "suffix": ".TTF",
+      "size": 2521816,
+      "sha256": "fe9789008d684d590b91c1845f5ac2b8ae78111a5c25d0a16492458015488385"
+    },
+    {
+      "name": "方正体坛超黑简体.TTF",
+      "stem": "方正体坛超黑简体",
+      "suffix": ".TTF",
+      "size": 2534284,
+      "sha256": "3b0fedb4a2a9633bb0cb5da99da1cf18e45377af61ecfe64aea22180e57567d3"
+    },
+    {
+      "name": "方正俊黑简体.ttf",
+      "stem": "方正俊黑简体",
+      "suffix": ".ttf",
+      "size": 2017060,
+      "sha256": "b0361ad386f5b8f52a8bf1d1bc078470c96c788a7d64aa8c876665a11e3b1c97"
+    },
+    {
+      "name": "方正光辉特粗简体.TTF",
+      "stem": "方正光辉特粗简体",
+      "suffix": ".TTF",
+      "size": 2947960,
+      "sha256": "5af61ea03595a65bc1d99500cb99a13d4bd4c907d1ea9c4b53605708846a3394"
+    },
+    {
+      "name": "方正八大山人行楷 简.TTF",
+      "stem": "方正八大山人行楷 简",
+      "suffix": ".TTF",
+      "size": 11765712,
+      "sha256": "6a5d4f11323005f20ff0d14428536e1d49282e95744344a1e38fcc587a4ad528"
+    },
+    {
+      "name": "方正公文仿宋.ttf",
+      "stem": "方正公文仿宋",
+      "suffix": ".ttf",
+      "size": 13002028,
+      "sha256": "52b96b85397b4dff0a07645bef6c090720b7219ed9ac2131990972cfd9d26481"
+    },
+    {
+      "name": "方正公文小标宋.ttf",
+      "stem": "方正公文小标宋",
+      "suffix": ".ttf",
+      "size": 14248860,
+      "sha256": "be1591e68ee790e8db49f7f8e952fd8dfd588b750eb6158e8b4acb546ce2b5f3"
+    },
+    {
+      "name": "方正公文楷体.TTF",
+      "stem": "方正公文楷体",
+      "suffix": ".TTF",
+      "size": 16333928,
+      "sha256": "74f4b640c75eda5539f89367112b7c30b99c9aaaa355a2c3e80ca5f37099d27b"
+    },
+    {
+      "name": "方正公文黑体.TTF",
+      "stem": "方正公文黑体",
+      "suffix": ".TTF",
+      "size": 9115488,
+      "sha256": "fec33811d7c7d8f8deb5fa084a4618913494ae258d11f11b76d5a5c3fca42383"
+    },
+    {
+      "name": "方正兰亭中黑简体.TTF",
+      "stem": "方正兰亭中黑简体",
+      "suffix": ".TTF",
+      "size": 2389112,
+      "sha256": "e0d062316421a461684ac7509e0ccf7812350d70e80bc1d589888058155daab4"
+    },
+    {
+      "name": "方正兰亭刊黑简体.ttf",
+      "stem": "方正兰亭刊黑简体",
+      "suffix": ".ttf",
+      "size": 7077032,
+      "sha256": "761db6e3c21a8558fa0ea8138db22923cf473714319ba2fa86a09cd81f73aca8"
+    },
+    {
+      "name": "方正兰亭圆简体.ttf",
+      "stem": "方正兰亭圆简体",
+      "suffix": ".ttf",
+      "size": 3495016,
+      "sha256": "cbf83a21900d2c97282443fd324e7d84212ab0a4826e8985455570dc29decccd"
+    },
+    {
+      "name": "方正兰亭圆简体_纤.TTF",
+      "stem": "方正兰亭圆简体_纤",
+      "suffix": ".TTF",
+      "size": 3481216,
+      "sha256": "2e1214082c7f02aa32e57d0069a18f2537b072279aeafd601604d669a6cd545b"
+    },
+    {
+      "name": "方正兰亭大黑简体.TTF",
+      "stem": "方正兰亭大黑简体",
+      "suffix": ".TTF",
+      "size": 2383212,
+      "sha256": "a11cea5b9005a6494732248695231c97d83450dae9fee4bd47bdbfc12e3f865d"
+    },
+    {
+      "name": "方正兰亭宋简体.TTF",
+      "stem": "方正兰亭宋简体",
+      "suffix": ".TTF",
+      "size": 4976320,
+      "sha256": "a65207da3eedc71f27aa647887a8fb3b292755c220616ce34fc88e500e52c807"
+    },
+    {
+      "name": "方正兰亭特黑扁简体.TTF",
+      "stem": "方正兰亭特黑扁简体",
+      "suffix": ".TTF",
+      "size": 1888454,
+      "sha256": "0dbf5150e6fcd1a07a5c0986d24236f101bbccb107d8aff10b08d5c4d0ea8a01"
+    },
+    {
+      "name": "方正兰亭特黑长简体.TTF",
+      "stem": "方正兰亭特黑长简体",
+      "suffix": ".TTF",
+      "size": 1879322,
+      "sha256": "93610f11a2c09172492542a91dfc56bf088d6047c7c02504b3bab66906935050"
+    },
+    {
+      "name": "方正兰亭粗黑简体.TTF",
+      "stem": "方正兰亭粗黑简体",
+      "suffix": ".TTF",
+      "size": 2434018,
+      "sha256": "c1bf36feb6452a31c8095b4f05c267e476a2b59e812e7bebaa2c38cd9a2eb30b"
+    },
+    {
+      "name": "方正兰亭纤黑.ttf",
+      "stem": "方正兰亭纤黑",
+      "suffix": ".ttf",
+      "size": 8030000,
+      "sha256": "508e401de6ea488542a0062ade41231ee78e7916458a31bbc0d2a3800ab6e1ed"
+    },
+    {
+      "name": "方正兰亭细黑简体.TTF",
+      "stem": "方正兰亭细黑简体",
+      "suffix": ".TTF",
+      "size": 2385960,
+      "sha256": "fb08dcd7a9383c8f8fe755b4ecc126c679983b77fe2ca4fab1fcc7db4c924cb4"
+    },
+    {
+      "name": "方正兰亭超细黑简体.TTF",
+      "stem": "方正兰亭超细黑简体",
+      "suffix": ".TTF",
+      "size": 2119788,
+      "sha256": "3dce06a1d130202a715e28362469bc315cd6aeb9b6119bf70a770de98eb3e29e"
+    },
+    {
+      "name": "方正兰亭黑Pro 简 ExtraLight.TTF",
+      "stem": "方正兰亭黑Pro 简 ExtraLight",
+      "suffix": ".TTF",
+      "size": 2222228,
+      "sha256": "e18a0d6bd75a3eae38fb4967a2150c732f6a6a6cc2e887621adf64db9f73a5ee"
+    },
+    {
+      "name": "方正兰亭黑Pro 简 Light.TTF",
+      "stem": "方正兰亭黑Pro 简 Light",
+      "suffix": ".TTF",
+      "size": 2204040,
+      "sha256": "837711811fc7f9965a76ffc6c27fbd251772182fa3a054136a829ae9952de143"
+    },
+    {
+      "name": "方正兰亭黑Pro 简.TTF",
+      "stem": "方正兰亭黑Pro 简",
+      "suffix": ".TTF",
+      "size": 2197864,
+      "sha256": "c463ecfa7f5eb20bc8d73f5c3e1e859a35adde9f273d9fe28b932206aee456ae"
+    },
+    {
+      "name": "方正兰亭黑扁简体.ttf",
+      "stem": "方正兰亭黑扁简体",
+      "suffix": ".ttf",
+      "size": 1864076,
+      "sha256": "3da300ea7e77dd7b7777901cb5bec714b8ccbbb2b8314277a3d747dd21ef7443"
+    },
+    {
+      "name": "方正兰亭黑简体.TTF",
+      "stem": "方正兰亭黑简体",
+      "suffix": ".TTF",
+      "size": 2400742,
+      "sha256": "31f7a8392ffee25950fe8ee0ec88452558943548f754abd471f2f4b336e5ad79"
+    },
+    {
+      "name": "方正兰亭黑长简体.ttf",
+      "stem": "方正兰亭黑长简体",
+      "suffix": ".ttf",
+      "size": 2394412,
+      "sha256": "121da796f5f810f064d6254dbfddb4bbe2eae06cde175317cd9e00a4691c943e"
+    },
+    {
+      "name": "方正准俊黑简体.ttf",
+      "stem": "方正准俊黑简体",
+      "suffix": ".ttf",
+      "size": 2026016,
+      "sha256": "cd5fc67856a9b9e6f5a76b397b5afbbfc62d5bbb8f8ca3899cd681624ac85af5"
+    },
+    {
+      "name": "方正准圆简体.ttf",
+      "stem": "方正准圆简体",
+      "suffix": ".ttf",
+      "size": 2864016,
+      "sha256": "b680e613878e1a81b1f3b5d7af9dd0708e727e71d6c1f04e09e60ebb60bb9f77"
+    },
+    {
+      "name": "方正准雅宋简.TTF",
+      "stem": "方正准雅宋简",
+      "suffix": ".TTF",
+      "size": 3450722,
+      "sha256": "c1cb4cfce61a09647e9d71da7e1876404e2d100534333105fa9e935b623fac55"
+    },
+    {
+      "name": "方正创黑 简.TTF",
+      "stem": "方正创黑 简",
+      "suffix": ".TTF",
+      "size": 2462660,
+      "sha256": "1dcd5c8c14fd69b16d22b1ab55b6813aeae7a126bb811e2a52bac625f00b8263"
+    },
+    {
+      "name": "方正剑体简体.ttf",
+      "stem": "方正剑体简体",
+      "suffix": ".ttf",
+      "size": 2736004,
+      "sha256": "dbd770b26476bd8ed1371a2c631e4cb99cdb281a1520e1fd105f86bd7586a716"
+    },
+    {
+      "name": "方正剪纸简体.ttf",
+      "stem": "方正剪纸简体",
+      "suffix": ".ttf",
+      "size": 1507392,
+      "sha256": "d6e6bfaf209c2e6536b7fc91e73cfd0c65320913775bdd2c552b34cc6a4e3ad3"
+    },
+    {
+      "name": "方正劲黑简体.TTF",
+      "stem": "方正劲黑简体",
+      "suffix": ".TTF",
+      "size": 1351176,
+      "sha256": "8a893872679f11a583086bd8ff075b58efb0886499d07c9359ca2788c04001b0"
+    },
+    {
+      "name": "方正北魏楷书简体.ttf",
+      "stem": "方正北魏楷书简体",
+      "suffix": ".ttf",
+      "size": 4312196,
+      "sha256": "a3f03e693f9acb1a58d0953bacb1c51ebfbb5a9d45702599401f2f212c47e4dd"
+    },
+    {
+      "name": "方正华隶简体.ttf",
+      "stem": "方正华隶简体",
+      "suffix": ".ttf",
+      "size": 5265928,
+      "sha256": "7eb6e7dbdace2a2bc7bf0ab3cdac9524e6302d250b9f6002bb2d053b070c1b86"
+    },
+    {
+      "name": "方正卓越体 简.TTF",
+      "stem": "方正卓越体 简",
+      "suffix": ".TTF",
+      "size": 1498512,
+      "sha256": "4c1bcc15a6cd8703a215ec2b77e6aeb21077eaa80247448769c46c414012927c"
+    },
+    {
+      "name": "方正卓越体 简_Cu.TTF",
+      "stem": "方正卓越体 简_Cu",
+      "suffix": ".TTF",
+      "size": 1481988,
+      "sha256": "4bd527c67255ffaa8f0ee9d52a6ddf33017d164cefdd179aa5d9f2554393842c"
+    },
+    {
+      "name": "方正卓越体 简_Xi.TTF",
+      "stem": "方正卓越体 简_Xi",
+      "suffix": ".TTF",
+      "size": 1503392,
+      "sha256": "193dcafe451224a2dbc3256a27b82c8587079f08cf1043ea55a2dc1ac473abd9"
+    },
+    {
+      "name": "方正卓越体 简_Xian.TTF",
+      "stem": "方正卓越体 简_Xian",
+      "suffix": ".TTF",
+      "size": 1507088,
+      "sha256": "c53b36e7c10d4980b6f25993214b4e6a216288a125cf261741ec3073ab1839ce"
+    },
+    {
+      "name": "方正博雅宋.TTF",
+      "stem": "方正博雅宋",
+      "suffix": ".TTF",
+      "size": 8426452,
+      "sha256": "409f305bbdfd11bbbdce7ebd22a2328a4dc554bba3d1a02f502f7cca225ada18"
+    },
+    {
+      "name": "方正博雅方刊宋.TTF",
+      "stem": "方正博雅方刊宋",
+      "suffix": ".TTF",
+      "size": 10273108,
+      "sha256": "4e34c73fba457eaf239d821129e47e6d75cafcaab586c1a23dce8c50762310d2"
+    },
+    {
+      "name": "方正卡通简体.ttf",
+      "stem": "方正卡通简体",
+      "suffix": ".ttf",
+      "size": 2862532,
+      "sha256": "609b6fd14a192e65bdcbb00f235377cb0aa7ddd003a833d840e95296ab3ca710"
+    },
+    {
+      "name": "方正古仿简体.TTF",
+      "stem": "方正古仿简体",
+      "suffix": ".TTF",
+      "size": 6970988,
+      "sha256": "c6ceee8a6a56108a69cd75f91b630176799982591561aad369022cabdb74c5f2"
+    },
+    {
+      "name": "方正古隶简体.ttf",
+      "stem": "方正古隶简体",
+      "suffix": ".ttf",
+      "size": 6755668,
+      "sha256": "149ff8cbc44ab5b4496abad1bce28acaa4b3d9f9471b4622af140f836fecfcc1"
+    },
+    {
+      "name": "方正启体简体.ttf",
+      "stem": "方正启体简体",
+      "suffix": ".ttf",
+      "size": 6570960,
+      "sha256": "2ea685171d352183049d70d8cca8419990e8c347071ebdc30b7e7997ceb9ec4e"
+    },
+    {
+      "name": "方正和悦体 简 Bold.TTF",
+      "stem": "方正和悦体 简 Bold",
+      "suffix": ".TTF",
+      "size": 2590624,
+      "sha256": "b627fefd715482b4485c696482cfc90dd18a29e484dbc1d128b8b8fccc51bc1f"
+    },
+    {
+      "name": "方正和悦体 简 Light.TTF",
+      "stem": "方正和悦体 简 Light",
+      "suffix": ".TTF",
+      "size": 2697244,
+      "sha256": "a8582a911e927bff69d5ec2c6f0cf2ee8bd699c504a39abec82cb9df7fcdfa75"
+    },
+    {
+      "name": "方正和悦体 简.TTF",
+      "stem": "方正和悦体 简",
+      "suffix": ".TTF",
+      "size": 2669836,
+      "sha256": "eaf9063162c3afeac993d8a90c9f1e2cbb2be87985ef6ab7fb9f3dc592def1a8"
+    },
+    {
+      "name": "方正品尚细黑简体.TTF",
+      "stem": "方正品尚细黑简体",
+      "suffix": ".TTF",
+      "size": 2332968,
+      "sha256": "cde47b63041bf901a5b2d8aad96335072229d29c8be98e676d50cc18da528ae1"
+    },
+    {
+      "name": "方正品尚黑简体.TTF",
+      "stem": "方正品尚黑简体",
+      "suffix": ".TTF",
+      "size": 2341434,
+      "sha256": "d0c3d01786f262a2d4abb5aaea6571b7826319b4406c42d845815151e2f3f7b2"
+    },
+    {
+      "name": "方正喵呜体.ttf",
+      "stem": "方正喵呜体",
+      "suffix": ".ttf",
+      "size": 5670984,
+      "sha256": "e5336454a54d77b27d53e45bbce175ae57d5912cea3f1aa321285f05ff56d73f"
+    },
+    {
+      "name": "方正大标宋简体.TTF",
+      "stem": "方正大标宋简体",
+      "suffix": ".TTF",
+      "size": 3561824,
+      "sha256": "c7e50c2b574ab3632185873b526460e790bb512609d04bb8b731306637c97ad6"
+    },
+    {
+      "name": "方正大魏体简体.TTF",
+      "stem": "方正大魏体简体",
+      "suffix": ".TTF",
+      "size": 3417152,
+      "sha256": "240c908b755a92b59bbc6b430c64b460ca83e68f3b96c8cece09427b59a356ed"
+    },
+    {
+      "name": "方正大黑简体.TTF",
+      "stem": "方正大黑简体",
+      "suffix": ".TTF",
+      "size": 2183628,
+      "sha256": "793a171814f089a326f7c71f3ef5b6d133d37a73ae095adc82b22ba4fff726b9"
+    },
+    {
+      "name": "方正姚体.ttf",
+      "stem": "方正姚体",
+      "suffix": ".ttf",
+      "size": 3234968,
+      "sha256": "84b6c890d11a9bcf1c7fe6b1b54b47aa067e432478a9710a4e1c4da2c8a9ed5a"
+    },
+    {
+      "name": "方正字迹-吕建德字体.ttf",
+      "stem": "方正字迹-吕建德字体",
+      "suffix": ".ttf",
+      "size": 8110016,
+      "sha256": "65e154aa4f9b0b125715c0cfa68111bdc2e32464739db6f4ccce7bda57b5f685"
+    },
+    {
+      "name": "方正字迹-张颢硬笔楷书.ttf",
+      "stem": "方正字迹-张颢硬笔楷书",
+      "suffix": ".ttf",
+      "size": 8802880,
+      "sha256": "cfc0f2120c15afa8ad6849d8f32140e95bc2f9216ba54d325bf04e18a5d2553f"
+    },
+    {
+      "name": "方正字迹-惊鸿体 简.TTF",
+      "stem": "方正字迹-惊鸿体 简",
+      "suffix": ".TTF",
+      "size": 16471816,
+      "sha256": "f51aa4f65c7a21987a7f299f666036920bd0856ce015a67eacea998c8589704e"
+    },
+    {
+      "name": "方正字迹-方正佩安体.ttf",
+      "stem": "方正字迹-方正佩安体",
+      "suffix": ".ttf",
+      "size": 11422796,
+      "sha256": "5565b5edfb1986f4da2be42a0020da0b4a1522b9a3298794c3a10f6523b3737d"
+    },
+    {
+      "name": "方正字迹-曾正国楷体.ttf",
+      "stem": "方正字迹-曾正国楷体",
+      "suffix": ".ttf",
+      "size": 17966388,
+      "sha256": "d5a2e962cff2d8aefba31118d96b07933be4cb7c2fc99fd72cc29f8f82cebe03"
+    },
+    {
+      "name": "方正字迹-童体毛笔字体.ttf",
+      "stem": "方正字迹-童体毛笔字体",
+      "suffix": ".ttf",
+      "size": 3643032,
+      "sha256": "6280dacd5db5a77e84065482bc28bc17122b2b4711bb8f598fdc0b1afcd61427"
+    },
+    {
+      "name": "方正字迹-童体硬笔字体.ttf",
+      "stem": "方正字迹-童体硬笔字体",
+      "suffix": ".ttf",
+      "size": 5716316,
+      "sha256": "0bdfea85663f630d27759e8fce522dc9f66acf88a891ece46d04bebec888f3f3"
+    },
+    {
+      "name": "方正字迹-龙吟体 简.TTF",
+      "stem": "方正字迹-龙吟体 简",
+      "suffix": ".TTF",
+      "size": 19461628,
+      "sha256": "850a0d5d6772f9db0ac3833fac54ba9aac43915d6723c8a084e9ea1a5bc25628"
+    },
+    {
+      "name": "方正宋一简体.ttf",
+      "stem": "方正宋一简体",
+      "suffix": ".ttf",
+      "size": 3606168,
+      "sha256": "9e772cf3850ae3da6cf1c8c691101c9e9948be8f666a16e17b2883eec4f57e78"
+    },
+    {
+      "name": "方正宋三简体.TTF",
+      "stem": "方正宋三简体",
+      "suffix": ".TTF",
+      "size": 5002416,
+      "sha256": "9a73403b04a3e7fa343fd2821c68ac20bda1d15c89e95e01e1244b1da952c463"
+    },
+    {
+      "name": "方正宋刻本秀楷简.TTF",
+      "stem": "方正宋刻本秀楷简",
+      "suffix": ".TTF",
+      "size": 5456104,
+      "sha256": "99019132754ce5b9729f3e997ad78ad3ad95b3ce626a9fa148af57b02b28f259"
+    },
+    {
+      "name": "方正宋黑简体.ttf",
+      "stem": "方正宋黑简体",
+      "suffix": ".ttf",
+      "size": 3855668,
+      "sha256": "50fa50b6044c64c9999279617815edd81a3bc84ae878408692ca0f0845e13cbd"
+    },
+    {
+      "name": "方正宝城体 简.TTF",
+      "stem": "方正宝城体 简",
+      "suffix": ".TTF",
+      "size": 2750832,
+      "sha256": "c8fdc224619950d0344a47bd6b7d435296ddb3128f46b697ba23aaf8556084cf"
+    },
+    {
+      "name": "方正小标宋简体.ttf",
+      "stem": "方正小标宋简体",
+      "suffix": ".ttf",
+      "size": 3806520,
+      "sha256": "5b1d10a2543c436df12aa292b05bff59ce6dae1b5351a90892599a7b3fed5904"
+    },
+    {
+      "name": "方正少儿简体.ttf",
+      "stem": "方正少儿简体",
+      "suffix": ".ttf",
+      "size": 3476120,
+      "sha256": "329d3d592a7784987371af536f6ef7404e5dc81fa3b35de66544260a20980904"
+    },
+    {
+      "name": "方正尚酷简体.TTF",
+      "stem": "方正尚酷简体",
+      "suffix": ".TTF",
+      "size": 1362552,
+      "sha256": "14f0df68fed655f24d198eb9f775a983a5026e5c5c7399483113cfbba69117cb"
+    },
+    {
+      "name": "方正屏显雅宋简体.TTF",
+      "stem": "方正屏显雅宋简体",
+      "suffix": ".TTF",
+      "size": 2978568,
+      "sha256": "78e7acc355cbc41e771fb11e42e573b5a3218637276093265b8af8d663f72f0e"
+    },
+    {
+      "name": "方正工业黑简体.TTF",
+      "stem": "方正工业黑简体",
+      "suffix": ".TTF",
+      "size": 1708800,
+      "sha256": "230c83538d8ce990658650bcfeefa28babc25836b611eed4f432fa60d331109a"
+    },
+    {
+      "name": "方正平和简体.ttf",
+      "stem": "方正平和简体",
+      "suffix": ".ttf",
+      "size": 7152932,
+      "sha256": "851ee217f221928514409eea63e36b1e4ffad1619f3780d1c7405b24557dd6a1"
+    },
+    {
+      "name": "方正幼圆.TTF",
+      "stem": "方正幼圆",
+      "suffix": ".TTF",
+      "size": 6794984,
+      "sha256": "16747b04038770d7ceeade94e943d7d79247cc1c95b550403dd0a0286d46c6c4"
+    },
+    {
+      "name": "方正幼线简体.ttf",
+      "stem": "方正幼线简体",
+      "suffix": ".ttf",
+      "size": 1942968,
+      "sha256": "05c356da3441ed7ae7a0a1dc5fc18cb99ddf849fd187eb119a366de1f4161baa"
+    },
+    {
+      "name": "方正康体简体.ttf",
+      "stem": "方正康体简体",
+      "suffix": ".ttf",
+      "size": 4083604,
+      "sha256": "83819e0f758b24e6ac1a3866e20601c5671b24cbfeb80b4887d7e759b0ddb7f0"
+    },
+    {
+      "name": "方正彩源体简体.TTF",
+      "stem": "方正彩源体简体",
+      "suffix": ".TTF",
+      "size": 4263396,
+      "sha256": "e729082d7eb701d658f1abf82deb85ff01bbf9f63d0de7f97e40ea523de58af1"
+    },
+    {
+      "name": "方正徐静蕾字体.fon",
+      "stem": "方正徐静蕾字体",
+      "suffix": ".fon",
+      "size": 7244729,
+      "sha256": "62bdc929d9c50f5802ec30ef46df9552c76272bae90a388fcdcd80067dd9e145"
+    },
+    {
+      "name": "方正德赛黑简体 501L.TTF",
+      "stem": "方正德赛黑简体 501L",
+      "suffix": ".TTF",
+      "size": 1617832,
+      "sha256": "919d674c2a2c223a59faef8ce79e2188b9c98278c7d3cd6c1ac8355b171aac50"
+    },
+    {
+      "name": "方正德赛黑简体 509R.TTF",
+      "stem": "方正德赛黑简体 509R",
+      "suffix": ".TTF",
+      "size": 1604280,
+      "sha256": "76aacd3b3e4a98bfa12e938f185d9ef9a57c5fb0a9cbce6ddab7aab001025e25"
+    },
+    {
+      "name": "方正德赛黑简体 515H.TTF",
+      "stem": "方正德赛黑简体 515H",
+      "suffix": ".TTF",
+      "size": 1597924,
+      "sha256": "d8752772363b7ff028353fad36d60f4aac4afa19cab398066a59d96330ea40e2"
+    },
+    {
+      "name": "方正悬针篆变简体.ttf",
+      "stem": "方正悬针篆变简体",
+      "suffix": ".ttf",
+      "size": 4457052,
+      "sha256": "df639e468bf4f1782022f67a78cdf06b0169da89713179c23f092fe538d01d74"
+    },
+    {
+      "name": "方正报宋简体.TTF",
+      "stem": "方正报宋简体",
+      "suffix": ".TTF",
+      "size": 3444372,
+      "sha256": "4b94112e729f6c5fd85886b428556d32e64631849a6485fb1a1e37f7e35878e0"
+    },
+    {
+      "name": "方正敬酷黑 简.TTF",
+      "stem": "方正敬酷黑 简",
+      "suffix": ".TTF",
+      "size": 1713784,
+      "sha256": "a4d3af0b70c4560a9b476e829755b97b90790dbc5ed2329d5cca24cdec2f8f2f"
+    },
+    {
+      "name": "方正新报宋简体.ttf",
+      "stem": "方正新报宋简体",
+      "suffix": ".ttf",
+      "size": 3524204,
+      "sha256": "dff89076062ab5b05a72679ebafe396ef0692a40e77b3162797f9288244ca5de"
+    },
+    {
+      "name": "方正新综艺黑 简.TTF",
+      "stem": "方正新综艺黑 简",
+      "suffix": ".TTF",
+      "size": 2421064,
+      "sha256": "6ae672133fe1657cd5760e11aa6cc5439adcc1dede336173bfa955be09871554"
+    },
+    {
+      "name": "方正新舒体简体.ttf",
+      "stem": "方正新舒体简体",
+      "suffix": ".ttf",
+      "size": 4615856,
+      "sha256": "e8d24e0e4b3b63c342d5b6b017b1c8536f04fd552e0c4a58abb974a0991b5556"
+    },
+    {
+      "name": "方正方俊黑 简 Bold.TTF",
+      "stem": "方正方俊黑 简 Bold",
+      "suffix": ".TTF",
+      "size": 1970808,
+      "sha256": "76d188cdd3ba608ff5c0a0a8ce7c451986a845f4f120b01afbf55a90a2773a32"
+    },
+    {
+      "name": "方正方俊黑 简.TTF",
+      "stem": "方正方俊黑 简",
+      "suffix": ".TTF",
+      "size": 1977512,
+      "sha256": "f80fc141409ffebedfac44c6f410f747bbf5dad0748a65aa77ed3cf15a616b0c"
+    },
+    {
+      "name": "方正明尚简体.ttf",
+      "stem": "方正明尚简体",
+      "suffix": ".ttf",
+      "size": 2287352,
+      "sha256": "3a12c823c440d1ad752cc958fb417969a15a5a26e785600cb41067e913af140e"
+    },
+    {
+      "name": "方正显仁简体.TTF",
+      "stem": "方正显仁简体",
+      "suffix": ".TTF",
+      "size": 5241696,
+      "sha256": "00a6ce7c942e4b5c8b00f668946861fe9d5f9e6dcd6d8abe473f64144b4c0770"
+    },
+    {
+      "name": "方正晶宋.ttf",
+      "stem": "方正晶宋",
+      "suffix": ".ttf",
+      "size": 3501844,
+      "sha256": "96ec5bd1591e80499e18ced7bc784468f55b686011684cb3ce2347e7f3a95cbc"
+    },
+    {
+      "name": "方正晶细黑.ttf",
+      "stem": "方正晶细黑",
+      "suffix": ".ttf",
+      "size": 2391208,
+      "sha256": "00bd31d84b71e5456afa898aa3918ae871816ec4d67c39c62d057ace1d16ffa3"
+    },
+    {
+      "name": "方正有猫在简体.ttf",
+      "stem": "方正有猫在简体",
+      "suffix": ".ttf",
+      "size": 6129672,
+      "sha256": "364bd27fa7662c6d7207f867124c41a69c15bc3f527d61ebf94633918b0cab1f"
+    },
+    {
+      "name": "方正本墨物语 简.TTF",
+      "stem": "方正本墨物语 简",
+      "suffix": ".TTF",
+      "size": 1643812,
+      "sha256": "820a728e03916844708242fec210a2b0f6f5c4ee83add5eda478ea89e851ab3b"
+    },
+    {
+      "name": "方正本墨绪圆体 简.TTF",
+      "stem": "方正本墨绪圆体 简",
+      "suffix": ".TTF",
+      "size": 3486004,
+      "sha256": "513dc804248c181b44b5809a1f8c713e75bc422ebf124c52acec2dd8c38d48d8"
+    },
+    {
+      "name": "方正本墨钧宋 简.TTF",
+      "stem": "方正本墨钧宋 简",
+      "suffix": ".TTF",
+      "size": 3311724,
+      "sha256": "55a198d9960c7111425312f5ac7f307898f4343be38dd4076da1dd6ef38de937"
+    },
+    {
+      "name": "方正标语体 简.TTF",
+      "stem": "方正标语体 简",
+      "suffix": ".TTF",
+      "size": 2962736,
+      "sha256": "b85c3b97a53fe6fbd550d2daf235de5a6bfd67b0b720d1e586e22abaee280b96"
+    },
+    {
+      "name": "方正标雅宋简体.TTF",
+      "stem": "方正标雅宋简体",
+      "suffix": ".TTF",
+      "size": 3497204,
+      "sha256": "022f4c74252b0fae92c8bc4714f0e0f001a534bed0c7fb7734d1cd113991641b"
+    },
+    {
+      "name": "方正楷体简体.TTF",
+      "stem": "方正楷体简体",
+      "suffix": ".TTF",
+      "size": 3759712,
+      "sha256": "6ebb4940ba0af854697c67053fce976bff52f9e262968c911dd2d39c467dccd6"
+    },
+    {
+      "name": "方正榜书楷简体.TTF",
+      "stem": "方正榜书楷简体",
+      "suffix": ".TTF",
+      "size": 5681788,
+      "sha256": "a1e56c25b3193f1c71d3488464899a19f66456a3813a047948cece9967b52d43"
+    },
+    {
+      "name": "方正榜书行简体.ttf",
+      "stem": "方正榜书行简体",
+      "suffix": ".ttf",
+      "size": 7423440,
+      "sha256": "341352b0bcd2f13030226fdb0c4aea139d59bb4597eb2c2b78d185907941a9e6"
+    },
+    {
+      "name": "方正正中黑简体.TTF",
+      "stem": "方正正中黑简体",
+      "suffix": ".TTF",
+      "size": 2037116,
+      "sha256": "6d4c6e5230fc3a86f68e13f1c215b9ab079fe9efd9ba0ffd96616c8f5f7071a6"
+    },
+    {
+      "name": "方正正准黑简体.TTF",
+      "stem": "方正正准黑简体",
+      "suffix": ".TTF",
+      "size": 2034056,
+      "sha256": "2bb850a7e71a57ab994bb520c3dee568560c83da564196c6a7ee8a27bf31ec00"
+    },
+    {
+      "name": "方正正纤黑简体.TTF",
+      "stem": "方正正纤黑简体",
+      "suffix": ".TTF",
+      "size": 2029868,
+      "sha256": "5b5683b9d13f7715af91ef414a03f99cfb5d852f58ecbbcc8cee9ece307d8a84"
+    },
+    {
+      "name": "方正正黑简体.TTF",
+      "stem": "方正正黑简体",
+      "suffix": ".TTF",
+      "size": 2032412,
+      "sha256": "3e280bd9b9c683fe840acd1efef39e7f9f5b7b8f516928b937999a5810703720"
+    },
+    {
+      "name": "方正毡笔黑简体.ttf",
+      "stem": "方正毡笔黑简体",
+      "suffix": ".ttf",
+      "size": 3560200,
+      "sha256": "dd776b56150bdab7a8b100ab09f49a25de560afc9171b9f3b9658bb3444d3b17"
+    },
+    {
+      "name": "方正水云简体.TTF",
+      "stem": "方正水云简体",
+      "suffix": ".TTF",
+      "size": 2162288,
+      "sha256": "8f6e7ca613f7cfe8eee4b833b15034700ec39419a818281427c1f93492426401"
+    },
+    {
+      "name": "方正水云简体_中.TTF",
+      "stem": "方正水云简体_中",
+      "suffix": ".TTF",
+      "size": 2146800,
+      "sha256": "a86cf9731d26c0df13f7a6e90bced4d7ff959161007b4d9b2a5e4fdaf9210585"
+    },
+    {
+      "name": "方正水云简体_准.TTF",
+      "stem": "方正水云简体_准",
+      "suffix": ".TTF",
+      "size": 2157092,
+      "sha256": "7b6d11caedc2b88edaed519e0783cf9ee232e800f88d539ea46033a6d81727ab"
+    },
+    {
+      "name": "方正水云简体_大.TTF",
+      "stem": "方正水云简体_大",
+      "suffix": ".TTF",
+      "size": 2130000,
+      "sha256": "c1af229dd78b1bbfe1cf9711f15911e818f28d6fdba34ec9c6ca963728538912"
+    },
+    {
+      "name": "方正水云简体_纤.TTF",
+      "stem": "方正水云简体_纤",
+      "suffix": ".TTF",
+      "size": 2163328,
+      "sha256": "e014e7d72b84708c80f3696e84d810e79ef3e3cd0b51c1379c679c82478af688"
+    },
+    {
+      "name": "方正水柱简体.ttf",
+      "stem": "方正水柱简体",
+      "suffix": ".ttf",
+      "size": 4624868,
+      "sha256": "dd1396c188b567445b539ec4e393e74d97cc6a2ce7d9acaf9ed2429bbcd67276"
+    },
+    {
+      "name": "方正汉真广标简体.TTF",
+      "stem": "方正汉真广标简体",
+      "suffix": ".TTF",
+      "size": 2085604,
+      "sha256": "364981a63760d62c834a3cc9a3b62fe27277353e59ee887e74d45886f688bded"
+    },
+    {
+      "name": "方正流行体简体.ttf",
+      "stem": "方正流行体简体",
+      "suffix": ".ttf",
+      "size": 3447100,
+      "sha256": "3e5ea17e76c3b31557d96c05172aa435661d67e606cefe1d3063633acff2dd75"
+    },
+    {
+      "name": "方正润扁宋简体.TTF",
+      "stem": "方正润扁宋简体",
+      "suffix": ".TTF",
+      "size": 4111052,
+      "sha256": "088243b626c9b101316886addccf5baf23c714b25b023812d125b598d489d170"
+    },
+    {
+      "name": "方正清刻本悦宋简体.TTF",
+      "stem": "方正清刻本悦宋简体",
+      "suffix": ".TTF",
+      "size": 3145340,
+      "sha256": "80e23be5802f9283f34db0b9fcfb785a2c70666d0a398a62889561cfac4a470c"
+    },
+    {
+      "name": "方正清楷 简.TTF",
+      "stem": "方正清楷 简",
+      "suffix": ".TTF",
+      "size": 8527804,
+      "sha256": "cf05518f925e60dafb729b168791da91f7ac312aebb9894551369cae05495fa6"
+    },
+    {
+      "name": "方正清纯体简体.TTF",
+      "stem": "方正清纯体简体",
+      "suffix": ".TTF",
+      "size": 2436296,
+      "sha256": "44f70c69340d771f09e1dc72b87309f8dc2b0aa3734a21b73e04baa1d077bf20"
+    },
+    {
+      "name": "方正爱莎简体.TTF",
+      "stem": "方正爱莎简体",
+      "suffix": ".TTF",
+      "size": 3609780,
+      "sha256": "895397addf2c566af60ff40145d5e0f99c8f4e4bf517e619b1e710f3c9b5f6cc"
+    },
+    {
+      "name": "方正特雅宋简.ttf",
+      "stem": "方正特雅宋简",
+      "suffix": ".ttf",
+      "size": 3439244,
+      "sha256": "607616ca2e0bde1ae11a07e61d3d9c3072d0d0faa85296dd150dad35037f97d8"
+    },
+    {
+      "name": "方正琥珀简体.TTF",
+      "stem": "方正琥珀简体",
+      "suffix": ".TTF",
+      "size": 3322024,
+      "sha256": "b57926d900de8443c9b87200fc317aa8558bc78c13e03ddfc78b9472afddbf2d"
+    },
+    {
+      "name": "方正瘦金书简体.ttf",
+      "stem": "方正瘦金书简体",
+      "suffix": ".ttf",
+      "size": 5648924,
+      "sha256": "4fec88617103f0b85eae9833b0a57d9c860251d040bb417cfbaff55a4a55f971"
+    },
+    {
+      "name": "方正白舟大髭113 简.TTF",
+      "stem": "方正白舟大髭113 简",
+      "suffix": ".TTF",
+      "size": 12387096,
+      "sha256": "dc84394f46a144ca693534f83e8d1130cdee2150467a43411e700ce8419c469e"
+    },
+    {
+      "name": "方正白舟忍者体 简.TTF",
+      "stem": "方正白舟忍者体 简",
+      "suffix": ".TTF",
+      "size": 9400256,
+      "sha256": "1ed8f2aca43374bce8346a8b821686867f159a688375ece2b863bd0bed7a4268"
+    },
+    {
+      "name": "方正白舟樱花体 简.TTF",
+      "stem": "方正白舟樱花体 简",
+      "suffix": ".TTF",
+      "size": 4973748,
+      "sha256": "fc84888a7263a344f4e7c522a3a0f2af48a9ec5a27edd744ca06dae0e286536a"
+    },
+    {
+      "name": "方正白舟武骨体 简.TTF",
+      "stem": "方正白舟武骨体 简",
+      "suffix": ".TTF",
+      "size": 11449372,
+      "sha256": "f5d11bfb9e50e74c6d007617fa29bf855c8b5dc60e43f868b490c011f5db9f9e"
+    },
+    {
+      "name": "方正白舟魂心体 简.TTF",
+      "stem": "方正白舟魂心体 简",
+      "suffix": ".TTF",
+      "size": 9211100,
+      "sha256": "db3583d2daa133ef09d53729f65cce1172ecef69459a517704537bd4ec218fa7"
+    },
+    {
+      "name": "方正盈利体简体 Medium.TTF",
+      "stem": "方正盈利体简体 Medium",
+      "suffix": ".TTF",
+      "size": 2061636,
+      "sha256": "da56fbbd15cfb11c78e0c09a8cfe6f693cc10746f360633132d7da3d3307e091"
+    },
+    {
+      "name": "方正盈利体简体.TTF",
+      "stem": "方正盈利体简体",
+      "suffix": ".TTF",
+      "size": 2068724,
+      "sha256": "8445ab5569db44f9956f7fd773e66a03542b8196351d7cf6788797868cd2d80c"
+    },
+    {
+      "name": "方正盛世楷书简体.TTF",
+      "stem": "方正盛世楷书简体",
+      "suffix": ".TTF",
+      "size": 5448272,
+      "sha256": "d6d25da6a9bc9d585ee28cbeb4078dd15bb68db3deeb7857316456508c3fe9dd"
+    },
+    {
+      "name": "方正盛世楷书简体_Cu.TTF",
+      "stem": "方正盛世楷书简体_Cu",
+      "suffix": ".TTF",
+      "size": 5434184,
+      "sha256": "eddcc42d30abae1f54ab1c4e411e4d89370358687ce518d0c4cada1f039b4fb3"
+    },
+    {
+      "name": "方正盛世楷书简体_Da.TTF",
+      "stem": "方正盛世楷书简体_Da",
+      "suffix": ".TTF",
+      "size": 5433544,
+      "sha256": "96e7b37f57bd334bfc5eff5fe53dd2b14ab075044cb44af2dd983552f2ef80c8"
+    },
+    {
+      "name": "方正盛世楷书简体_Xian.TTF",
+      "stem": "方正盛世楷书简体_Xian",
+      "suffix": ".TTF",
+      "size": 5461948,
+      "sha256": "1f8c75d3327bd2cdec3acd76de5fc34ce3cdac0f073e20a3b55222b062ea47ed"
+    },
+    {
+      "name": "方正盛世楷书简体_Zhong.TTF",
+      "stem": "方正盛世楷书简体_Zhong",
+      "suffix": ".TTF",
+      "size": 5429000,
+      "sha256": "c5c62728b4c29a4f5bb2f99bdf6d0de098f74c806ec3dec59047365846ff9aab"
+    },
+    {
+      "name": "方正盛世楷书简体_Zhun.TTF",
+      "stem": "方正盛世楷书简体_Zhun",
+      "suffix": ".TTF",
+      "size": 5423492,
+      "sha256": "2662e8855e17eb316ac31095dc97f1cd7a7dddf37dccf4397def4ea976d0771f"
+    },
+    {
+      "name": "方正硬笔楷书简体.ttf",
+      "stem": "方正硬笔楷书简体",
+      "suffix": ".ttf",
+      "size": 6024056,
+      "sha256": "4a7fa7c3a36098b5434949d28acd9ab44496498b3a525ce3ae7a204ed242eba5"
+    },
+    {
+      "name": "方正硬笔行书简体.ttf",
+      "stem": "方正硬笔行书简体",
+      "suffix": ".ttf",
+      "size": 5876384,
+      "sha256": "d28a395277da138a5202cacd4f82bb00175b2e902988559368acd835fd17717b"
+    },
+    {
+      "name": "方正祥隶简体.ttf",
+      "stem": "方正祥隶简体",
+      "suffix": ".ttf",
+      "size": 7597100,
+      "sha256": "2d70f247d13427f0885e989f8540661061964c6538e97ddf96b90717a41a5bc3"
+    },
+    {
+      "name": "方正秋刀鱼润黑 简.TTF",
+      "stem": "方正秋刀鱼润黑 简",
+      "suffix": ".TTF",
+      "size": 2510456,
+      "sha256": "aeeaddf2db281847e4ad1e43398488c26efc201a73d3659a67694fa712cba064"
+    },
+    {
+      "name": "方正稚艺简体.ttf",
+      "stem": "方正稚艺简体",
+      "suffix": ".ttf",
+      "size": 2977200,
+      "sha256": "86c7e6ad64eda56ce3f99754b59c79c2112d310c37b59f6a0ae52879e9b56fb3"
+    },
+    {
+      "name": "方正粉丝天下简体.TTF",
+      "stem": "方正粉丝天下简体",
+      "suffix": ".TTF",
+      "size": 20697416,
+      "sha256": "10bbb93e8321bfa2567be019fd590855fa4baadc81c40fdc2e5b0703f1c4a6a8"
+    },
+    {
+      "name": "方正粗倩简体.ttf",
+      "stem": "方正粗倩简体",
+      "suffix": ".ttf",
+      "size": 2359908,
+      "sha256": "72ceb3dc41a83e104024d39b332d5d4125b126e961f831780822b6a5a58cf2a2"
+    },
+    {
+      "name": "方正粗圆简体.ttf",
+      "stem": "方正粗圆简体",
+      "suffix": ".ttf",
+      "size": 2833752,
+      "sha256": "765e153f2b1e7879180821c3236d068b4d6372792c0fc7fe6130981fb18cee90"
+    },
+    {
+      "name": "方正粗宋简体.ttf",
+      "stem": "方正粗宋简体",
+      "suffix": ".ttf",
+      "size": 4413824,
+      "sha256": "c604296e92e7b5589d045ac11effc8113fae2f1a0fd632e7ae595d687ff25295"
+    },
+    {
+      "name": "方正粗楷简体.TTF",
+      "stem": "方正粗楷简体",
+      "suffix": ".TTF",
+      "size": 5007634,
+      "sha256": "520160b16b2be7f14ed75013b1421aa391903f8f143e24c3f85b359069aa7c35"
+    },
+    {
+      "name": "方正粗活意简体.ttf",
+      "stem": "方正粗活意简体",
+      "suffix": ".ttf",
+      "size": 2811000,
+      "sha256": "fc4295df4f5b9dc35b06fe1b10eb64c253e1361e2d1fc8615f186807044a701b"
+    },
+    {
+      "name": "方正粗金陵简体.ttf",
+      "stem": "方正粗金陵简体",
+      "suffix": ".ttf",
+      "size": 6189036,
+      "sha256": "3c15643db0ef339e1faf39b8b0c12ffead661565876e617fd25ca5209eabb1ea"
+    },
+    {
+      "name": "方正粗雅宋简体.TTF",
+      "stem": "方正粗雅宋简体",
+      "suffix": ".TTF",
+      "size": 3496158,
+      "sha256": "abfb7f118e38d6a31d3346860eee05b7ea68f3fc1f1dbae781fe61b1b777a68b"
+    },
+    {
+      "name": "方正粗黑宋简体.TTF",
+      "stem": "方正粗黑宋简体",
+      "suffix": ".TTF",
+      "size": 2498958,
+      "sha256": "a29048855582bc19ab0fad8dcc2f3f764acd095092c65f114616512e1e6d54d8"
+    },
+    {
+      "name": "方正纤俊黑简体.ttf",
+      "stem": "方正纤俊黑简体",
+      "suffix": ".ttf",
+      "size": 2009004,
+      "sha256": "49011613a00ff6674b0c7df4e2fd04f8df859e5e70e7e4ce3843fbf7e8690daa"
+    },
+    {
+      "name": "方正细俊黑简体.ttf",
+      "stem": "方正细俊黑简体",
+      "suffix": ".ttf",
+      "size": 2011620,
+      "sha256": "b201fb0750a03f8f5a626b8049097642dadffe26195a03b77e3f6dfc94d60e80"
+    },
+    {
+      "name": "方正细倩简体.ttf",
+      "stem": "方正细倩简体",
+      "suffix": ".ttf",
+      "size": 2993004,
+      "sha256": "8db7d7207e5f15559a5b60b78ee2678e57f0068da23252fdce267a08e02a3edf"
+    },
+    {
+      "name": "方正细圆简体.ttf",
+      "stem": "方正细圆简体",
+      "suffix": ".ttf",
+      "size": 2849116,
+      "sha256": "cce01ff7213d0f53ee60f493a5fc6be53e4cd6672673c07b94187f2e8fc911c6"
+    },
+    {
+      "name": "方正细珊瑚简体.ttf",
+      "stem": "方正细珊瑚简体",
+      "suffix": ".ttf",
+      "size": 3239456,
+      "sha256": "48873a97b47f555aaf8efb36516912f3fbaf6de97b431755a82830520ad17ef2"
+    },
+    {
+      "name": "方正细等线简体.ttf",
+      "stem": "方正细等线简体",
+      "suffix": ".ttf",
+      "size": 2975808,
+      "sha256": "d3148a7c396ea5b93db4116681621cf3440bb363ad67601c66289bf67d5c6b6e"
+    },
+    {
+      "name": "方正细谭黑简体.TTF",
+      "stem": "方正细谭黑简体",
+      "suffix": ".TTF",
+      "size": 1722636,
+      "sha256": "a6f9b805673da8a3a36db297f7fd61fe87ddb97ebb7754ddc919bb04e9224809"
+    },
+    {
+      "name": "方正细金陵简体.ttf",
+      "stem": "方正细金陵简体",
+      "suffix": ".ttf",
+      "size": 6378220,
+      "sha256": "7d67258a4b34d09838def2d2812672cca46338772a44b3081076b392119e846c"
+    },
+    {
+      "name": "方正细黑一简体.TTF",
+      "stem": "方正细黑一简体",
+      "suffix": ".TTF",
+      "size": 3275560,
+      "sha256": "0a9c104c75b3d648c9e274217953ef22caae24b5191fb8617a151f189fb61aa5"
+    },
+    {
+      "name": "方正经黑手写简体.ttf",
+      "stem": "方正经黑手写简体",
+      "suffix": ".ttf",
+      "size": 3704876,
+      "sha256": "52bac38a9a2654b7f6d75922db3a6709f9985fdc02b40ad3d32266ee17841999"
+    },
+    {
+      "name": "方正经黑简体.TTF",
+      "stem": "方正经黑简体",
+      "suffix": ".TTF",
+      "size": 1699512,
+      "sha256": "2e02c04e710faa118b886a6a95ed857b1be532b59a12eb1dbfdc7240d9be6c5d"
+    },
+    {
+      "name": "方正综艺简体.ttf",
+      "stem": "方正综艺简体",
+      "suffix": ".ttf",
+      "size": 1883724,
+      "sha256": "7464eb3dcfe46f4dcab0efda2dbbbf45a01f866f87e3f912af6341b4a42d9436"
+    },
+    {
+      "name": "方正美黑简体.TTF",
+      "stem": "方正美黑简体",
+      "suffix": ".TTF",
+      "size": 2238524,
+      "sha256": "3e594456ab4c06b8f284be6fc0069b77f0a99e2b4d2e0db12fcad1fe06c92b34"
+    },
+    {
+      "name": "方正聚珍新仿简体.TTF",
+      "stem": "方正聚珍新仿简体",
+      "suffix": ".TTF",
+      "size": 4864468,
+      "sha256": "3d512a232798ac04150f16e86f234041694f45562d17c4fc6d885c3e888fc8d6"
+    },
+    {
+      "name": "方正胖头鱼简体.ttf",
+      "stem": "方正胖头鱼简体",
+      "suffix": ".ttf",
+      "size": 3032408,
+      "sha256": "011527644c0ca79809c63993a4ed09d3dbdaf55fa188379fe303b6366c182100"
+    },
+    {
+      "name": "方正胖娃简体.ttf",
+      "stem": "方正胖娃简体",
+      "suffix": ".ttf",
+      "size": 4218888,
+      "sha256": "d104d5c54f00713987c15b7e63418a0b1a5bd4ec5a44ee59911e36020ac546cc"
+    },
+    {
+      "name": "方正舒体简体.ttf",
+      "stem": "方正舒体简体",
+      "suffix": ".ttf",
+      "size": 5023256,
+      "sha256": "e79d32c230b17f7df8200b3806878570f1ac0dfeca4a321414735176f30071a5"
+    },
+    {
+      "name": "方正艺黑简体.ttf",
+      "stem": "方正艺黑简体",
+      "suffix": ".ttf",
+      "size": 6774580,
+      "sha256": "66c4c80847d67f48d7fc4b1f4bfa66f464f25838af938255be299ff987711139"
+    },
+    {
+      "name": "方正苏新诗柳楷简体.TTF",
+      "stem": "方正苏新诗柳楷简体",
+      "suffix": ".TTF",
+      "size": 6985816,
+      "sha256": "e679aed4aa32bb2aa1708ad9f2c738a829548c2d0bd49e8d88f65c01aa0cd8b5"
+    },
+    {
+      "name": "方正董其昌行书 简.TTF",
+      "stem": "方正董其昌行书 简",
+      "suffix": ".TTF",
+      "size": 12011416,
+      "sha256": "8227411e9738557767dfdda1ee85ad02377c41eb077a88f1289463a6967dfafb"
+    },
+    {
+      "name": "方正藏体简体.TTF",
+      "stem": "方正藏体简体",
+      "suffix": ".TTF",
+      "size": 2221668,
+      "sha256": "4a55c8d0a1736fa4206eda28b4ac355b06881bd671657c81ec4582a58a48eabf"
+    },
+    {
+      "name": "方正行楷简体.ttf",
+      "stem": "方正行楷简体",
+      "suffix": ".ttf",
+      "size": 4784396,
+      "sha256": "9265295fbe9a134d8ee600c52c97298500ec375f7ae0fdaa5c9d28e56b935713"
+    },
+    {
+      "name": "方正行黑简体.TTF",
+      "stem": "方正行黑简体",
+      "suffix": ".TTF",
+      "size": 3887820,
+      "sha256": "15e0d12611ff07fcac8361f3d852536b8c812e391f8aa631f218e1331d59b946"
+    },
+    {
+      "name": "方正豪体简体.TTF",
+      "stem": "方正豪体简体",
+      "suffix": ".TTF",
+      "size": 5547948,
+      "sha256": "0e2df34df4a56b0792ad55ddadd43cb2ddc0a16eb398d61eb91198b26885b8d1"
+    },
+    {
+      "name": "方正超值体 简.TTF",
+      "stem": "方正超值体 简",
+      "suffix": ".TTF",
+      "size": 1795332,
+      "sha256": "63ed4ec594bc8edff013648cdd04a8810dfd44661bad8679e08e686cfb7cf91b"
+    },
+    {
+      "name": "方正超粗黑简体.TTF",
+      "stem": "方正超粗黑简体",
+      "suffix": ".TTF",
+      "size": 1882960,
+      "sha256": "69811607daeccac9430804d5d19dfc3e103fdac3623e3c031e131710fb386dd3"
+    },
+    {
+      "name": "方正趣黑简体.TTF",
+      "stem": "方正趣黑简体",
+      "suffix": ".TTF",
+      "size": 1602152,
+      "sha256": "2784511e8e2917a2ce454c714ece845f0ac76abe95fc5d8c9ab963f708df729e"
+    },
+    {
+      "name": "方正达利体简体 Bold.TTF",
+      "stem": "方正达利体简体 Bold",
+      "suffix": ".TTF",
+      "size": 3115248,
+      "sha256": "f51633eee9d80a85f189f6eebc90e3f1a0cb303e8dba12f5b1e0568bf7c951ff"
+    },
+    {
+      "name": "方正达利体简体.TTF",
+      "stem": "方正达利体简体",
+      "suffix": ".TTF",
+      "size": 3112016,
+      "sha256": "88d868bcdf11ff5247363e353a545eea48b2431860d6df70213682c78df1474a"
+    },
+    {
+      "name": "方正邓黑隶简体.TTF",
+      "stem": "方正邓黑隶简体",
+      "suffix": ".TTF",
+      "size": 2684200,
+      "sha256": "d289b1fe42cedcf666dd6a2460e883cbee42487b4e9130651878f750ebb243b6"
+    },
+    {
+      "name": "方正铁筋隶书简体.ttf",
+      "stem": "方正铁筋隶书简体",
+      "suffix": ".ttf",
+      "size": 3841636,
+      "sha256": "d66f374e5036ceca79ddc36d22d4f2736f399395218b86e3cc2d4aee8bb0b928"
+    },
+    {
+      "name": "方正锐正黑简体_纤.TTF",
+      "stem": "方正锐正黑简体_纤",
+      "suffix": ".TTF",
+      "size": 2124716,
+      "sha256": "bc5d1c7179705afe125b8ffe882ef079d6fd45f6b56d797097bfd3ebdb6e94cf"
+    },
+    {
+      "name": "方正隶书简体.TTF",
+      "stem": "方正隶书简体",
+      "suffix": ".TTF",
+      "size": 3978284,
+      "sha256": "1168bad2d2d37909a168e7b7993e0e568da05c9d57ccbc86000a8e070455bae9"
+    },
+    {
+      "name": "方正隶二简体.ttf",
+      "stem": "方正隶二简体",
+      "suffix": ".ttf",
+      "size": 4746104,
+      "sha256": "b166f100717bb66bc15f3796d33c46e784f34e5cb350f12de5d0efc66a343b2f"
+    },
+    {
+      "name": "方正隶变简体.TTF",
+      "stem": "方正隶变简体",
+      "suffix": ".TTF",
+      "size": 4105844,
+      "sha256": "7e6c73cd146ed5ef0ca3675f66c64b649312c4b64dc5121ec19080c579979626"
+    },
+    {
+      "name": "方正雅士黑 简 Bold.TTF",
+      "stem": "方正雅士黑 简 Bold",
+      "suffix": ".TTF",
+      "size": 1847192,
+      "sha256": "7c5bfb69d952460cf1dd603ed0327914be954ccb139eaf7a9d8b36d4e3689168"
+    },
+    {
+      "name": "方正雅士黑 简 Light.TTF",
+      "stem": "方正雅士黑 简 Light",
+      "suffix": ".TTF",
+      "size": 1872028,
+      "sha256": "5d03e065f6fb04820b02ae2f5ef67343fde90aa8c20ce1c48e79d67f4537d7cc"
+    },
+    {
+      "name": "方正雅士黑 简.TTF",
+      "stem": "方正雅士黑 简",
+      "suffix": ".TTF",
+      "size": 1894628,
+      "sha256": "de178b5b0cdba10913b49e887a0952a4d2387ebb859d38fbe42d1c29f2e50bb0"
+    },
+    {
+      "name": "方正静蕾简体.ttf",
+      "stem": "方正静蕾简体",
+      "suffix": ".ttf",
+      "size": 16361064,
+      "sha256": "29ea0bf7d5ace85b73b0ac6b89faa9cc2a61eb1bdf2e6b7ab0213c5de34a608f"
+    },
+    {
+      "name": "方正非凡体简体.TTF",
+      "stem": "方正非凡体简体",
+      "suffix": ".TTF",
+      "size": 2141648,
+      "sha256": "ac0f07e9ddb2f9c05a27cc73556d113cebcdcf3136fe63fd031ce41feafdc900"
+    },
+    {
+      "name": "方正韵动中黑简体.TTF",
+      "stem": "方正韵动中黑简体",
+      "suffix": ".TTF",
+      "size": 2418840,
+      "sha256": "17fb9f9983b4bdc85e45c914b3f44238510342f13ebe326504d20b951a4c07c1"
+    },
+    {
+      "name": "方正颜宋简体.ttf",
+      "stem": "方正颜宋简体",
+      "suffix": ".ttf",
+      "size": 5087456,
+      "sha256": "7c94d62860168d3919517f4fec57e1261648a428d46f5da3228036af1d5cf314"
+    },
+    {
+      "name": "方正风入松体 简.TTF",
+      "stem": "方正风入松体 简",
+      "suffix": ".TTF",
+      "size": 2369156,
+      "sha256": "8d9ade56470cd3aed2203dd8a69ed457167d763310e4a072ebe3bd44c23c25a1"
+    },
+    {
+      "name": "方正风雅楷宋简体.TTF",
+      "stem": "方正风雅楷宋简体",
+      "suffix": ".TTF",
+      "size": 4738240,
+      "sha256": "7f4917452d270d3ab3176c653dad90ba59b1d1ac7b2c1f13dfe98358bcc3d935"
+    },
+    {
+      "name": "方正飘体 简 Bold.TTF",
+      "stem": "方正飘体 简 Bold",
+      "suffix": ".TTF",
+      "size": 2295612,
+      "sha256": "f83ed646684383c5d20c214460a7a0e4866e5ce0fa6ee9c374fcbec49317a6d4"
+    },
+    {
+      "name": "方正飘体 简 DemiBold.TTF",
+      "stem": "方正飘体 简 DemiBold",
+      "suffix": ".TTF",
+      "size": 2288368,
+      "sha256": "d172e2b0271811bad0968a2f1eb76518647a7aa3a4c91ec5884fc0447e8db457"
+    },
+    {
+      "name": "方正飘体 简 ExtraLight.TTF",
+      "stem": "方正飘体 简 ExtraLight",
+      "suffix": ".TTF",
+      "size": 2306784,
+      "sha256": "61e12886be482b871a46ad57899a8a22ffaa56c360d2e82a4799eed478202a5d"
+    },
+    {
+      "name": "方正飘体 简 Light.TTF",
+      "stem": "方正飘体 简 Light",
+      "suffix": ".TTF",
+      "size": 2297696,
+      "sha256": "6e7f2d7b22ed9fcd0970037294c9333fcfdefee3490b76d7f2b1f5158971f218"
+    },
+    {
+      "name": "方正飘体 简.TTF",
+      "stem": "方正飘体 简",
+      "suffix": ".TTF",
+      "size": 2291724,
+      "sha256": "58d1ef4412d4ee7c52f564a9d9a715cd0f30f1d7d4f8da9daf43c05254bf6b8c"
+    },
+    {
+      "name": "方正魏碑简体.ttf",
+      "stem": "方正魏碑简体",
+      "suffix": ".ttf",
+      "size": 4762912,
+      "sha256": "325490f3621abc2fcffae3cbd355d7e9017fd803da0293c8e2b62d618bbc1468"
+    },
+    {
+      "name": "方正黄草简体.TTF",
+      "stem": "方正黄草简体",
+      "suffix": ".TTF",
+      "size": 4143532,
+      "sha256": "9bfdeff38b0042ce427fd544ddc81b292380b1bf2c1f96bacf05fd92a150b187"
+    },
+    {
+      "name": "方正黑体简体.TTF",
+      "stem": "方正黑体简体",
+      "suffix": ".TTF",
+      "size": 2955220,
+      "sha256": "10dc5e569ac0364cabb706ebde4d7589a2d31da8d44a7b7d969004d12771e803"
+    },
+    {
+      "name": "方正黑隶简体.TTF",
+      "stem": "方正黑隶简体",
+      "suffix": ".TTF",
+      "size": 2787420,
+      "sha256": "b10c48288c1608ca3afae9c43e6e90e8f0e5f3334d8d99841ef81ab298fb90a6"
+    },
+    {
+      "name": "汉仪凌波体简.TTF",
+      "stem": "汉仪凌波体简",
+      "suffix": ".TTF",
+      "size": 3945780,
+      "sha256": "b49f774fcd2f9c7413853d90938901850ec004d21b644a7be250534b1720c8aa"
+    }
+  ]
+}
