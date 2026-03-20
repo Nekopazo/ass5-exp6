@@ -8,22 +8,23 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 
 def enable_torch_sdpa_backends() -> None:
-    """Keep all torch SDPA backends available so CUDA can pick flash when valid."""
+    """Force flash-only SDPA backend selection."""
     cuda_backends = getattr(torch.backends, "cuda", None)
     if cuda_backends is None:
         return
-    for fn_name in (
-        "enable_flash_sdp",
-        "enable_mem_efficient_sdp",
-        "enable_math_sdp",
-        "enable_cudnn_sdp",
+    for fn_name, enabled in (
+        ("enable_flash_sdp", True),
+        ("enable_mem_efficient_sdp", False),
+        ("enable_math_sdp", False),
+        ("enable_cudnn_sdp", False),
     ):
         fn = getattr(cuda_backends, fn_name, None)
         if callable(fn):
-            fn(True)
+            fn(enabled)
 
 
 def describe_torch_sdpa_backends() -> str:
@@ -96,14 +97,20 @@ class SDPAAttention(nn.Module):
                 key_padding_mask = key_padding_mask.bool()
                 if key_padding_mask.any():
                     attn_mask = (~key_padding_mask).unsqueeze(1).unsqueeze(2)
-            out = F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=attn_mask,
-                dropout_p=0.0,
-                is_causal=False,
-            )
+            if attn_mask is not None:
+                raise RuntimeError(
+                    "Flash-only SDPA does not support non-null attn_mask in this project. "
+                    "Current training pipeline assumes all style refs are valid."
+                )
+            with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+                out = F.scaled_dot_product_attention(
+                    q,
+                    k,
+                    v,
+                    attn_mask=None,
+                    dropout_p=0.0,
+                    is_causal=False,
+                )
             weights = None
 
         out = out.transpose(1, 2).contiguous().view(bsz, q_len, self.embed_dim)

@@ -191,7 +191,7 @@ def main() -> None:
     parser.add_argument(
         "--train-style-jointly",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="Only used in flow stage. If false, a pretrained style checkpoint is required.",
     )
 
@@ -217,7 +217,7 @@ def main() -> None:
     parser.add_argument("--dit-depth", type=int, default=12)
     parser.add_argument("--dit-heads", type=int, default=8)
     parser.add_argument("--dit-mlp-ratio", type=float, default=4.0)
-    parser.add_argument("--local-style-tokens-per-ref", type=int, default=16)
+    parser.add_argument("--local-style-tokens-per-ref", type=int, default=24)
     parser.add_argument("--content-cross-attn-layers", type=int, default=8)
     parser.add_argument("--style-cross-attn-every-n-layers", type=int, default=1)
     parser.add_argument("--contrastive-proj-dim", type=int, default=128)
@@ -237,9 +237,12 @@ def main() -> None:
     parser.add_argument("--vae-lambda-kl", type=float, default=1e-4)
 
     parser.add_argument("--flow-lambda", type=float, default=1.0)
+    parser.add_argument("--flow-lambda-img-l1", type=float, default=0.2)
+    parser.add_argument("--flow-lambda-img-perc", type=float, default=0.02)
     parser.add_argument("--flow-sample-steps", type=int, default=24)
     parser.add_argument("--contrastive-temperature", type=float, default=0.1)
-    parser.add_argument("--style-lr-scale", type=float, default=0.1)
+    parser.add_argument("--style-lr-scale", type=float, default=1.0)
+    parser.add_argument("--style-lr-warmup-steps", type=int, default=5000)
     parser.add_argument("--style-unfreeze-step", type=int, default=5000)
     parser.add_argument("--style-unfreeze-last-encoder-blocks", type=int, default=1)
     args = parser.parse_args()
@@ -319,7 +322,9 @@ def main() -> None:
 
     total_steps = int(args.total_steps)
     if total_steps <= 0:
-        if args.stage in {"vae", "style"}:
+        if args.stage == "vae":
+            total_steps = 20_000
+        elif args.stage == "style":
             total_steps = 5000
         else:
             total_steps = max(1, len(dataloader) * int(args.epochs))
@@ -379,7 +384,10 @@ def main() -> None:
             lr=float(args.lr),
             total_steps=total_steps,
             lambda_flow=float(args.flow_lambda),
+            lambda_img_l1=float(args.flow_lambda_img_l1),
+            lambda_img_perc=float(args.flow_lambda_img_perc),
             style_lr_scale=float(args.style_lr_scale),
+            style_lr_warmup_steps=int(args.style_lr_warmup_steps),
             style_unfreeze_step=style_unfreeze_step,
             style_unfreeze_last_encoder_blocks=int(args.style_unfreeze_last_encoder_blocks),
             freeze_vae=not bool(args.train_vae_jointly),

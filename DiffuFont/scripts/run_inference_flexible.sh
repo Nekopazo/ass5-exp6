@@ -18,13 +18,9 @@ CONTENT_CHARS="你,好,世,界"
 CONTENT_FONT=""
 STYLE_FONT="方正中等线简体"
 STYLE_CHARS="春,风"
-PART_FONT="方正中等线简体"
-PART_CHARS=""
-
 # Folder defaults (only used in style_folder example)
 CONTENT_FOLDER=""
 STYLE_FOLDER=""
-PART_FOLDER=""
 
 print_help() {
   cat <<'EOF'
@@ -32,7 +28,7 @@ Usage:
   bash scripts/run_inference_flexible.sh [options] [-- extra inference args]
 
 Options:
-  --example NAME         style_lmdb | part_lmdb | style_folder (default: style_lmdb)
+  --example NAME         style_lmdb | style_folder (default: style_lmdb)
   --checkpoint PATH      required, model checkpoint path
   --device DEV           e.g. cuda:0 / cpu (default: cuda:0)
   --output-dir DIR       output root dir (default: DiffuFont/output)
@@ -45,12 +41,8 @@ Options:
   --content-font NAME    load original column from TrainFont.lmdb: <content_font>@<content_char>
   --style-font NAME      for style_lmdb
   --style-chars CSV      for style_lmdb
-  --part-font NAME       for part_lmdb
-  --part-chars CSV       for part_lmdb, empty=follow content chars
-
   --content-folder DIR   for style_folder
   --style-folder DIR     for style_folder
-  --part-folder DIR      reserved for future part_folder example
 
   -h, --help             show help
 
@@ -64,16 +56,7 @@ Examples:
        --content-font "方正中等线简体" \
        --content-chars "你,好,世,界"
 
-  2) part_only + LMDB
-     bash scripts/run_inference_flexible.sh \
-       --example part_lmdb \
-       --checkpoint checkpoints/xxx/ckpt_step_30000.pt \
-       --part-font "方正中等线简体" \
-       --part-chars "你,好" \
-       --content-font "方正中等线简体" \
-       --content-chars "你,好,世,界"
-
-  3) style_only + folder
+  2) style_only + folder
      bash scripts/run_inference_flexible.sh \
        --example style_folder \
        --checkpoint checkpoints/xxx/ckpt_step_30000.pt \
@@ -102,11 +85,8 @@ while [[ $# -gt 0 ]]; do
     --content-font) CONTENT_FONT="${2:?--content-font requires a value}"; shift 2 ;;
     --style-font) STYLE_FONT="${2:?--style-font requires a value}"; shift 2 ;;
     --style-chars) STYLE_CHARS="${2:?--style-chars requires a value}"; shift 2 ;;
-    --part-font) PART_FONT="${2:?--part-font requires a value}"; shift 2 ;;
-    --part-chars) PART_CHARS="${2:?--part-chars requires a value}"; shift 2 ;;
     --content-folder) CONTENT_FOLDER="${2:?--content-folder requires a value}"; shift 2 ;;
     --style-folder) STYLE_FOLDER="${2:?--style-folder requires a value}"; shift 2 ;;
-    --part-folder) PART_FOLDER="${2:?--part-folder requires a value}"; shift 2 ;;
     --) shift; EXTRA_ARGS+=("$@"); break ;;
     -h|--help) print_help; exit 0 ;;
     *) echo "[run_inference_flexible] unknown arg: $1" >&2; print_help; exit 2 ;;
@@ -151,23 +131,6 @@ case "${EXAMPLE}" in
       --style-source lmdb \
       --style-font "${STYLE_FONT}" \
       --style-chars "${STYLE_CHARS}" \
-      "${EXTRA_ARGS[@]}"
-    set +x
-    ;;
-
-  part_lmdb)
-    echo "[run_inference_flexible] example=part_lmdb"
-    if [[ -z "${PART_CHARS}" ]]; then
-      PART_CHARS="${CONTENT_CHARS}"
-    fi
-    set -x
-    python "${BASE_ARGS[@]}" \
-      --conditioning-profile part_only \
-      --content-source lmdb \
-      --content-chars "${CONTENT_CHARS}" \
-      --part-source lmdb \
-      --part-font "${PART_FONT}" \
-      --part-chars "${PART_CHARS}" \
       "${EXTRA_ARGS[@]}"
     set +x
     ;;

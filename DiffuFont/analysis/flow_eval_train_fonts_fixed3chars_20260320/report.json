@@ -1,0 +1,130 @@
+{
+  "checkpoint": "/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/flow_20260319_143627/ckpt_step_100000.pt",
+  "font_split": "train",
+  "seed": 20260320,
+  "char_seed": 20260321,
+  "fixed_chars": [
+    "震",
+    "悍",
+    "宫"
+  ],
+  "inference_steps": 24,
+  "font_count": 231,
+  "mean_mae_all_fonts": 0.17316217887689714,
+  "mean_mse_all_fonts": 0.26987781679367956,
+  "best10_by_mae": [
+    {
+      "font": "方正雅士黑 简",
+      "mean_mae": 0.06851140906413396,
+      "mean_mse": 0.06538654615481694
+    },
+    {
+      "font": "STXIHEI",
+      "mean_mae": 0.07193039606014888,
+      "mean_mse": 0.07827272762854894
+    },
+    {
+      "font": "方正飘体 简 DemiBold",
+      "mean_mae": 0.07265625149011612,
+      "mean_mse": 0.07994637141625087
+    },
+    {
+      "font": "方正细俊黑简体",
+      "mean_mae": 0.07448070744673412,
+      "mean_mse": 0.08565130829811096
+    },
+    {
+      "font": "方正锐正黑简体_纤",
+      "mean_mae": 0.07804903512199719,
+      "mean_mse": 0.09466053297122319
+    },
+    {
+      "font": "方正盛世楷书简体_Zhong",
+      "mean_mae": 0.07808857038617134,
+      "mean_mse": 0.09182491898536682
+    },
+    {
+      "font": "方正兰亭特黑扁简体",
+      "mean_mae": 0.07897724707921346,
+      "mean_mse": 0.09165100132425626
+    },
+    {
+      "font": "方正俊黑简体",
+      "mean_mae": 0.08292360603809357,
+      "mean_mse": 0.1059069074690342
+    },
+    {
+      "font": "方正纤俊黑简体",
+      "mean_mae": 0.08629720906416576,
+      "mean_mse": 0.10797765105962753
+    },
+    {
+      "font": "方正飘体 简",
+      "mean_mae": 0.08642457177241643,
+      "mean_mse": 0.10590101033449173
+    }
+  ],
+  "worst10_by_mae": [
+    {
+      "font": "汉仪凌波体简",
+      "mean_mae": 0.3785216212272644,
+      "mean_mse": 0.6865432858467102
+    },
+    {
+      "font": "方正字迹-童体毛笔字体",
+      "mean_mae": 0.3379659255345662,
+      "mean_mse": 0.6159723599751791
+    },
+    {
+      "font": "方正有猫在简体",
+      "mean_mae": 0.33700350920359295,
+      "mean_mse": 0.601952056090037
+    },
+    {
+      "font": "方正平和简体",
+      "mean_mae": 0.3343838055928548,
+      "mean_mse": 0.5982774098714193
+    },
+    {
+      "font": "方正白舟武骨体 简",
+      "mean_mae": 0.3191318412621816,
+      "mean_mse": 0.5703936219215393
+    },
+    {
+      "font": "方正硬笔行书简体",
+      "mean_mae": 0.31364720066388446,
+      "mean_mse": 0.5583409667015076
+    },
+    {
+      "font": "方正尚酷简体",
+      "mean_mae": 0.3069116920232773,
+      "mean_mse": 0.5129162768522898
+    },
+    {
+      "font": "方正隶变简体",
+      "mean_mae": 0.30248727401097614,
+      "mean_mse": 0.5321603020032247
+    },
+    {
+      "font": "方正白舟魂心体 简",
+      "mean_mae": 0.2972189287344615,
+      "mean_mse": 0.5211629271507263
+    },
+    {
+      "font": "方正字迹-吕建德字体",
+      "mean_mae": 0.2950616478919983,
+      "mean_mse": 0.5285010735193888
+    }
+  ],
+  "pages": [
+    "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/flow_eval_train_fonts_fixed3chars_20260320/page_01.png",
+    "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/flow_eval_train_fonts_fixed3chars_20260320/page_02.png",
+    "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/flow_eval_train_fonts_fixed3chars_20260320/page_03.png",
+    "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/flow_eval_train_fonts_fixed3chars_20260320/page_04.png",
+    "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/flow_eval_train_fonts_fixed3chars_20260320/page_05.png",
+    "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/flow_eval_train_fonts_fixed3chars_20260320/page_06.png",
+    "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/flow_eval_train_fonts_fixed3chars_20260320/page_07.png",
+    "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/flow_eval_train_fonts_fixed3chars_20260320/page_08.png",
+    "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/flow_eval_train_fonts_fixed3chars_20260320/page_09.png"
+  ]
+}

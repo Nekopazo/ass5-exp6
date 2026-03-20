@@ -22,8 +22,8 @@ FONT_TRAIN_RATIO="0.95"
 TARGET_STEPS=100000
 SAVE_EVERY=5000
 SAMPLE_EVERY=300
-LR="2e-4"
-LR_WARMUP_STEPS=5000
+LR="1e-4"
+LR_WARMUP_STEPS=2000
 LR_MIN_SCALE="0.1"
 
 STYLE_REF_COUNT=8
@@ -43,12 +43,16 @@ DIT_DEPTH=12
 DIT_HEADS=8
 DIT_MLP_RATIO="4.0"
 
-LOCAL_STYLE_TOKENS_PER_REF=16
+LOCAL_STYLE_TOKENS_PER_REF=24
 CONTENT_CROSS_ATTN_LAYERS="8"
 STYLE_CROSS_ATTN_EVERY_N_LAYERS=1
 
 TRAIN_VAE_JOINTLY="0"
-TRAIN_STYLE_JOINTLY="0"
+TRAIN_STYLE_JOINTLY="1"
+STYLE_LR_SCALE="1.0"
+STYLE_LR_WARMUP_STEPS=5000
+FLOW_LAMBDA_IMG_L1="0.2"
+FLOW_LAMBDA_IMG_PERC="0.02"
 EXTRA_TRAIN_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -73,6 +77,10 @@ while [[ $# -gt 0 ]]; do
     --sample-every-steps) SAMPLE_EVERY="${2:?}"; shift 2 ;;
     --lr-warmup-steps) LR_WARMUP_STEPS="${2:?}"; shift 2 ;;
     --lr-min-scale) LR_MIN_SCALE="${2:?}"; shift 2 ;;
+    --style-lr-scale) STYLE_LR_SCALE="${2:?}"; shift 2 ;;
+    --style-lr-warmup-steps) STYLE_LR_WARMUP_STEPS="${2:?}"; shift 2 ;;
+    --flow-lambda-img-l1) FLOW_LAMBDA_IMG_L1="${2:?}"; shift 2 ;;
+    --flow-lambda-img-perc) FLOW_LAMBDA_IMG_PERC="${2:?}"; shift 2 ;;
     --style-ref-count) STYLE_REF_COUNT="${2:?}"; shift 2 ;;
     --batch) BATCH_SIZE="${2:?}"; shift 2 ;;
     --num-workers) NUM_WORKERS="${2:?}"; shift 2 ;;
@@ -147,6 +155,10 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --lr "${LR}"
     --lr-warmup-steps "${LR_WARMUP_STEPS}"
     --lr-min-scale "${LR_MIN_SCALE}"
+    --style-lr-scale "${STYLE_LR_SCALE}"
+    --style-lr-warmup-steps "${STYLE_LR_WARMUP_STEPS}"
+    --flow-lambda-img-l1 "${FLOW_LAMBDA_IMG_L1}"
+    --flow-lambda-img-perc "${FLOW_LAMBDA_IMG_PERC}"
   )
   if [[ -n "${FONT_SPLIT_SEED}" ]]; then
     daemon_args+=(--font-split-seed "${FONT_SPLIT_SEED}")
@@ -215,6 +227,10 @@ cmd=(
   --local-style-tokens-per-ref "${LOCAL_STYLE_TOKENS_PER_REF}"
   --content-cross-attn-layers "${CONTENT_CROSS_ATTN_LAYERS}"
   --style-cross-attn-every-n-layers "${STYLE_CROSS_ATTN_EVERY_N_LAYERS}"
+  --style-lr-scale "${STYLE_LR_SCALE}"
+  --style-lr-warmup-steps "${STYLE_LR_WARMUP_STEPS}"
+  --flow-lambda-img-l1 "${FLOW_LAMBDA_IMG_L1}"
+  --flow-lambda-img-perc "${FLOW_LAMBDA_IMG_PERC}"
   --epochs 1000000
   --total-steps "${TARGET_STEPS}"
   --log-every-steps 100
@@ -252,6 +268,8 @@ echo "[run_diffusion_colab] device=${DEVICE_ARG} seed=${SEED}"
 echo "[run_diffusion_colab] batch=${BATCH_SIZE} lr=${LR} lr_warmup_steps=${LR_WARMUP_STEPS} lr_min_scale=${LR_MIN_SCALE}"
 echo "[run_diffusion_colab] vae_checkpoint=${VAE_CKPT:-<none>}"
 echo "[run_diffusion_colab] style_checkpoint=${STYLE_CKPT:-<none>}"
+echo "[run_diffusion_colab] style_lr_scale=${STYLE_LR_SCALE} style_lr_warmup_steps=${STYLE_LR_WARMUP_STEPS}"
+echo "[run_diffusion_colab] flow_lambda_img_l1=${FLOW_LAMBDA_IMG_L1} flow_lambda_img_perc=${FLOW_LAMBDA_IMG_PERC}"
 echo "[run_diffusion_colab] local_style_tokens_per_ref=${LOCAL_STYLE_TOKENS_PER_REF}"
 echo "[run_diffusion_colab] content_cross_attn_layers=${CONTENT_CROSS_ATTN_LAYERS} style_cross_attn_every_n_layers=${STYLE_CROSS_ATTN_EVERY_N_LAYERS}"
 printf '[run_diffusion_colab] cmd='

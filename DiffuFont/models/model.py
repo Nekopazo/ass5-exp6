@@ -483,7 +483,10 @@ class FlowTrainer(_BaseTrainer):
         lr: float = 1e-4,
         total_steps: int = 100_000,
         lambda_flow: float = 1.0,
-        style_lr_scale: float = 0.1,
+        lambda_img_l1: float = 0.2,
+        lambda_img_perc: float = 0.02,
+        style_lr_scale: float = 1.0,
+        style_lr_warmup_steps: int = 5000,
         style_unfreeze_step: int = 0,
         style_unfreeze_last_encoder_blocks: int = 1,
         freeze_vae: bool = True,
@@ -509,13 +512,16 @@ class FlowTrainer(_BaseTrainer):
             save_every_steps=save_every_steps,
             val_every_steps=val_every_steps,
             val_max_batches=val_max_batches,
-            track_best_on_val=False,
+            track_best_on_val=True,
         )
         self.lambda_flow = float(lambda_flow)
+        self.lambda_img_l1 = max(0.0, float(lambda_img_l1))
+        self.lambda_img_perc = max(0.0, float(lambda_img_perc))
         self.base_lr = float(lr)
         self.freeze_vae = bool(freeze_vae)
         self.freeze_style = bool(freeze_style)
         self.style_lr_scale = max(0.0, float(style_lr_scale))
+        self.style_lr_warmup_steps = max(0, int(style_lr_warmup_steps))
         self.style_unfreeze_step = max(0, int(style_unfreeze_step))
         self.style_unfreeze_last_encoder_blocks = max(0, int(style_unfreeze_last_encoder_blocks))
         self.flow_sample_steps = max(1, int(flow_sample_steps))
@@ -523,9 +529,9 @@ class FlowTrainer(_BaseTrainer):
         self.lr_min_scale = float(min(max(0.0, float(lr_min_scale)), 1.0))
         self.style_finetune_active = not self.freeze_style
         self.style_grad_enabled = not self.freeze_style
-        self.style_finetune_param_names: list[str] = []
         style_params = []
         other_params = []
+        group_is_style = []
         for name, param in self.model.named_parameters():
             if not param.requires_grad:
                 continue
@@ -536,12 +542,15 @@ class FlowTrainer(_BaseTrainer):
         param_groups = []
         if other_params:
             param_groups.append({"params": other_params, "lr": float(lr)})
+            group_is_style.append(False)
         if style_params:
             param_groups.append({"params": style_params, "lr": self.base_lr * self.style_lr_scale})
+            group_is_style.append(True)
         if not param_groups:
             raise RuntimeError("No trainable parameters found for flow training.")
         self.optimizer = torch.optim.AdamW(param_groups, lr=self.base_lr, weight_decay=0.05)
         self.group_base_lrs = [float(group["lr"]) for group in self.optimizer.param_groups]
+        self.group_is_style = group_is_style
         self._set_learning_rate_for_step(0)
 
     def _lr_scale_for_step(self, step: int) -> float:
@@ -557,40 +566,20 @@ class FlowTrainer(_BaseTrainer):
 
     def _set_learning_rate_for_step(self, step: int) -> None:
         lr_scale = self._lr_scale_for_step(step)
-        for group, base_lr in zip(self.optimizer.param_groups, self.group_base_lrs):
-            group["lr"] = float(base_lr) * lr_scale
+        style_lr_scale = self._style_lr_scale_for_step(step)
+        for group, base_lr, is_style in zip(self.optimizer.param_groups, self.group_base_lrs, self.group_is_style):
+            group_lr = float(base_lr) * lr_scale
+            if is_style:
+                group_lr *= style_lr_scale
+            group["lr"] = group_lr
 
-    def _maybe_activate_partial_style_finetune(self, *, step_for_state: Optional[int] = None) -> None:
-        if not self.freeze_style or self.style_finetune_active:
-            return
-        current_step = self.global_step if step_for_state is None else int(step_for_state)
-        if current_step < self.style_unfreeze_step:
-            return
-        named_params = self.model.enable_partial_style_finetune(
-            train_last_encoder_blocks=self.style_unfreeze_last_encoder_blocks,
-        )
-        if not named_params:
-            return
-        self.optimizer.add_param_group(
-            {
-                "params": [param for _, param in named_params],
-                "lr": self.base_lr * self.style_lr_scale,
-            }
-        )
-        self.group_base_lrs.append(self.base_lr * self.style_lr_scale)
-        self._set_learning_rate_for_step(self.global_step)
-        self.style_finetune_active = True
-        self.style_grad_enabled = True
-        self.style_finetune_param_names = [name for name, _ in named_params]
-        preview_names = ", ".join(self.style_finetune_param_names[:4])
-        if len(self.style_finetune_param_names) > 4:
-            preview_names = f"{preview_names}, ..."
-        print(
-            "[flow] enabled partial style finetuning "
-            f"at step={current_step} lr={self.base_lr * self.style_lr_scale:.2e} "
-            f"params={len(self.style_finetune_param_names)} [{preview_names}]",
-            flush=True,
-        )
+    def _style_lr_scale_for_step(self, step: int) -> float:
+        if self.freeze_style:
+            return 0.0
+        if self.style_lr_warmup_steps <= 0:
+            return 1.0
+        step = max(0, int(step))
+        return min(float(step) / float(self.style_lr_warmup_steps), 1.0)
 
     def _encode_latent(
         self,
@@ -646,16 +635,31 @@ class FlowTrainer(_BaseTrainer):
                 style_token_mask=style_pack["style_token_mask"],
             )
             loss_flow = F.mse_loss(pred_flow, target_flow)
+            z1_hat = zt + (1.0 - t_view) * pred_flow
+            decoded = self.model.decode_from_latent(z1_hat)
+            loss_img_l1 = (
+                F.l1_loss(decoded, target)
+                if self.lambda_img_l1 > 0.0
+                else target.new_zeros(())
+            )
+            loss_img_perc = (
+                glyph_perceptual_loss(decoded, target)
+                if self.lambda_img_perc > 0.0
+                else target.new_zeros(())
+            )
             loss = self.lambda_flow * loss_flow
+            loss = loss + self.lambda_img_l1 * loss_img_l1 + self.lambda_img_perc * loss_img_perc
         return {
             "loss": loss,
             "loss_flow": loss_flow,
+            "loss_img_l1": loss_img_l1,
+            "loss_img_perc": loss_img_perc,
             "t_mean": timesteps.mean(),
             "style_finetune_active": float(self.style_finetune_active),
+            "style_lr_mult": float(self._style_lr_scale_for_step(self.global_step)),
         }
 
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
-        self._maybe_activate_partial_style_finetune()
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
         metrics = self._compute_losses(batch)
@@ -665,7 +669,6 @@ class FlowTrainer(_BaseTrainer):
         return _metrics_to_floats(metrics)
 
     def eval_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
-        self._maybe_activate_partial_style_finetune()
         self.model.eval()
         with torch.no_grad():
             return _metrics_to_floats(self._compute_losses(batch))
@@ -741,7 +744,6 @@ class FlowTrainer(_BaseTrainer):
             raise RuntimeError("Flow checkpoint is missing 'model_state'.")
         self.model.load_state_dict(checkpoint["model_state"], strict=True)
         resume_step = int(checkpoint.get("step", 0))
-        self._maybe_activate_partial_style_finetune(step_for_state=resume_step)
         if "optimizer_state" in checkpoint:
             try:
                 self.optimizer.load_state_dict(checkpoint["optimizer_state"])

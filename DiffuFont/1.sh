@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Full data pipeline: render grayscale → LMDB → PartBank → PartBank LMDB → pretrain
+# Full data pipeline: render grayscale → LMDB → pretrain
 ROOT="DiffuFont/"
 
 export PYTHONUNBUFFERED=1
@@ -42,13 +42,4 @@ python DiffuFont/DataPreparation/images_to_lmdb.py \
     --img-roots DataPreparation/Generated/TrainFonts \
     --lmdb-path DataPreparation/LMDB/TrainFont.lmdb \
     --overwrite
-
-echo "=========================================="
-echo "[pipeline] Step 5: Build PartBank (component-aware, grayscale)"
-echo "=========================================="
-python scripts/build_all_parts_production.py --workers 3
-
-nohup python scripts/build_all_parts_production.py --workers 3 > build.log 2>&1 &
-
-
 
