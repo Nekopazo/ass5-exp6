@@ -17,27 +17,30 @@ FONT_SPLIT="train"
 FONT_SPLIT_SEED=""
 FONT_TRAIN_RATIO="0.95"
 
-TARGET_STEPS=25000
+TARGET_STEPS=15000
 SAVE_EVERY=2000
-LR="1e-4"
+LR="2e-4"
 
-BATCH_SIZE=32
+BATCH_SIZE=64
 NUM_WORKERS=8
 MAX_FONTS=0
 STYLE_REF_COUNT=8
 IMAGE_SIZE=128
 
-LATENT_CHANNELS=4
+LATENT_CHANNELS=10
 LATENT_SIZE=16
 ENCODER_PATCH_SIZE=8
 ENCODER_HIDDEN_DIM=512
 ENCODER_DEPTH=4
 ENCODER_HEADS=8
 DIT_HIDDEN_DIM=512
-DIT_DEPTH=12
+DIT_DEPTH=16
 DIT_HEADS=8
 DIT_MLP_RATIO="4.0"
+STYLE_MID_TOKENS_PER_REF=12
 LOCAL_STYLE_TOKENS_PER_REF=24
+STYLE_RESIDUAL_TOKENS=8
+STYLE_RESIDUAL_GATE_INIT="0.3"
 CONTENT_CROSS_ATTN_LAYERS="8"
 STYLE_CROSS_ATTN_EVERY_N_LAYERS=1
 CONTRASTIVE_PROJ_DIM=128
@@ -75,7 +78,10 @@ while [[ $# -gt 0 ]]; do
     --dit-depth) DIT_DEPTH="${2:?}"; shift 2 ;;
     --dit-heads) DIT_HEADS="${2:?}"; shift 2 ;;
     --dit-mlp-ratio) DIT_MLP_RATIO="${2:?}"; shift 2 ;;
+    --style-mid-tokens-per-ref) STYLE_MID_TOKENS_PER_REF="${2:?}"; shift 2 ;;
     --local-style-tokens-per-ref) LOCAL_STYLE_TOKENS_PER_REF="${2:?}"; shift 2 ;;
+    --style-residual-tokens) STYLE_RESIDUAL_TOKENS="${2:?}"; shift 2 ;;
+    --style-residual-gate-init) STYLE_RESIDUAL_GATE_INIT="${2:?}"; shift 2 ;;
     --content-cross-attn-layers) CONTENT_CROSS_ATTN_LAYERS="${2:?}"; shift 2 ;;
     --style-cross-attn-every-n-layers) STYLE_CROSS_ATTN_EVERY_N_LAYERS="${2:?}"; shift 2 ;;
     --contrastive-proj-dim) CONTRASTIVE_PROJ_DIM="${2:?}"; shift 2 ;;
@@ -123,7 +129,10 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --dit-depth "${DIT_DEPTH}"
     --dit-heads "${DIT_HEADS}"
     --dit-mlp-ratio "${DIT_MLP_RATIO}"
+    --style-mid-tokens-per-ref "${STYLE_MID_TOKENS_PER_REF}"
     --local-style-tokens-per-ref "${LOCAL_STYLE_TOKENS_PER_REF}"
+    --style-residual-tokens "${STYLE_RESIDUAL_TOKENS}"
+    --style-residual-gate-init "${STYLE_RESIDUAL_GATE_INIT}"
     --content-cross-attn-layers "${CONTENT_CROSS_ATTN_LAYERS}"
     --style-cross-attn-every-n-layers "${STYLE_CROSS_ATTN_EVERY_N_LAYERS}"
     --contrastive-proj-dim "${CONTRASTIVE_PROJ_DIM}"
@@ -143,6 +152,62 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
   echo "[run_style_pretrain_colab] started daemon pid=$(cat "${PID_FILE}") log=${LOG_FILE}"
   exit 0
 fi
+
+SCRIPT_PID="$$"
+
+list_child_pids() {
+  local parent_pid="$1"
+  ps -o pid= --ppid "${parent_pid}" 2>/dev/null | awk '{print $1}'
+}
+
+kill_descendants() {
+  local parent_pid="$1"
+  local signal="${2:-TERM}"
+  local child_pid
+  while read -r child_pid; do
+    [[ -z "${child_pid}" ]] && continue
+    kill_descendants "${child_pid}" "${signal}"
+    kill -"${signal}" "${child_pid}" 2>/dev/null || true
+  done < <(list_child_pids "${parent_pid}")
+}
+
+cleanup_pid_file() {
+  if [[ -z "${PID_FILE}" || ! -f "${PID_FILE}" ]]; then
+    return 0
+  fi
+  local recorded_pid
+  recorded_pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
+  if [[ "${recorded_pid}" == "${SCRIPT_PID}" ]]; then
+    rm -f "${PID_FILE}"
+  fi
+}
+
+handle_signal() {
+  local signal="$1"
+  local exit_code=143
+  if [[ "${signal}" == "INT" ]]; then
+    exit_code=130
+  fi
+  trap - TERM INT EXIT
+  echo "[run_style_pretrain_colab] received ${signal}, terminating process tree"
+  kill_descendants "${SCRIPT_PID}" TERM
+  sleep 1
+  kill_descendants "${SCRIPT_PID}" KILL
+  cleanup_pid_file
+  exit "${exit_code}"
+}
+
+handle_exit() {
+  local status=$?
+  trap - EXIT
+  kill_descendants "${SCRIPT_PID}" TERM
+  cleanup_pid_file
+  exit "${status}"
+}
+
+trap 'handle_signal TERM' TERM
+trap 'handle_signal INT' INT
+trap 'handle_exit' EXIT
 
 exec > >(tee -a "${LOG_FILE}") 2>&1
 echo "$$" > "${PID_FILE}"
@@ -172,7 +237,10 @@ cmd=(
   --dit-depth "${DIT_DEPTH}"
   --dit-heads "${DIT_HEADS}"
   --dit-mlp-ratio "${DIT_MLP_RATIO}"
+  --style-mid-tokens-per-ref "${STYLE_MID_TOKENS_PER_REF}"
   --local-style-tokens-per-ref "${LOCAL_STYLE_TOKENS_PER_REF}"
+  --style-residual-tokens "${STYLE_RESIDUAL_TOKENS}"
+  --style-residual-gate-init "${STYLE_RESIDUAL_GATE_INIT}"
   --content-cross-attn-layers "${CONTENT_CROSS_ATTN_LAYERS}"
   --style-cross-attn-every-n-layers "${STYLE_CROSS_ATTN_EVERY_N_LAYERS}"
   --contrastive-proj-dim "${CONTRASTIVE_PROJ_DIM}"
@@ -199,10 +267,17 @@ echo "[run_style_pretrain_colab] save_dir=${SAVE_DIR}"
 echo "[run_style_pretrain_colab] log_file=${LOG_FILE}"
 echo "[run_style_pretrain_colab] device=${DEVICE_ARG} seed=${SEED}"
 echo "[run_style_pretrain_colab] batch=${BATCH_SIZE} lr=${LR} total_steps=${TARGET_STEPS}"
-echo "[run_style_pretrain_colab] style_ref_count=${STYLE_REF_COUNT} local_style_tokens_per_ref=${LOCAL_STYLE_TOKENS_PER_REF}"
+echo "[run_style_pretrain_colab] style_ref_count=${STYLE_REF_COUNT} style_mid_tokens_per_ref=${STYLE_MID_TOKENS_PER_REF} local_style_tokens_per_ref=${LOCAL_STYLE_TOKENS_PER_REF} style_residual_tokens=${STYLE_RESIDUAL_TOKENS} style_residual_gate_init=${STYLE_RESIDUAL_GATE_INIT}"
 echo "[run_style_pretrain_colab] contrastive_proj_dim=${CONTRASTIVE_PROJ_DIM} contrastive_temperature=${CONTRASTIVE_TEMPERATURE}"
 printf '[run_style_pretrain_colab] cmd='
 printf ' %q' "${cmd[@]}"
 printf '\n'
 
-"${cmd[@]}"
+set +e
+"${cmd[@]}" &
+child_pid=$!
+wait "${child_pid}"
+status=$?
+set -e
+
+exit "${status}"

@@ -1,0 +1,31 @@
+checkpoint: /scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/vae_pretrain_20260320_191447/best.pt
+font_split: all
+font_count: 320
+sample_count: 960
+mean_mae_all_fonts: 0.002500
+mean_mse_all_fonts: 0.000252
+mean_psnr_all_fonts: 38.5947
+
+best10_by_mae:
+  方正经黑简体: mae=0.000942 mse=0.000030 psnr=45.2700 chars=辽,光,五
+  方正劲黑简体: mae=0.001051 mse=0.000033 psnr=44.9593 chars=扎,文,丘
+  MiSans-Light: mae=0.001082 mse=0.000033 psnr=45.7286 chars=诊,儿,丑
+  方正正黑简体: mae=0.001090 mse=0.000032 psnr=44.9973 chars=压,识,芋
+  方正品尚细黑简体: mae=0.001095 mse=0.000027 psnr=45.9690 chars=写,卫,毡
+  方正喵呜体: mae=0.001175 mse=0.000042 psnr=43.7491 chars=吼,雨,泻
+  方正兰亭黑Pro 简: mae=0.001188 mse=0.000038 psnr=44.3818 chars=尽,佃,枯
+  方正超值体 简: mae=0.001199 mse=0.000049 psnr=43.5232 chars=刘,垃,甘
+  方正本墨绪圆体 简: mae=0.001202 mse=0.000036 psnr=45.3546 chars=盯,合,速
+  方正隶书简体: mae=0.001207 mse=0.000055 psnr=42.8367 chars=全,怯,叨
+
+worst10_by_mae:
+  方正风雅楷宋简体: mae=0.004870 mse=0.001055 psnr=34.7071 chars=侈,瓤,交
+  方正文征明小楷 简: mae=0.005053 mse=0.000853 psnr=31.1506 chars=儡,婶,由
+  方正黄草简体: mae=0.005206 mse=0.001273 psnr=29.8642 chars=蓄,盟,南
+  方正侠客体 简: mae=0.005267 mse=0.001149 psnr=29.4251 chars=惫,盅,产
+  方正罗曼斜体 简-R: mae=0.005791 mse=0.000938 psnr=31.4287 chars=取,久,长
+  方正瘦金书简体: mae=0.006243 mse=0.001394 psnr=30.1119 chars=熬,鸟,拿
+  方正白舟大髭113 简: mae=0.006332 mse=0.001799 psnr=27.5524 chars=昨,荔,吕
+  方正字迹-龙吟体 简: mae=0.007320 mse=0.002015 psnr=27.0922 chars=泌,蚀,真
+  方正粉丝天下简体: mae=0.009002 mse=0.002304 psnr=26.7759 chars=趾,抓,赋
+  方正罗曼斜体 简-EB: mae=0.010191 mse=0.002804 psnr=26.8699 chars=香,铡,真

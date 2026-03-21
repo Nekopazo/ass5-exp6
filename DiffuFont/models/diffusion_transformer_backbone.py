@@ -78,19 +78,37 @@ class GlyphDiTBlock(nn.Module):
         self.use_content_cross_attn = bool(use_content_cross_attn)
         self.use_style_cross_attn = bool(use_style_cross_attn)
         self.norm_self = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
-        self.norm_content = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
-        self.norm_style = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
+        self.norm_content = (
+            nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
+            if self.use_content_cross_attn
+            else None
+        )
+        self.norm_style = (
+            nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
+            if self.use_style_cross_attn
+            else None
+        )
         self.norm_mlp = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
 
         self.self_attn = SDPAAttention(hidden_dim, num_heads)
-        self.content_attn = SDPAAttention(hidden_dim, num_heads)
-        self.style_attn = SDPAAttention(hidden_dim, num_heads)
+        self.content_attn = SDPAAttention(hidden_dim, num_heads) if self.use_content_cross_attn else None
+        self.style_attn = SDPAAttention(hidden_dim, num_heads) if self.use_style_cross_attn else None
         self.mlp = FeedForward(hidden_dim, mlp_ratio)
-        self.style_residual_gate = nn.Parameter(torch.tensor(0.1, dtype=torch.float32))
+        self.style_residual_gate = (
+            nn.Parameter(torch.tensor(0.1, dtype=torch.float32))
+            if self.use_style_cross_attn
+            else None
+        )
+
+        self.modulation_chunk_count = 6
+        if self.use_content_cross_attn:
+            self.modulation_chunk_count += 3
+        if self.use_style_cross_attn:
+            self.modulation_chunk_count += 3
 
         self.modulation = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim * 12),
+            nn.Linear(hidden_dim, hidden_dim * self.modulation_chunk_count),
         )
         nn.init.zeros_(self.modulation[-1].weight)
         nn.init.zeros_(self.modulation[-1].bias)
@@ -100,24 +118,35 @@ class GlyphDiTBlock(nn.Module):
         latent_tokens: torch.Tensor,
         *,
         cond: torch.Tensor,
-        content_tokens: torch.Tensor,
-        style_tokens: torch.Tensor,
+        content_tokens: torch.Tensor | None,
+        style_tokens: torch.Tensor | None,
         style_token_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        (
-            shift_self,
-            scale_self,
-            gate_self,
-            shift_content,
-            scale_content,
-            gate_content,
-            shift_style,
-            scale_style,
-            gate_style,
-            shift_mlp,
-            scale_mlp,
-            gate_mlp,
-        ) = self.modulation(cond).chunk(12, dim=-1)
+        modulation_chunks = self.modulation(cond).chunk(self.modulation_chunk_count, dim=-1)
+        chunk_idx = 0
+
+        shift_self = modulation_chunks[chunk_idx]
+        scale_self = modulation_chunks[chunk_idx + 1]
+        gate_self = modulation_chunks[chunk_idx + 2]
+        chunk_idx += 3
+
+        shift_content = scale_content = gate_content = None
+        if self.use_content_cross_attn:
+            shift_content = modulation_chunks[chunk_idx]
+            scale_content = modulation_chunks[chunk_idx + 1]
+            gate_content = modulation_chunks[chunk_idx + 2]
+            chunk_idx += 3
+
+        shift_style = scale_style = gate_style = None
+        if self.use_style_cross_attn:
+            shift_style = modulation_chunks[chunk_idx]
+            scale_style = modulation_chunks[chunk_idx + 1]
+            gate_style = modulation_chunks[chunk_idx + 2]
+            chunk_idx += 3
+
+        shift_mlp = modulation_chunks[chunk_idx]
+        scale_mlp = modulation_chunks[chunk_idx + 1]
+        gate_mlp = modulation_chunks[chunk_idx + 2]
 
         x = latent_tokens
         q = modulate(self.norm_self(x), shift_self, scale_self)
@@ -125,11 +154,15 @@ class GlyphDiTBlock(nn.Module):
         x = x + gate_self.unsqueeze(1) * self_out
 
         if self.use_content_cross_attn:
+            if content_tokens is None or self.norm_content is None or self.content_attn is None:
+                raise RuntimeError("content_tokens must be provided when content cross-attention is enabled")
             q = modulate(self.norm_content(x), shift_content, scale_content)
             content_out, _ = self.content_attn(q, content_tokens, content_tokens, need_weights=False)
             x = x + gate_content.unsqueeze(1) * content_out
 
         if self.use_style_cross_attn:
+            if style_tokens is None or self.norm_style is None or self.style_attn is None or self.style_residual_gate is None:
+                raise RuntimeError("style_tokens must be provided when style cross-attention is enabled")
             q = modulate(self.norm_style(x), shift_style, scale_style)
             key_padding_mask = None
             if style_token_mask is not None:
@@ -156,7 +189,7 @@ class DiffusionTransformerBackbone(nn.Module):
         latent_channels: int = 4,
         latent_size: int = 16,
         hidden_dim: int = 512,
-        depth: int = 12,
+        depth: int = 16,
         num_heads: int = 8,
         mlp_ratio: float = 4.0,
         content_cross_attn_layers: int | None = None,
@@ -173,6 +206,11 @@ class DiffusionTransformerBackbone(nn.Module):
             content_cross_attn_layers = self.depth
         self.content_cross_attn_layers = max(0, min(self.depth, int(content_cross_attn_layers)))
         self.style_cross_attn_every_n_layers = max(1, int(style_cross_attn_every_n_layers))
+        self.has_content_cross_attn = self.content_cross_attn_layers > 0
+        self.has_style_cross_attn = any(
+            block_idx % self.style_cross_attn_every_n_layers == 0
+            for block_idx in range(self.depth)
+        )
 
         self.latent_proj = nn.Linear(self.latent_channels, self.hidden_dim)
         pos_embed = build_2d_sincos_pos_embed(self.hidden_dim, self.latent_size, self.latent_size)
@@ -227,18 +265,26 @@ class DiffusionTransformerBackbone(nn.Module):
         t_embed = self.time_mlp(t_embed)
         cond = t_embed + self.style_cond_proj(style_global.to(dtype=x.dtype))
 
-        content_tokens = content_tokens.to(device=x.device, dtype=x.dtype)
-        style_tokens = style_tokens.to(device=x.device, dtype=x.dtype)
-        if style_token_mask is not None:
+        content_tokens = (
+            content_tokens.to(device=x.device, dtype=x.dtype)
+            if self.has_content_cross_attn
+            else None
+        )
+        style_tokens = (
+            style_tokens.to(device=x.device, dtype=x.dtype)
+            if self.has_style_cross_attn
+            else None
+        )
+        if self.has_style_cross_attn and style_token_mask is not None:
             style_token_mask = style_token_mask.to(device=x.device, dtype=torch.bool)
 
         for block in self.blocks:
             x = block(
                 x,
                 cond=cond,
-                content_tokens=content_tokens,
-                style_tokens=style_tokens,
-                style_token_mask=style_token_mask,
+                content_tokens=content_tokens if block.use_content_cross_attn else None,
+                style_tokens=style_tokens if block.use_style_cross_attn else None,
+                style_token_mask=style_token_mask if block.use_style_cross_attn else None,
             )
 
         x = self.final_norm(x)

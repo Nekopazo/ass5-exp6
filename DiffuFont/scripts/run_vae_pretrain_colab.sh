@@ -11,41 +11,49 @@ PID_FILE=""
 SAVE_DIR="checkpoints/vae_pretrain_$(date '+%Y%m%d_%H%M%S')"
 
 RESUME_CKPT=""
-DEVICE_ARG="cuda:1"
+DEVICE_ARG="cuda:0"
 SEED=42
 FONT_SPLIT="train"
 FONT_SPLIT_SEED=""
 FONT_TRAIN_RATIO="0.95"
 
-TARGET_STEPS=30000
+TARGET_STEPS=50000
 SAVE_EVERY=2000
 SAMPLE_EVERY=500
-LR="1e-4"
+LR="2e-4"
 LR_WARMUP_STEPS=2000
 LR_MIN_SCALE="0.1"
 
-BATCH_SIZE=32
+BATCH_SIZE=64
 NUM_WORKERS=8
 MAX_FONTS=0
 IMAGE_SIZE=128
 
-LATENT_CHANNELS=4
+LATENT_CHANNELS=10
 LATENT_SIZE=16
 ENCODER_PATCH_SIZE=8
 ENCODER_HIDDEN_DIM=512
 ENCODER_DEPTH=4
 ENCODER_HEADS=8
 DIT_HIDDEN_DIM=512
-DIT_DEPTH=12
+DIT_DEPTH=16
 DIT_HEADS=8
 DIT_MLP_RATIO="4.0"
+STYLE_MID_TOKENS_PER_REF=12
 LOCAL_STYLE_TOKENS_PER_REF=24
+STYLE_RESIDUAL_TOKENS=8
+STYLE_RESIDUAL_GATE_INIT="0.3"
 CONTENT_CROSS_ATTN_LAYERS="8"
 STYLE_CROSS_ATTN_EVERY_N_LAYERS=1
 STYLE_REF_COUNT=8
 VAE_LAMBDA_REC="1.0"
-VAE_LAMBDA_PERC="0.15"
+VAE_LAMBDA_PERC="0.18"
 VAE_LAMBDA_KL="1e-4"
+VAE_DIFFICULTY_WARMUP_STEPS=2000
+VAE_DIFFICULTY_EMA_DECAY="0.95"
+VAE_DIFFICULTY_ALPHA="1.0"
+VAE_DIFFICULTY_MIN_WEIGHT="0.5"
+VAE_DIFFICULTY_MAX_WEIGHT="2.0"
 EXTRA_TRAIN_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -81,13 +89,21 @@ while [[ $# -gt 0 ]]; do
     --dit-depth) DIT_DEPTH="${2:?}"; shift 2 ;;
     --dit-heads) DIT_HEADS="${2:?}"; shift 2 ;;
     --dit-mlp-ratio) DIT_MLP_RATIO="${2:?}"; shift 2 ;;
+    --style-mid-tokens-per-ref) STYLE_MID_TOKENS_PER_REF="${2:?}"; shift 2 ;;
     --local-style-tokens-per-ref) LOCAL_STYLE_TOKENS_PER_REF="${2:?}"; shift 2 ;;
+    --style-residual-tokens) STYLE_RESIDUAL_TOKENS="${2:?}"; shift 2 ;;
+    --style-residual-gate-init) STYLE_RESIDUAL_GATE_INIT="${2:?}"; shift 2 ;;
     --content-cross-attn-layers) CONTENT_CROSS_ATTN_LAYERS="${2:?}"; shift 2 ;;
     --style-cross-attn-every-n-layers) STYLE_CROSS_ATTN_EVERY_N_LAYERS="${2:?}"; shift 2 ;;
     --style-ref-count) STYLE_REF_COUNT="${2:?}"; shift 2 ;;
     --vae-lambda-rec) VAE_LAMBDA_REC="${2:?}"; shift 2 ;;
     --vae-lambda-perc) VAE_LAMBDA_PERC="${2:?}"; shift 2 ;;
     --vae-lambda-kl) VAE_LAMBDA_KL="${2:?}"; shift 2 ;;
+    --vae-difficulty-warmup-steps) VAE_DIFFICULTY_WARMUP_STEPS="${2:?}"; shift 2 ;;
+    --vae-difficulty-ema-decay) VAE_DIFFICULTY_EMA_DECAY="${2:?}"; shift 2 ;;
+    --vae-difficulty-alpha) VAE_DIFFICULTY_ALPHA="${2:?}"; shift 2 ;;
+    --vae-difficulty-min-weight) VAE_DIFFICULTY_MIN_WEIGHT="${2:?}"; shift 2 ;;
+    --vae-difficulty-max-weight) VAE_DIFFICULTY_MAX_WEIGHT="${2:?}"; shift 2 ;;
     --) shift; EXTRA_TRAIN_ARGS+=("$@"); break ;;
     *) EXTRA_TRAIN_ARGS+=("$1"); shift ;;
   esac
@@ -133,13 +149,21 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --dit-depth "${DIT_DEPTH}"
     --dit-heads "${DIT_HEADS}"
     --dit-mlp-ratio "${DIT_MLP_RATIO}"
+    --style-mid-tokens-per-ref "${STYLE_MID_TOKENS_PER_REF}"
     --local-style-tokens-per-ref "${LOCAL_STYLE_TOKENS_PER_REF}"
+    --style-residual-tokens "${STYLE_RESIDUAL_TOKENS}"
+    --style-residual-gate-init "${STYLE_RESIDUAL_GATE_INIT}"
     --content-cross-attn-layers "${CONTENT_CROSS_ATTN_LAYERS}"
     --style-cross-attn-every-n-layers "${STYLE_CROSS_ATTN_EVERY_N_LAYERS}"
     --style-ref-count "${STYLE_REF_COUNT}"
     --vae-lambda-rec "${VAE_LAMBDA_REC}"
     --vae-lambda-perc "${VAE_LAMBDA_PERC}"
     --vae-lambda-kl "${VAE_LAMBDA_KL}"
+    --vae-difficulty-warmup-steps "${VAE_DIFFICULTY_WARMUP_STEPS}"
+    --vae-difficulty-ema-decay "${VAE_DIFFICULTY_EMA_DECAY}"
+    --vae-difficulty-alpha "${VAE_DIFFICULTY_ALPHA}"
+    --vae-difficulty-min-weight "${VAE_DIFFICULTY_MIN_WEIGHT}"
+    --vae-difficulty-max-weight "${VAE_DIFFICULTY_MAX_WEIGHT}"
   )
   if [[ -n "${FONT_SPLIT_SEED}" ]]; then
     daemon_args+=(--font-split-seed "${FONT_SPLIT_SEED}")
@@ -155,6 +179,62 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
   echo "[run_vae_pretrain_colab] started daemon pid=$(cat "${PID_FILE}") log=${LOG_FILE}"
   exit 0
 fi
+
+SCRIPT_PID="$$"
+
+list_child_pids() {
+  local parent_pid="$1"
+  ps -o pid= --ppid "${parent_pid}" 2>/dev/null | awk '{print $1}'
+}
+
+kill_descendants() {
+  local parent_pid="$1"
+  local signal="${2:-TERM}"
+  local child_pid
+  while read -r child_pid; do
+    [[ -z "${child_pid}" ]] && continue
+    kill_descendants "${child_pid}" "${signal}"
+    kill -"${signal}" "${child_pid}" 2>/dev/null || true
+  done < <(list_child_pids "${parent_pid}")
+}
+
+cleanup_pid_file() {
+  if [[ -z "${PID_FILE}" || ! -f "${PID_FILE}" ]]; then
+    return 0
+  fi
+  local recorded_pid
+  recorded_pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
+  if [[ "${recorded_pid}" == "${SCRIPT_PID}" ]]; then
+    rm -f "${PID_FILE}"
+  fi
+}
+
+handle_signal() {
+  local signal="$1"
+  local exit_code=143
+  if [[ "${signal}" == "INT" ]]; then
+    exit_code=130
+  fi
+  trap - TERM INT EXIT
+  echo "[run_vae_pretrain_colab] received ${signal}, terminating process tree"
+  kill_descendants "${SCRIPT_PID}" TERM
+  sleep 1
+  kill_descendants "${SCRIPT_PID}" KILL
+  cleanup_pid_file
+  exit "${exit_code}"
+}
+
+handle_exit() {
+  local status=$?
+  trap - EXIT
+  kill_descendants "${SCRIPT_PID}" TERM
+  cleanup_pid_file
+  exit "${status}"
+}
+
+trap 'handle_signal TERM' TERM
+trap 'handle_signal INT' INT
+trap 'handle_exit' EXIT
 
 exec > >(tee -a "${LOG_FILE}") 2>&1
 echo "$$" > "${PID_FILE}"
@@ -185,13 +265,21 @@ cmd=(
   --dit-depth "${DIT_DEPTH}"
   --dit-heads "${DIT_HEADS}"
   --dit-mlp-ratio "${DIT_MLP_RATIO}"
+  --style-mid-tokens-per-ref "${STYLE_MID_TOKENS_PER_REF}"
   --local-style-tokens-per-ref "${LOCAL_STYLE_TOKENS_PER_REF}"
+  --style-residual-tokens "${STYLE_RESIDUAL_TOKENS}"
+  --style-residual-gate-init "${STYLE_RESIDUAL_GATE_INIT}"
   --content-cross-attn-layers "${CONTENT_CROSS_ATTN_LAYERS}"
   --style-cross-attn-every-n-layers "${STYLE_CROSS_ATTN_EVERY_N_LAYERS}"
   --style-ref-count "${STYLE_REF_COUNT}"
   --vae-lambda-rec "${VAE_LAMBDA_REC}"
   --vae-lambda-perc "${VAE_LAMBDA_PERC}"
   --vae-lambda-kl "${VAE_LAMBDA_KL}"
+  --vae-difficulty-warmup-steps "${VAE_DIFFICULTY_WARMUP_STEPS}"
+  --vae-difficulty-ema-decay "${VAE_DIFFICULTY_EMA_DECAY}"
+  --vae-difficulty-alpha "${VAE_DIFFICULTY_ALPHA}"
+  --vae-difficulty-min-weight "${VAE_DIFFICULTY_MIN_WEIGHT}"
+  --vae-difficulty-max-weight "${VAE_DIFFICULTY_MAX_WEIGHT}"
   --epochs 1000000
   --total-steps "${TARGET_STEPS}"
   --log-every-steps 100
@@ -215,9 +303,18 @@ echo "[run_vae_pretrain_colab] save_dir=${SAVE_DIR}"
 echo "[run_vae_pretrain_colab] log_file=${LOG_FILE}"
 echo "[run_vae_pretrain_colab] device=${DEVICE_ARG} seed=${SEED}"
 echo "[run_vae_pretrain_colab] batch=${BATCH_SIZE} lr=${LR} lr_warmup_steps=${LR_WARMUP_STEPS} lr_min_scale=${LR_MIN_SCALE}"
+echo "[run_vae_pretrain_colab] style_mid_tokens_per_ref=${STYLE_MID_TOKENS_PER_REF} local_style_tokens_per_ref=${LOCAL_STYLE_TOKENS_PER_REF} style_residual_tokens=${STYLE_RESIDUAL_TOKENS} style_residual_gate_init=${STYLE_RESIDUAL_GATE_INIT}"
 echo "[run_vae_pretrain_colab] total_steps=${TARGET_STEPS} vae_lambda_rec=${VAE_LAMBDA_REC} vae_lambda_perc=${VAE_LAMBDA_PERC} vae_lambda_kl=${VAE_LAMBDA_KL}"
+echo "[run_vae_pretrain_colab] vae_difficulty_warmup_steps=${VAE_DIFFICULTY_WARMUP_STEPS} vae_difficulty_ema_decay=${VAE_DIFFICULTY_EMA_DECAY} vae_difficulty_alpha=${VAE_DIFFICULTY_ALPHA} vae_difficulty_min_weight=${VAE_DIFFICULTY_MIN_WEIGHT} vae_difficulty_max_weight=${VAE_DIFFICULTY_MAX_WEIGHT}"
 printf '[run_vae_pretrain_colab] cmd='
 printf ' %q' "${cmd[@]}"
 printf '\n'
 
-"${cmd[@]}"
+set +e
+"${cmd[@]}" &
+child_pid=$!
+wait "${child_pid}"
+status=$?
+set -e
+
+exit "${status}"

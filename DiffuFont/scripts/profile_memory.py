@@ -116,17 +116,20 @@ def main() -> None:
     model = SourcePartRefDiT(
         in_channels=1,
         image_size=128,
-        latent_channels=4,
+        latent_channels=10,
         latent_size=16,
         encoder_patch_size=8,
         encoder_hidden_dim=512,
         encoder_depth=4,
         encoder_heads=8,
-        local_style_tokens_per_ref=16,
+        local_style_tokens_per_ref=24,
+        style_mid_tokens_per_ref=12,
+        style_residual_tokens=8,
         dit_hidden_dim=512,
-        dit_depth=12,
+        dit_depth=16,
         dit_heads=8,
         dit_mlp_ratio=4.0,
+        content_cross_attn_layers=8,
         style_cross_attn_every_n_layers=1,
     )
     model.load_vae_checkpoint(args.vae_checkpoint)

@@ -1,0 +1,27 @@
+checkpoint: /scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/vae_pretrain_20260321_202403/ckpt_step_50000.pt
+font_split: all
+font_count: 8
+sample_count: 24
+mean_mae_all_fonts: 0.004925
+mean_mse_all_fonts: 0.000730
+mean_psnr_all_fonts: 32.4012
+
+best10_by_mae:
+  方正德赛黑简体 501L: mae=0.002902 mse=0.000129 psnr=39.1580 chars=甩,民,蜡
+  方正侠客体 简: mae=0.003779 mse=0.000623 psnr=32.1894 chars=诊,儿,丑
+  方正瘦金书简体: mae=0.004724 mse=0.000547 psnr=33.8259 chars=飒,浴,躏
+  方正粉丝天下简体: mae=0.005043 mse=0.000766 psnr=31.2046 chars=样,愕,济
+  方正白舟大髭113 简: mae=0.005322 mse=0.001034 psnr=30.5089 chars=聊,跷,培
+  方正字迹-龙吟体 简: mae=0.005535 mse=0.000957 psnr=30.3144 chars=铝,眉,盐
+  方正罗曼斜体 简-EB: mae=0.005781 mse=0.000857 psnr=31.0728 chars=江,紫,幔
+  方正罗曼斜体 简-R: mae=0.006314 mse=0.000926 psnr=30.9356 chars=爪,扇,滩
+
+worst10_by_mae:
+  方正德赛黑简体 501L: mae=0.002902 mse=0.000129 psnr=39.1580 chars=甩,民,蜡
+  方正侠客体 简: mae=0.003779 mse=0.000623 psnr=32.1894 chars=诊,儿,丑
+  方正瘦金书简体: mae=0.004724 mse=0.000547 psnr=33.8259 chars=飒,浴,躏
+  方正粉丝天下简体: mae=0.005043 mse=0.000766 psnr=31.2046 chars=样,愕,济
+  方正白舟大髭113 简: mae=0.005322 mse=0.001034 psnr=30.5089 chars=聊,跷,培
+  方正字迹-龙吟体 简: mae=0.005535 mse=0.000957 psnr=30.3144 chars=铝,眉,盐
+  方正罗曼斜体 简-EB: mae=0.005781 mse=0.000857 psnr=31.0728 chars=江,紫,幔
+  方正罗曼斜体 简-R: mae=0.006314 mse=0.000926 psnr=30.9356 chars=爪,扇,滩
