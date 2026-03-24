@@ -1,3 +1,0 @@
-hard20 subset @ step 38000
-6ch  mean_mae=0.003742 mean_mse=0.000537 mean_psnr=34.8229
-8ch  mean_mae=0.003502 mean_mse=0.000436 mean_psnr=35.6782

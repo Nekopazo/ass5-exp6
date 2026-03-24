@@ -260,6 +260,27 @@ def slice_batch(batch: Dict[str, torch.Tensor], count: int) -> Dict[str, torch.T
     return output
 
 
+def parse_layer_indices(raw_value: str, *, depth: int) -> list[int]:
+    depth = max(0, int(depth))
+    raw_value = str(raw_value).strip()
+    if not raw_value:
+        return []
+    indices: list[int] = []
+    seen: set[int] = set()
+    for part in raw_value.split(","):
+        token = part.strip()
+        if not token:
+            continue
+        index = int(token)
+        if index < 0 or index >= depth:
+            raise ValueError(f"content cross-attn index out of range: {index} for depth={depth}")
+        if index in seen:
+            continue
+        indices.append(index)
+        seen.add(index)
+    return indices
+
+
 def concat_batches(*batches: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
     merged: Dict[str, torch.Tensor] = {}
     keys = batches[0].keys()
@@ -310,10 +331,74 @@ def build_sample_batch(
     return concat_batches(seen_batch, unseen_batch)
 
 
+def load_font_probe_list(path: Path, *, max_fonts: int) -> list[str]:
+    path = Path(path)
+    if not path.is_file():
+        return []
+    if path.suffix.lower() == ".json":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            if "worst10_by_mae" in payload:
+                raw_fonts = payload["worst10_by_mae"]
+            elif "common_worst10_by_avg_mae" in payload:
+                raw_fonts = payload["common_worst10_by_avg_mae"]
+            elif "fonts" in payload:
+                raw_fonts = payload["fonts"]
+            else:
+                raw_fonts = []
+        else:
+            raw_fonts = payload
+        font_names: list[str] = []
+        for entry in raw_fonts:
+            if isinstance(entry, dict):
+                font_name = str(entry.get("font", "")).strip()
+            else:
+                font_name = str(entry).strip()
+            if not font_name or font_name in font_names:
+                continue
+            font_names.append(font_name)
+    else:
+        font_names = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            font_name = line.strip()
+            if not font_name or font_name in font_names:
+                continue
+            font_names.append(font_name)
+    if max_fonts > 0:
+        font_names = font_names[: int(max_fonts)]
+    return font_names
+
+
+def build_font_probe_batch(
+    dataset: FontImageDataset,
+    *,
+    font_names: list[str],
+    seed: int,
+) -> Dict[str, torch.Tensor] | None:
+    if not font_names:
+        return None
+    select_rng = random.Random(int(seed))
+    dataset_rng_state = dataset.rng.getstate()
+    try:
+        samples = []
+        for font_name in font_names:
+            sample_indices = dataset.sample_indices_by_font.get(font_name)
+            if not sample_indices:
+                continue
+            sample_index = sample_indices[select_rng.randrange(len(sample_indices))]
+            samples.append(dataset[int(sample_index)])
+    finally:
+        dataset.rng.setstate(dataset_rng_state)
+    if not samples:
+        return None
+    return collate_fn(samples)
+
+
 def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
-    content_cross_attn_layers = int(args.content_cross_attn_layers)
-    if content_cross_attn_layers <= 0:
-        content_cross_attn_layers = math.ceil(int(args.dit_depth) * 2 / 3)
+    content_cross_attn_indices = parse_layer_indices(
+        str(args.content_cross_attn_indices),
+        depth=int(args.dit_depth),
+    )
     return SourcePartRefDiT(
         in_channels=1,
         image_size=int(args.image_size),
@@ -327,13 +412,18 @@ def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
         dit_depth=int(args.dit_depth),
         dit_heads=int(args.dit_heads),
         dit_mlp_ratio=float(args.dit_mlp_ratio),
-        style_mid_tokens_per_ref=int(args.style_mid_tokens_per_ref),
-        local_style_tokens_per_ref=int(args.local_style_tokens_per_ref),
-        style_residual_tokens=int(args.style_residual_tokens),
-        style_residual_gate_init=float(args.style_residual_gate_init),
-        content_cross_attn_layers=content_cross_attn_layers,
-        style_cross_attn_every_n_layers=int(args.style_cross_attn_every_n_layers),
+        style_tokens_per_ref=int(args.style_tokens_per_ref),
+        content_cross_attn_indices=content_cross_attn_indices,
+        style_token_cross_attn_indices=parse_layer_indices(
+            str(args.style_token_cross_attn_indices),
+            depth=int(args.dit_depth),
+        ),
         contrastive_proj_dim=int(args.contrastive_proj_dim),
+        vae_bottleneck_channels=int(args.vae_bottleneck_channels),
+        vae_encoder_16x16_blocks=int(args.vae_encoder_16x16_blocks),
+        vae_decoder_16x16_blocks=int(args.vae_decoder_16x16_blocks),
+        vae_decoder_tail_blocks=int(args.vae_decoder_tail_blocks),
+        latent_normalize_for_dit=bool(args.latent_normalize_for_dit),
     )
 
 
@@ -352,10 +442,10 @@ def main() -> None:
         help="Only used in flow stage. If false, a pretrained VAE checkpoint is required.",
     )
     parser.add_argument(
-        "--train-style-jointly",
+        "--freeze-style-global",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Only used in flow stage. If false, a pretrained style checkpoint is required.",
+        help="Only used in flow stage. If true, freeze the global style extractor loaded from style pretraining.",
     )
 
     parser.add_argument("--epochs", type=int, default=10)
@@ -377,16 +467,22 @@ def main() -> None:
     parser.add_argument("--encoder-depth", type=int, default=4)
     parser.add_argument("--encoder-heads", type=int, default=8)
     parser.add_argument("--dit-hidden-dim", type=int, default=512)
-    parser.add_argument("--dit-depth", type=int, default=16)
+    parser.add_argument("--dit-depth", type=int, default=12)
     parser.add_argument("--dit-heads", type=int, default=8)
     parser.add_argument("--dit-mlp-ratio", type=float, default=4.0)
-    parser.add_argument("--style-mid-tokens-per-ref", type=int, default=12)
-    parser.add_argument("--local-style-tokens-per-ref", type=int, default=24)
-    parser.add_argument("--style-residual-tokens", type=int, default=8)
-    parser.add_argument("--style-residual-gate-init", type=float, default=0.3)
-    parser.add_argument("--content-cross-attn-layers", type=int, default=8)
-    parser.add_argument("--style-cross-attn-every-n-layers", type=int, default=1)
+    parser.add_argument("--style-tokens-per-ref", type=int, default=8)
+    parser.add_argument("--content-cross-attn-indices", type=str, default="0,1,2,3,4,5,8,10")
+    parser.add_argument("--style-token-cross-attn-indices", type=str, default="6,7,8,9,10,11")
     parser.add_argument("--contrastive-proj-dim", type=int, default=128)
+    parser.add_argument("--vae-bottleneck-channels", type=int, default=192)
+    parser.add_argument("--vae-encoder-16x16-blocks", type=int, default=2)
+    parser.add_argument("--vae-decoder-16x16-blocks", type=int, default=2)
+    parser.add_argument("--vae-decoder-tail-blocks", type=int, default=1)
+    parser.add_argument(
+        "--latent-normalize-for-dit",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
 
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--lr-warmup-steps", type=int, default=0)
@@ -400,7 +496,12 @@ def main() -> None:
 
     parser.add_argument("--vae-lambda-rec", type=float, default=1.0)
     parser.add_argument("--vae-lambda-perc", type=float, default=0.18)
-    parser.add_argument("--vae-lambda-kl", type=float, default=1e-4)
+    parser.add_argument("--vae-lambda-kl", type=float, default=2e-4)
+    parser.add_argument("--vae-kl-warmup-steps", type=int, default=10000)
+    parser.add_argument("--vae-latent-mean-weight", type=float, default=1e-3)
+    parser.add_argument("--vae-latent-std-weight", type=float, default=1e-3)
+    parser.add_argument("--vae-latent-corr-weight", type=float, default=5e-4)
+    parser.add_argument("--vae-latent-std-target", type=float, default=1.0)
     parser.add_argument("--vae-difficulty-warmup-steps", type=int, default=2000)
     parser.add_argument("--vae-difficulty-ema-decay", type=float, default=0.95)
     parser.add_argument("--vae-difficulty-alpha", type=float, default=1.0)
@@ -410,6 +511,18 @@ def main() -> None:
     parser.add_argument("--flow-lambda", type=float, default=1.0)
     parser.add_argument("--flow-lambda-img-l1", type=float, default=0.2)
     parser.add_argument("--flow-lambda-img-perc", type=float, default=0.02)
+    parser.add_argument(
+        "--style-attn-probe-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--style-attn-probe-every-steps", type=int, default=1000)
+    parser.add_argument(
+        "--style-attn-probe-font-file",
+        type=Path,
+        default=Path("analysis/vae_eval_best55800_20chars_20260322_232612/report.json"),
+    )
+    parser.add_argument("--style-attn-probe-max-fonts", type=int, default=10)
     parser.add_argument("--flow-sample-steps", type=int, default=24)
     parser.add_argument("--flow-difficulty-warmup-steps", type=int, default=10_000)
     parser.add_argument("--flow-difficulty-ema-decay", type=float, default=0.99)
@@ -418,8 +531,6 @@ def main() -> None:
     parser.add_argument("--flow-difficulty-max-weight", type=float, default=1.5)
     parser.add_argument("--flow-difficulty-refresh-every-steps", type=int, default=1000)
     parser.add_argument("--contrastive-temperature", type=float, default=0.1)
-    parser.add_argument("--style-lr-scale", type=float, default=1.0)
-    parser.add_argument("--style-lr-warmup-steps", type=int, default=5000)
     args = parser.parse_args()
 
     set_global_seed(int(args.seed))
@@ -572,6 +683,35 @@ def main() -> None:
             f"effective_batch<={min(int(args.batch), len(val_dataset.font_names))}"
         )
 
+    style_attn_probe_batch = None
+    resolved_style_attn_probe_fonts: list[str] = []
+    if args.stage == "flow" and bool(args.style_attn_probe_enabled):
+        probe_font_names = load_font_probe_list(
+            Path(args.style_attn_probe_font_file),
+            max_fonts=int(args.style_attn_probe_max_fonts),
+        )
+        style_attn_probe_batch = build_font_probe_batch(
+            dataset,
+            font_names=probe_font_names,
+            seed=int(args.seed) + 2000,
+        )
+        if style_attn_probe_batch is None:
+            print(
+                "[train] style attention probe disabled: "
+                f"no matching fonts found from {args.style_attn_probe_font_file}",
+                flush=True,
+            )
+        else:
+            resolved_style_attn_probe_fonts = list(style_attn_probe_batch["font"])
+            print(
+                "[train] using style attention probe "
+                f"fonts={len(resolved_style_attn_probe_fonts)} "
+                f"source={args.style_attn_probe_font_file} "
+                f"every_steps={int(args.style_attn_probe_every_steps)} "
+                f"font_list={','.join(resolved_style_attn_probe_fonts)}",
+                flush=True,
+            )
+
     total_steps = int(args.total_steps)
     if total_steps <= 0:
         if args.stage == "vae":
@@ -580,9 +720,14 @@ def main() -> None:
             total_steps = 5000
         else:
             total_steps = max(1, len(dataloader) * int(args.epochs))
-    resolved_content_cross_attn_layers = int(args.content_cross_attn_layers)
-    if resolved_content_cross_attn_layers <= 0:
-        resolved_content_cross_attn_layers = math.ceil(int(args.dit_depth) * 2 / 3)
+    resolved_content_cross_attn_indices = parse_layer_indices(
+        str(args.content_cross_attn_indices),
+        depth=int(args.dit_depth),
+    )
+    resolved_style_token_cross_attn_indices = parse_layer_indices(
+        str(args.style_token_cross_attn_indices),
+        depth=int(args.dit_depth),
+    )
     resolved_epochs = max(1, int(args.epochs))
     if len(dataloader) > 0:
         resolved_epochs = max(resolved_epochs, math.ceil(total_steps / len(dataloader)))
@@ -591,8 +736,8 @@ def main() -> None:
 
     if args.stage == "flow" and args.resume is None and not bool(args.train_vae_jointly) and args.vae_checkpoint is None:
         raise ValueError("Flow stage requires --vae-checkpoint unless --train-vae-jointly is enabled.")
-    if args.stage == "flow" and args.resume is None and not bool(args.train_style_jointly) and args.style_checkpoint is None:
-        raise ValueError("Flow stage requires --style-checkpoint unless --train-style-jointly is enabled.")
+    if args.stage == "flow" and bool(args.freeze_style_global) and args.resume is None and args.style_checkpoint is None:
+        raise ValueError("Flow stage cannot freeze global style without --style-checkpoint unless resuming.")
     if args.vae_checkpoint is not None:
         model.load_vae_checkpoint(args.vae_checkpoint)
         print(f"[train] loaded VAE checkpoint: {args.vae_checkpoint}")
@@ -609,6 +754,11 @@ def main() -> None:
             lambda_rec=float(args.vae_lambda_rec),
             lambda_perc=float(args.vae_lambda_perc),
             lambda_kl=float(args.vae_lambda_kl),
+            kl_warmup_steps=int(args.vae_kl_warmup_steps),
+            latent_mean_weight=float(args.vae_latent_mean_weight),
+            latent_std_weight=float(args.vae_latent_std_weight),
+            latent_corr_weight=float(args.vae_latent_corr_weight),
+            latent_std_target=float(args.vae_latent_std_target),
             difficulty_sampler=vae_difficulty_sampler,
             difficulty_warmup_steps=int(args.vae_difficulty_warmup_steps),
             difficulty_ema_decay=float(args.vae_difficulty_ema_decay),
@@ -641,10 +791,10 @@ def main() -> None:
             lambda_flow=float(args.flow_lambda),
             lambda_img_l1=float(args.flow_lambda_img_l1),
             lambda_img_perc=float(args.flow_lambda_img_perc),
-            style_lr_scale=float(args.style_lr_scale),
-            style_lr_warmup_steps=int(args.style_lr_warmup_steps),
             freeze_vae=not bool(args.train_vae_jointly),
-            freeze_style=not bool(args.train_style_jointly),
+            freeze_style_global=bool(args.freeze_style_global),
+            style_attn_probe_enabled=bool(args.style_attn_probe_enabled),
+            style_attn_probe_every_steps=int(args.style_attn_probe_every_steps),
             flow_sample_steps=int(args.flow_sample_steps),
             lr_warmup_steps=int(args.lr_warmup_steps),
             lr_min_scale=float(args.lr_min_scale),
@@ -660,6 +810,8 @@ def main() -> None:
             val_every_steps=val_every_steps,
             val_max_batches=int(args.val_max_batches),
         )
+        trainer.style_attn_probe_batch = style_attn_probe_batch
+        trainer.style_attn_probe_font_source = str(args.style_attn_probe_font_file)
 
     if args.resume is not None:
         trainer.load(args.resume)
@@ -682,12 +834,14 @@ def main() -> None:
     run_config["resolved_save_every_steps"] = int(save_every_steps)
     run_config["resolved_sample_every_steps"] = int(sample_every_steps)
     run_config["resolved_epochs"] = int(resolved_epochs)
-    run_config["resolved_content_cross_attn_layers"] = int(resolved_content_cross_attn_layers)
+    run_config["resolved_content_cross_attn_indices"] = list(resolved_content_cross_attn_indices)
+    run_config["resolved_style_token_cross_attn_indices"] = list(resolved_style_token_cross_attn_indices)
     run_config["train_fonts"] = int(len(dataset.font_names))
     run_config["train_samples"] = int(len(dataset.samples))
     run_config["val_fonts"] = 0 if val_dataset is None else int(len(val_dataset.font_names))
     run_config["val_samples"] = 0 if val_dataset is None else int(len(val_dataset.samples))
     run_config["computed_total_steps"] = int(total_steps)
+    run_config["resolved_style_attn_probe_fonts"] = list(resolved_style_attn_probe_fonts)
     run_config["vae_dynamic_difficulty_sampling"] = {
         "enabled": int(vae_difficulty_info["enabled"]),
         "warmup_steps": int(vae_difficulty_info["warmup_steps"]),

@@ -1,0 +1,4 @@
+triplet order: 192/10 | 128/12 | 192/12
+192/10: mean_mae=0.003475 mean_mse=0.000407 mean_psnr=35.6236
+128/12: mean_mae=0.003428 mean_mse=0.000400 mean_psnr=35.8475
+192/12: mean_mae=0.003290 mean_mse=0.000364 mean_psnr=36.1327

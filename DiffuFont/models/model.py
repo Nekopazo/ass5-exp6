@@ -89,6 +89,36 @@ def _metrics_to_floats(metrics: Dict[str, torch.Tensor | float | int]) -> Dict[s
     return output
 
 
+def latent_regularization_losses(
+    mu: torch.Tensor,
+    *,
+    target_std: float,
+) -> Dict[str, torch.Tensor]:
+    mu_f = mu.float()
+    flat = mu_f.permute(1, 0, 2, 3).reshape(mu_f.size(1), -1)
+    channel_mean = flat.mean(dim=1)
+    channel_std = flat.std(dim=1, unbiased=False)
+    loss_mean = channel_mean.pow(2).mean()
+    loss_std = (channel_std - float(target_std)).pow(2).mean()
+
+    if flat.size(0) > 1 and flat.size(1) > 1:
+        centered = flat - channel_mean.unsqueeze(1)
+        cov = centered @ centered.transpose(0, 1) / float(flat.size(1))
+        var = cov.diag().clamp_min(1e-8)
+        denom = torch.sqrt(torch.outer(var, var)).clamp_min(1e-8)
+        corr = cov / denom
+        offdiag_mask = ~torch.eye(corr.size(0), device=corr.device, dtype=torch.bool)
+        loss_corr = corr[offdiag_mask].pow(2).mean()
+    else:
+        loss_corr = mu_f.new_zeros(())
+
+    return {
+        "loss_latent_mean": loss_mean,
+        "loss_latent_std": loss_std,
+        "loss_latent_corr": loss_corr,
+    }
+
+
 class _BaseTrainer:
     def __init__(
         self,
@@ -325,7 +355,12 @@ class VAETrainer(_BaseTrainer):
         total_steps: int = 100_000,
         lambda_rec: float = 1.0,
         lambda_perc: float = 0.1,
-        lambda_kl: float = 1e-4,
+        lambda_kl: float = 2e-4,
+        kl_warmup_steps: int = 10_000,
+        latent_mean_weight: float = 1e-3,
+        latent_std_weight: float = 1e-3,
+        latent_corr_weight: float = 5e-4,
+        latent_std_target: float = 1.0,
         difficulty_sampler=None,
         difficulty_warmup_steps: int = 2000,
         difficulty_ema_decay: float = 0.95,
@@ -351,6 +386,11 @@ class VAETrainer(_BaseTrainer):
         self.lambda_rec = float(lambda_rec)
         self.lambda_perc = float(lambda_perc)
         self.lambda_kl = float(lambda_kl)
+        self.kl_warmup_steps = max(0, int(kl_warmup_steps))
+        self.latent_mean_weight = max(0.0, float(latent_mean_weight))
+        self.latent_std_weight = max(0.0, float(latent_std_weight))
+        self.latent_corr_weight = max(0.0, float(latent_corr_weight))
+        self.latent_std_target = float(latent_std_target)
         self.difficulty_sampler = difficulty_sampler
         self.difficulty_warmup_steps = max(0, int(difficulty_warmup_steps))
         self.difficulty_ema_decay = float(difficulty_ema_decay)
@@ -359,6 +399,36 @@ class VAETrainer(_BaseTrainer):
         self.difficulty_max_weight = max(self.difficulty_min_weight, float(difficulty_max_weight))
         self.font_difficulty_ema: Dict[str, float] = {}
         self.font_observation_count: Dict[str, int] = {}
+        self.latent_stats_count = 0
+        self.latent_stats_sum: Optional[torch.Tensor] = None
+        self.latent_stats_sq_sum: Optional[torch.Tensor] = None
+
+    def _effective_lambda_kl(self) -> float:
+        if self.kl_warmup_steps <= 0:
+            return self.lambda_kl
+        scale = min(1.0, float(self.global_step + 1) / float(self.kl_warmup_steps))
+        return self.lambda_kl * scale
+
+    def _update_latent_norm_stats(self, mu: torch.Tensor) -> None:
+        mu_f = mu.detach().float()
+        flat = mu_f.permute(1, 0, 2, 3).reshape(mu_f.size(1), -1).double()
+        batch_sum = flat.sum(dim=1)
+        batch_sq_sum = flat.square().sum(dim=1)
+        batch_count = int(flat.size(1))
+        if self.latent_stats_sum is None or self.latent_stats_sq_sum is None:
+            self.latent_stats_sum = torch.zeros_like(batch_sum)
+            self.latent_stats_sq_sum = torch.zeros_like(batch_sq_sum)
+        self.latent_stats_sum += batch_sum
+        self.latent_stats_sq_sum += batch_sq_sum
+        self.latent_stats_count += batch_count
+        count = max(1, self.latent_stats_count)
+        mean = self.latent_stats_sum / float(count)
+        var = self.latent_stats_sq_sum / float(count) - mean.square()
+        std = torch.sqrt(var.clamp_min(1e-6))
+        self.model.set_latent_norm_stats(
+            mean.view(1, -1, 1, 1).to(device=self.device, dtype=torch.float32),
+            std.view(1, -1, 1, 1).to(device=self.device, dtype=torch.float32),
+        )
 
     def _compute_losses(
         self,
@@ -378,17 +448,28 @@ class VAETrainer(_BaseTrainer):
                 loss_perc_per_sample = target.new_zeros((target.size(0),))
                 loss_perc = target.new_zeros(())
             loss_kl = kl_divergence_loss(mu, logvar)
-            loss = self.lambda_rec * loss_rec + self.lambda_perc * loss_perc + self.lambda_kl * loss_kl
+            latent_reg = latent_regularization_losses(mu, target_std=self.latent_std_target)
+            effective_lambda_kl = self._effective_lambda_kl()
+            loss = self.lambda_rec * loss_rec + self.lambda_perc * loss_perc + effective_lambda_kl * loss_kl
+            loss = loss + self.latent_mean_weight * latent_reg["loss_latent_mean"]
+            loss = loss + self.latent_std_weight * latent_reg["loss_latent_std"]
+            loss = loss + self.latent_corr_weight * latent_reg["loss_latent_corr"]
         metrics = {
             "loss": loss,
             "loss_rec": loss_rec,
             "loss_perc": loss_perc,
             "loss_kl": loss_kl,
+            "lambda_kl_eff": target.new_tensor(effective_lambda_kl),
+            **latent_reg,
+            "latent_norm_mean_abs": mu.mean(dim=(0, 2, 3)).abs().mean(),
+            "latent_norm_std_mean": mu.permute(1, 0, 2, 3).reshape(mu.size(1), -1).std(dim=1, unbiased=False).mean(),
         }
         if return_aux:
             metrics["difficulty_per_sample"] = (
-                self.lambda_rec * loss_rec_per_sample.detach() + self.lambda_perc * loss_perc_per_sample.detach()
+                self.lambda_rec * loss_rec_per_sample.detach()
+                + self.lambda_perc * loss_perc_per_sample.detach()
             )
+            metrics["latent_mu_detached"] = mu.detach()
         return metrics
 
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
@@ -396,8 +477,11 @@ class VAETrainer(_BaseTrainer):
         self.optimizer.zero_grad(set_to_none=True)
         metrics = self._compute_losses(batch, return_aux=True)
         difficulty_per_sample = metrics.pop("difficulty_per_sample", None)
+        latent_mu = metrics.pop("latent_mu_detached", None)
         metrics["loss"].backward()
         self.optimizer.step()
+        if latent_mu is not None:
+            self._update_latent_norm_stats(latent_mu)
         if difficulty_per_sample is not None:
             self._update_font_difficulty_ema(batch["font"], difficulty_per_sample)
             metrics["difficulty_mean"] = difficulty_per_sample.mean()
@@ -413,8 +497,14 @@ class VAETrainer(_BaseTrainer):
             {
                 "stage": "vae",
                 "vae_state": self.model.vae.state_dict(),
+                "latent_norm_state": self.model.latent_norm_state_dict(),
                 "model_config": self.model.export_config(),
                 "optimizer_state": self.optimizer.state_dict(),
+                "latent_norm_accum_state": {
+                    "count": int(self.latent_stats_count),
+                    "sum": None if self.latent_stats_sum is None else self.latent_stats_sum.cpu(),
+                    "sq_sum": None if self.latent_stats_sq_sum is None else self.latent_stats_sq_sum.cpu(),
+                },
                 "step": int(self.global_step),
                 "epoch": int(self.current_epoch),
             },
@@ -428,6 +518,15 @@ class VAETrainer(_BaseTrainer):
             self.optimizer.load_state_dict(checkpoint["optimizer_state"])
             self.global_step = int(checkpoint.get("step", 0))
             self.current_epoch = int(checkpoint.get("epoch", 0))
+            accum_state = checkpoint.get("latent_norm_accum_state")
+            if isinstance(accum_state, dict):
+                self.latent_stats_count = int(accum_state.get("count", 0))
+                latent_sum = accum_state.get("sum")
+                latent_sq_sum = accum_state.get("sq_sum")
+                self.latent_stats_sum = None if latent_sum is None else torch.as_tensor(latent_sum, dtype=torch.float64)
+                self.latent_stats_sq_sum = (
+                    None if latent_sq_sum is None else torch.as_tensor(latent_sq_sum, dtype=torch.float64)
+                )
 
     @torch.no_grad()
     def sample_and_save(self, batch: Dict[str, torch.Tensor], out_dir: Path) -> None:
@@ -542,14 +641,20 @@ class StylePretrainTrainer(_BaseTrainer):
             track_best_on_val=True,
         )
         self.contrastive_temperature = float(contrastive_temperature)
+        self.contrastive_head = nn.Sequential(
+            nn.Linear(self.model.dit_hidden_dim, self.model.dit_hidden_dim),
+            nn.GELU(approximate="tanh"),
+            nn.Linear(self.model.dit_hidden_dim, self.model.contrastive_proj_dim),
+        ).to(device)
         style_params = [
             param
             for name, param in self.model.named_parameters()
-            if param.requires_grad and self.model._is_style_state_key(name)
+            if param.requires_grad and self.model._is_global_style_state_key(name)
         ]
+        head_params = list(self.contrastive_head.parameters())
         if not style_params:
-            raise RuntimeError("No style parameters found for style pretraining.")
-        self.optimizer = torch.optim.AdamW(style_params, lr=float(lr), weight_decay=0.05)
+            raise RuntimeError("No global style parameters found for style pretraining.")
+        self.optimizer = torch.optim.AdamW(style_params + head_params, lr=float(lr), weight_decay=0.05)
 
     def _compute_losses(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         style = batch["style_img"].to(self.device)
@@ -561,21 +666,28 @@ class StylePretrainTrainer(_BaseTrainer):
         if style_ref_mask_pos is not None:
             style_ref_mask_pos = style_ref_mask_pos.to(self.device)
 
+        combined_style = torch.cat([style, style_pos], dim=0)
+        combined_ref_mask = None
+        if style_ref_mask is not None and style_ref_mask_pos is not None:
+            combined_ref_mask = torch.cat([style_ref_mask, style_ref_mask_pos], dim=0)
+
         with self._autocast_context():
-            anchor_style_pack = self.model.encode_style(
-                style_img=style,
-                style_ref_mask=style_ref_mask,
-                return_contrastive=True,
+            combined_style_pack = self.model.encode_style(
+                style_img=combined_style,
+                style_ref_mask=combined_ref_mask,
+                need_style_tokens=False,
+                need_style_global=True,
+                detach_global_style_encoder=False,
+                detach_global_style=False,
             )
-            positive_style_pack = self.model.encode_style(
-                style_img=style_pos,
-                style_ref_mask=style_ref_mask_pos,
-                return_contrastive=True,
-            )
-            anchor_style_embed = anchor_style_pack["contrastive_style"]
-            positive_style_embed = positive_style_pack["contrastive_style"]
-            if anchor_style_embed is None or positive_style_embed is None:
-                raise RuntimeError("Style contrastive embeddings were not produced.")
+            combined_style_global = combined_style_pack["style_global"]
+            if combined_style_global is None:
+                raise RuntimeError("Global style embeddings were not produced.")
+            anchor_style_global, positive_style_global = combined_style_global.chunk(2, dim=0)
+            if anchor_style_global is None or positive_style_global is None:
+                raise RuntimeError("Global style embeddings were not produced.")
+            anchor_style_embed = F.normalize(self.contrastive_head(anchor_style_global), dim=-1)
+            positive_style_embed = F.normalize(self.contrastive_head(positive_style_global), dim=-1)
             loss_ctr = info_nce_loss(anchor_style_embed, positive_style_embed, self.contrastive_temperature)
         return {
             "loss": loss_ctr,
@@ -584,6 +696,7 @@ class StylePretrainTrainer(_BaseTrainer):
 
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
         self.model.train()
+        self.contrastive_head.train()
         self.optimizer.zero_grad(set_to_none=True)
         metrics = self._compute_losses(batch)
         metrics["loss"].backward()
@@ -592,6 +705,7 @@ class StylePretrainTrainer(_BaseTrainer):
 
     def eval_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
         self.model.eval()
+        self.contrastive_head.eval()
         with torch.no_grad():
             return _metrics_to_floats(self._compute_losses(batch))
 
@@ -599,7 +713,8 @@ class StylePretrainTrainer(_BaseTrainer):
         torch.save(
             {
                 "stage": "style",
-                "style_state": self.model.style_state_dict(),
+                "global_style_state": self.model.global_style_state_dict(),
+                "contrastive_head_state": self.contrastive_head.state_dict(),
                 "model_config": self.model.export_config(),
                 "optimizer_state": self.optimizer.state_dict(),
                 "step": int(self.global_step),
@@ -611,6 +726,9 @@ class StylePretrainTrainer(_BaseTrainer):
     def load(self, path: str | Path) -> None:
         checkpoint = torch.load(path, map_location=self.device)
         self.model.load_style_checkpoint(path)
+        if "contrastive_head_state" not in checkpoint:
+            raise RuntimeError("Style checkpoint is missing 'contrastive_head_state'.")
+        self.contrastive_head.load_state_dict(checkpoint["contrastive_head_state"], strict=True)
         if isinstance(checkpoint, dict) and "optimizer_state" in checkpoint:
             self.optimizer.load_state_dict(checkpoint["optimizer_state"])
             self.global_step = int(checkpoint.get("step", 0))
@@ -632,10 +750,10 @@ class FlowTrainer(_BaseTrainer):
         lambda_flow: float = 1.0,
         lambda_img_l1: float = 0.2,
         lambda_img_perc: float = 0.02,
-        style_lr_scale: float = 1.0,
-        style_lr_warmup_steps: int = 5000,
         freeze_vae: bool = True,
-        freeze_style: bool = True,
+        freeze_style_global: bool = True,
+        style_attn_probe_enabled: bool = True,
+        style_attn_probe_every_steps: int = 1000,
         flow_sample_steps: int = 24,
         lr_warmup_steps: int = 0,
         lr_min_scale: float = 1.0,
@@ -653,8 +771,8 @@ class FlowTrainer(_BaseTrainer):
     ) -> None:
         if freeze_vae:
             model.freeze_vae()
-        if freeze_style:
-            model.freeze_style()
+        if freeze_style_global:
+            model.freeze_style_global()
         super().__init__(
             model,
             device,
@@ -671,9 +789,12 @@ class FlowTrainer(_BaseTrainer):
         self.lambda_img_perc = max(0.0, float(lambda_img_perc))
         self.base_lr = float(lr)
         self.freeze_vae = bool(freeze_vae)
-        self.freeze_style = bool(freeze_style)
-        self.style_lr_scale = max(0.0, float(style_lr_scale))
-        self.style_lr_warmup_steps = max(0, int(style_lr_warmup_steps))
+        self.freeze_style_global = bool(freeze_style_global)
+        self.style_attn_probe_enabled = bool(style_attn_probe_enabled)
+        self.style_attn_probe_every_steps = max(1, int(style_attn_probe_every_steps))
+        self.style_attn_probe_batch: Optional[Dict[str, torch.Tensor]] = None
+        self.style_attn_probe_font_source: Optional[str] = None
+        self.style_attn_probe_log_file: Optional[Path] = None
         self.flow_sample_steps = max(1, int(flow_sample_steps))
         self.lr_warmup_steps = max(0, int(lr_warmup_steps))
         self.lr_min_scale = float(min(max(0.0, float(lr_min_scale)), 1.0))
@@ -686,30 +807,7 @@ class FlowTrainer(_BaseTrainer):
         self.difficulty_refresh_every_steps = max(1, int(difficulty_refresh_every_steps))
         self.font_difficulty_ema: Dict[str, float] = {}
         self.font_observation_count: Dict[str, int] = {}
-        self.style_finetune_active = not self.freeze_style
-        self.style_grad_enabled = not self.freeze_style
-        style_params = []
-        other_params = []
-        group_is_style = []
-        for name, param in self.model.named_parameters():
-            if not param.requires_grad:
-                continue
-            if self.model._is_style_state_key(name):
-                style_params.append(param)
-            else:
-                other_params.append(param)
-        param_groups = []
-        if other_params:
-            param_groups.append({"params": other_params, "lr": float(lr)})
-            group_is_style.append(False)
-        if style_params:
-            param_groups.append({"params": style_params, "lr": self.base_lr * self.style_lr_scale})
-            group_is_style.append(True)
-        if not param_groups:
-            raise RuntimeError("No trainable parameters found for flow training.")
-        self.optimizer = torch.optim.AdamW(param_groups, lr=self.base_lr, weight_decay=0.05)
         self.group_base_lrs = [float(group["lr"]) for group in self.optimizer.param_groups]
-        self.group_is_style = group_is_style
         self._set_learning_rate_for_step(0)
 
     def _lr_scale_for_step(self, step: int) -> float:
@@ -725,20 +823,8 @@ class FlowTrainer(_BaseTrainer):
 
     def _set_learning_rate_for_step(self, step: int) -> None:
         lr_scale = self._lr_scale_for_step(step)
-        style_lr_scale = self._style_lr_scale_for_step(step)
-        for group, base_lr, is_style in zip(self.optimizer.param_groups, self.group_base_lrs, self.group_is_style):
-            group_lr = float(base_lr) * lr_scale
-            if is_style:
-                group_lr *= style_lr_scale
-            group["lr"] = group_lr
-
-    def _style_lr_scale_for_step(self, step: int) -> float:
-        if self.freeze_style:
-            return 0.0
-        if self.style_lr_warmup_steps <= 0:
-            return 1.0
-        step = max(0, int(step))
-        return min(float(step) / float(self.style_lr_warmup_steps), 1.0)
+        for group, base_lr in zip(self.optimizer.param_groups, self.group_base_lrs):
+            group["lr"] = float(base_lr) * lr_scale
 
     def _encode_latent(
         self,
@@ -760,8 +846,174 @@ class FlowTrainer(_BaseTrainer):
         return self.model.encode_style(
             style_img=style,
             style_ref_mask=style_ref_mask,
-            return_contrastive=False,
-            detach_style_encoder=(not self.style_grad_enabled),
+            need_style_tokens=True,
+            need_style_global=True,
+            detach_global_style_encoder=self.freeze_style_global,
+            detach_global_style=self.freeze_style_global,
+        )
+
+    def _write_style_attn_probe_log(self, row: Dict[str, object]) -> None:
+        if self.checkpoint_dir is None:
+            return
+        if self.style_attn_probe_log_file is None:
+            self.style_attn_probe_log_file = self.checkpoint_dir / "style_attn_probe_metrics.jsonl"
+        with self.style_attn_probe_log_file.open("a", encoding="utf-8") as fp:
+            fp.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    def _summarize_style_attn_probe(
+        self,
+        *,
+        style_attn_weights: list[dict[str, torch.Tensor] | None],
+        style_token_mask: Optional[torch.Tensor],
+        fonts: list[str],
+        refs: int,
+        tokens_per_ref: int,
+    ) -> Dict[str, object]:
+        if style_token_mask is None:
+            style_token_mask = torch.ones(
+                (len(fonts), refs, tokens_per_ref),
+                device=self.device,
+                dtype=torch.bool,
+            )
+        style_token_mask = style_token_mask.detach().to(dtype=torch.bool, device=self.device).cpu()
+        flat_style_token_mask = style_token_mask.reshape(style_token_mask.size(0), -1)
+        valid_token_counts = flat_style_token_mask.sum(dim=1).clamp(min=1)
+        block_rows: list[Dict[str, object]] = []
+        brief_parts: list[str] = []
+        for block_idx, attn_info in enumerate(style_attn_weights):
+            if attn_info is None:
+                continue
+            ref_weights = attn_info["ref_weights"].detach().float().cpu()
+            token_weights = attn_info["token_weights"].detach().float().cpu()
+            valid_ref_mask = attn_info["valid_ref_mask"].detach().to(dtype=torch.bool).cpu()
+
+            ref_attn_mean = ref_weights.mean(dim=1)
+            ref_entropy = -(ref_weights.clamp_min(1e-8) * ref_weights.clamp_min(1e-8).log()).sum(dim=-1)
+            valid_ref_counts = valid_ref_mask.sum(dim=1).clamp(min=1)
+            ref_entropy_norm = ref_entropy / valid_ref_counts.float().log().clamp_min(1.0).unsqueeze(1)
+
+            weighted_token_attn = token_weights * ref_weights.permute(0, 2, 1).unsqueeze(-1)
+            combined_token_mass = weighted_token_attn.mean(dim=2).reshape(token_weights.size(0), refs * tokens_per_ref)
+            per_position_token_mass = weighted_token_attn.permute(0, 2, 1, 3).reshape(
+                token_weights.size(0),
+                token_weights.size(2),
+                refs * tokens_per_ref,
+            )
+
+            per_font_rows: list[Dict[str, object]] = []
+            coverage_values: list[float] = []
+            for sample_idx, font_name in enumerate(fonts):
+                valid_mask = flat_style_token_mask[sample_idx]
+                valid_token_count = max(1, int(valid_mask.sum().item()))
+                masked_per_position_token_mass = per_position_token_mass[sample_idx].clone()
+                masked_per_position_token_mass[:, ~valid_mask] = -1.0
+                per_position_top_tokens = masked_per_position_token_mass.argmax(dim=-1)
+                top1_unique = torch.unique(per_position_top_tokens)
+                coverage = float(top1_unique.numel()) / float(valid_token_count)
+                coverage_values.append(coverage)
+
+                masked_token_mass = combined_token_mass[sample_idx].clone()
+                masked_token_mass[~valid_mask] = -1.0
+                token_topk = min(3, valid_token_count)
+                top_token_values, top_token_indices = torch.topk(masked_token_mass, k=token_topk)
+
+                valid_ref_count = max(1, int(valid_ref_mask[sample_idx].sum().item()))
+                masked_ref_mass = ref_attn_mean[sample_idx].clone()
+                masked_ref_mass[~valid_ref_mask[sample_idx]] = -1.0
+                ref_values, ref_indices = torch.topk(masked_ref_mass, k=min(3, valid_ref_count))
+                per_font_rows.append(
+                    {
+                        "font": font_name,
+                        "ref_entropy_norm": float(ref_entropy_norm[sample_idx].mean().item()),
+                        "token_coverage": float(coverage),
+                        "top_refs": [int(idx) for idx in ref_indices.tolist()],
+                        "top_ref_mass": [float(value) for value in ref_values.tolist()],
+                        "top_tokens": [int(idx) for idx in top_token_indices.tolist()],
+                        "top_token_mass": [float(value) for value in top_token_values.tolist()],
+                    }
+                )
+
+            mean_ref_mass = ref_attn_mean.mean(dim=0)
+            top_ref = int(mean_ref_mass.argmax().item())
+            top_ref_mass = float(mean_ref_mass[top_ref].item())
+            mean_entropy_norm = float(ref_entropy_norm.mean().item())
+            mean_token_coverage = float(sum(coverage_values) / float(max(1, len(coverage_values))))
+            brief_parts.append(
+                f"b{block_idx}:r{top_ref}@{top_ref_mass:.2f}/h{mean_entropy_norm:.2f}/c{mean_token_coverage:.2f}"
+            )
+            block_rows.append(
+                {
+                    "block_idx": int(block_idx),
+                    "mean_entropy_norm": mean_entropy_norm,
+                    "mean_token_coverage": mean_token_coverage,
+                    "mean_ref_mass": [float(value) for value in mean_ref_mass.tolist()],
+                    "per_font": per_font_rows,
+                }
+            )
+
+        return {
+            "step": int(self.global_step),
+            "epoch": int(self.current_epoch),
+            "font_count": int(len(fonts)),
+            "fonts": list(fonts),
+            "font_source": self.style_attn_probe_font_source,
+            "probe_timestep": 0.5,
+            "probe_latent_mode": "zt=0.5*z1",
+            "refs": int(refs),
+            "tokens_per_ref": int(tokens_per_ref),
+            "blocks": block_rows,
+            "brief_blocks": brief_parts,
+        }
+
+    @torch.no_grad()
+    def _run_style_attn_probe(self) -> Optional[Dict[str, object]]:
+        if not self.style_attn_probe_enabled or self.style_attn_probe_batch is None:
+            return None
+        batch = self.style_attn_probe_batch
+        fonts = list(batch.get("font", []))
+        if not fonts:
+            return None
+
+        self.model.eval()
+        content = batch["content"].to(self.device)
+        target = batch["target"].to(self.device)
+        style = batch["style_img"].to(self.device)
+        style_ref_mask = batch.get("style_ref_mask")
+        if style_ref_mask is not None:
+            style_ref_mask = style_ref_mask.to(self.device)
+
+        with self._autocast_context():
+            z1 = self.model.encode_to_latent(target, sample_posterior=False)
+            timesteps = torch.full((target.size(0),), 0.5, device=self.device, dtype=torch.float32)
+            zt = z1 * 0.5
+            content_features = self.model.encode_content_features(content)
+            content_tokens = self.model.content_proj(content_features)
+            style_pack = self.model.encode_style(
+                style_img=style,
+                style_ref_mask=style_ref_mask,
+                need_style_tokens=True,
+                need_style_global=True,
+                detach_global_style_encoder=self.freeze_style_global,
+                detach_global_style=self.freeze_style_global,
+            )
+            _, style_attn_weights = self.model.predict_flow(
+                zt,
+                timesteps,
+                content_tokens=content_tokens,
+                style_tokens=style_pack["style_tokens"],
+                style_global=style_pack["style_global"],
+                style_token_mask=style_pack["style_token_mask"],
+                return_style_attn_weights=True,
+            )
+
+        refs = int(style.size(1))
+        tokens_per_ref = int(self.model.style_tokens_per_ref)
+        return self._summarize_style_attn_probe(
+            style_attn_weights=style_attn_weights,
+            style_token_mask=style_pack["style_token_mask"],
+            fonts=fonts,
+            refs=refs,
+            tokens_per_ref=tokens_per_ref,
         )
 
     def _compute_losses(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor | float]:
@@ -820,8 +1072,7 @@ class FlowTrainer(_BaseTrainer):
             "loss_img_l1": loss_img_l1,
             "loss_img_perc": loss_img_perc,
             "t_mean": timesteps.mean(),
-            "style_finetune_active": float(self.style_finetune_active),
-            "style_lr_mult": float(self._style_lr_scale_for_step(self.global_step)),
+            "style_global_frozen": float(self.freeze_style_global),
         }
         metrics["difficulty_per_sample"] = loss_img_l1_per_sample.detach() + loss_img_perc_per_sample.detach()
         return metrics
@@ -862,43 +1113,54 @@ class FlowTrainer(_BaseTrainer):
             self.font_observation_count[font_name] = self.font_observation_count.get(font_name, 0) + batch_counts[font_name]
 
     def on_after_train_step(self, batch: Dict[str, torch.Tensor], metrics: Dict[str, float]) -> None:
-        if self.difficulty_sampler is None:
-            return
-        if self.global_step < self.difficulty_warmup_steps:
-            return
-        if self.global_step % self.difficulty_refresh_every_steps != 0:
-            return
-        sampler_summary = self._refresh_difficulty_sampler()
-        if sampler_summary is None:
-            return
-        top_fonts = ", ".join(
-            f"{item['font']}:{float(item['weight']):.2f}"
-            for item in sampler_summary["top_fonts"]
-        )
-        bottom_fonts = ", ".join(
-            f"{item['font']}:{float(item['weight']):.2f}"
-            for item in sampler_summary["bottom_fonts"]
-        )
-        print(
-            "[train] refreshed flow difficulty sampler "
-            f"step={self.global_step} epoch={self.current_epoch} "
-            f"observed_fonts={int(sampler_summary['observed_font_count'])} "
-            f"baseline_difficulty={float(sampler_summary['baseline_difficulty']):.4f} "
-            f"weight_range=[{float(sampler_summary['font_weight_min']):.2f},"
-            f"{float(sampler_summary['font_weight_max']):.2f}] "
-            f"weight_bins(["
-            f"{float(sampler_summary['font_weight_bucket_min']):.2f},"
-            f"{float(sampler_summary['font_weight_bucket_edge_1']):.2f})="
-            f"{int(sampler_summary['font_weight_bucket_count_low'])},"
-            f"[{float(sampler_summary['font_weight_bucket_edge_1']):.2f},"
-            f"{float(sampler_summary['font_weight_bucket_edge_2']):.2f})="
-            f"{int(sampler_summary['font_weight_bucket_count_mid'])},"
-            f"[{float(sampler_summary['font_weight_bucket_edge_2']):.2f},"
-            f"{float(sampler_summary['font_weight_bucket_max']):.2f}]="
-            f"{int(sampler_summary['font_weight_bucket_count_high'])}) "
-            f"top={top_fonts} bottom={bottom_fonts}",
-            flush=True,
-        )
+        if self.difficulty_sampler is not None:
+            if self.global_step >= self.difficulty_warmup_steps and self.global_step % self.difficulty_refresh_every_steps == 0:
+                sampler_summary = self._refresh_difficulty_sampler()
+                if sampler_summary is not None:
+                    top_fonts = ", ".join(
+                        f"{item['font']}:{float(item['weight']):.2f}"
+                        for item in sampler_summary["top_fonts"]
+                    )
+                    bottom_fonts = ", ".join(
+                        f"{item['font']}:{float(item['weight']):.2f}"
+                        for item in sampler_summary["bottom_fonts"]
+                    )
+                    print(
+                        "[train] refreshed flow difficulty sampler "
+                        f"step={self.global_step} epoch={self.current_epoch} "
+                        f"observed_fonts={int(sampler_summary['observed_font_count'])} "
+                        f"baseline_difficulty={float(sampler_summary['baseline_difficulty']):.4f} "
+                        f"weight_range=[{float(sampler_summary['font_weight_min']):.2f},"
+                        f"{float(sampler_summary['font_weight_max']):.2f}] "
+                        f"weight_bins(["
+                        f"{float(sampler_summary['font_weight_bucket_min']):.2f},"
+                        f"{float(sampler_summary['font_weight_bucket_edge_1']):.2f})="
+                        f"{int(sampler_summary['font_weight_bucket_count_low'])},"
+                        f"[{float(sampler_summary['font_weight_bucket_edge_1']):.2f},"
+                        f"{float(sampler_summary['font_weight_bucket_edge_2']):.2f})="
+                        f"{int(sampler_summary['font_weight_bucket_count_mid'])},"
+                        f"[{float(sampler_summary['font_weight_bucket_edge_2']):.2f},"
+                        f"{float(sampler_summary['font_weight_bucket_max']):.2f}]="
+                        f"{int(sampler_summary['font_weight_bucket_count_high'])}) "
+                        f"top={top_fonts} bottom={bottom_fonts}",
+                        flush=True,
+                    )
+
+        if (
+            self.style_attn_probe_enabled
+            and self.style_attn_probe_batch is not None
+            and self.global_step % self.style_attn_probe_every_steps == 0
+        ):
+            probe_row = self._run_style_attn_probe()
+            if probe_row is not None:
+                self._write_style_attn_probe_log(probe_row)
+                brief = " ".join(str(part) for part in probe_row["brief_blocks"])
+                print(
+                    "[style_attn_probe] "
+                    f"step={self.global_step} epoch={self.current_epoch} "
+                    f"fonts={int(probe_row['font_count'])} {brief}",
+                    flush=True,
+                )
 
     def _refresh_difficulty_sampler(self) -> Optional[Dict[str, object]]:
         if self.difficulty_sampler is None:
@@ -961,8 +1223,10 @@ class FlowTrainer(_BaseTrainer):
             style_pack = self.model.encode_style(
                 style_img=style_img,
                 style_ref_mask=style_ref_mask,
-                return_contrastive=False,
-                detach_style_encoder=False,
+                need_style_tokens=True,
+                need_style_global=True,
+                detach_global_style_encoder=self.freeze_style_global,
+                detach_global_style=self.freeze_style_global,
             )
             for step_idx in range(step_count):
                 t = torch.full(
@@ -987,12 +1251,13 @@ class FlowTrainer(_BaseTrainer):
     def save(self, path: str | Path) -> None:
         torch.save(
             {
-                "stage": "flow",
-                "model_state": self.model.state_dict(),
-                "model_config": self.model.export_config(),
-                "optimizer_state": self.optimizer.state_dict(),
-                "step": int(self.global_step),
-                "epoch": int(self.current_epoch),
+            "stage": "flow",
+            "model_state": self.model.state_dict(),
+            "latent_norm_state": self.model.latent_norm_state_dict(),
+            "model_config": self.model.export_config(),
+            "optimizer_state": self.optimizer.state_dict(),
+            "step": int(self.global_step),
+            "epoch": int(self.current_epoch),
             },
             Path(path),
         )
@@ -1002,6 +1267,7 @@ class FlowTrainer(_BaseTrainer):
         if "model_state" not in checkpoint:
             raise RuntimeError("Flow checkpoint is missing 'model_state'.")
         self.model.load_state_dict(checkpoint["model_state"], strict=True)
+        self.model.load_latent_norm_state(checkpoint.get("latent_norm_state"))
         resume_step = int(checkpoint.get("step", 0))
         if "optimizer_state" in checkpoint:
             try:

@@ -122,15 +122,17 @@ def main() -> None:
         encoder_hidden_dim=512,
         encoder_depth=4,
         encoder_heads=8,
-        local_style_tokens_per_ref=24,
-        style_mid_tokens_per_ref=12,
-        style_residual_tokens=8,
+        style_tokens_per_ref=8,
         dit_hidden_dim=512,
-        dit_depth=16,
+        dit_depth=12,
         dit_heads=8,
         dit_mlp_ratio=4.0,
-        content_cross_attn_layers=8,
-        style_cross_attn_every_n_layers=1,
+        content_cross_attn_indices=[0, 1, 2, 3, 4, 5, 8, 10],
+        style_token_cross_attn_indices=[6, 7, 8, 9, 10, 11],
+        vae_bottleneck_channels=192,
+        vae_encoder_16x16_blocks=2,
+        vae_decoder_16x16_blocks=2,
+        vae_decoder_tail_blocks=1,
     )
     model.load_vae_checkpoint(args.vae_checkpoint)
     trainer = FlowTrainer(
@@ -169,8 +171,10 @@ def main() -> None:
             lambda: trainer.model.encode_style(
                 style_img=style,
                 style_ref_mask=style_ref_mask,
-                return_contrastive=False,
-                detach_style_encoder=(not trainer.style_grad_enabled),
+                need_style_tokens=True,
+                need_style_global=True,
+                detach_global_style_encoder=trainer.freeze_style_global,
+                detach_global_style=trainer.freeze_style_global,
             ),
             records,
         )

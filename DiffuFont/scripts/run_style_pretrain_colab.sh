@@ -17,8 +17,8 @@ FONT_SPLIT="train"
 FONT_SPLIT_SEED=""
 FONT_TRAIN_RATIO="0.95"
 
-TARGET_STEPS=15000
-SAVE_EVERY=2000
+TARGET_STEPS=40000
+SAVE_EVERY=5000
 LR="2e-4"
 
 BATCH_SIZE=64
@@ -27,22 +27,23 @@ MAX_FONTS=0
 STYLE_REF_COUNT=8
 IMAGE_SIZE=128
 
-LATENT_CHANNELS=10
+LATENT_CHANNELS=12
 LATENT_SIZE=16
 ENCODER_PATCH_SIZE=8
 ENCODER_HIDDEN_DIM=512
 ENCODER_DEPTH=4
 ENCODER_HEADS=8
 DIT_HIDDEN_DIM=512
-DIT_DEPTH=16
+DIT_DEPTH=12
 DIT_HEADS=8
 DIT_MLP_RATIO="4.0"
-STYLE_MID_TOKENS_PER_REF=12
-LOCAL_STYLE_TOKENS_PER_REF=24
-STYLE_RESIDUAL_TOKENS=8
-STYLE_RESIDUAL_GATE_INIT="0.3"
-CONTENT_CROSS_ATTN_LAYERS="8"
-STYLE_CROSS_ATTN_EVERY_N_LAYERS=1
+STYLE_TOKENS_PER_REF=8
+CONTENT_CROSS_ATTN_INDICES="0,1,2,3,4,5,8,10"
+STYLE_TOKEN_CROSS_ATTN_INDICES="6,7,8,9,10,11"
+VAE_BOTTLENECK_CHANNELS=192
+VAE_ENCODER_16X16_BLOCKS=2
+VAE_DECODER_16X16_BLOCKS=2
+VAE_DECODER_TAIL_BLOCKS=1
 CONTRASTIVE_PROJ_DIM=128
 CONTRASTIVE_TEMPERATURE="0.1"
 EXTRA_TRAIN_ARGS=()
@@ -78,12 +79,13 @@ while [[ $# -gt 0 ]]; do
     --dit-depth) DIT_DEPTH="${2:?}"; shift 2 ;;
     --dit-heads) DIT_HEADS="${2:?}"; shift 2 ;;
     --dit-mlp-ratio) DIT_MLP_RATIO="${2:?}"; shift 2 ;;
-    --style-mid-tokens-per-ref) STYLE_MID_TOKENS_PER_REF="${2:?}"; shift 2 ;;
-    --local-style-tokens-per-ref) LOCAL_STYLE_TOKENS_PER_REF="${2:?}"; shift 2 ;;
-    --style-residual-tokens) STYLE_RESIDUAL_TOKENS="${2:?}"; shift 2 ;;
-    --style-residual-gate-init) STYLE_RESIDUAL_GATE_INIT="${2:?}"; shift 2 ;;
-    --content-cross-attn-layers) CONTENT_CROSS_ATTN_LAYERS="${2:?}"; shift 2 ;;
-    --style-cross-attn-every-n-layers) STYLE_CROSS_ATTN_EVERY_N_LAYERS="${2:?}"; shift 2 ;;
+    --style-tokens-per-ref) STYLE_TOKENS_PER_REF="${2:?}"; shift 2 ;;
+    --content-cross-attn-indices) CONTENT_CROSS_ATTN_INDICES="${2:?}"; shift 2 ;;
+    --style-token-cross-attn-indices) STYLE_TOKEN_CROSS_ATTN_INDICES="${2:?}"; shift 2 ;;
+    --vae-bottleneck-channels) VAE_BOTTLENECK_CHANNELS="${2:?}"; shift 2 ;;
+    --vae-encoder-16x16-blocks) VAE_ENCODER_16X16_BLOCKS="${2:?}"; shift 2 ;;
+    --vae-decoder-16x16-blocks) VAE_DECODER_16X16_BLOCKS="${2:?}"; shift 2 ;;
+    --vae-decoder-tail-blocks) VAE_DECODER_TAIL_BLOCKS="${2:?}"; shift 2 ;;
     --contrastive-proj-dim) CONTRASTIVE_PROJ_DIM="${2:?}"; shift 2 ;;
     --contrastive-temperature) CONTRASTIVE_TEMPERATURE="${2:?}"; shift 2 ;;
     --) shift; EXTRA_TRAIN_ARGS+=("$@"); break ;;
@@ -129,12 +131,13 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --dit-depth "${DIT_DEPTH}"
     --dit-heads "${DIT_HEADS}"
     --dit-mlp-ratio "${DIT_MLP_RATIO}"
-    --style-mid-tokens-per-ref "${STYLE_MID_TOKENS_PER_REF}"
-    --local-style-tokens-per-ref "${LOCAL_STYLE_TOKENS_PER_REF}"
-    --style-residual-tokens "${STYLE_RESIDUAL_TOKENS}"
-    --style-residual-gate-init "${STYLE_RESIDUAL_GATE_INIT}"
-    --content-cross-attn-layers "${CONTENT_CROSS_ATTN_LAYERS}"
-    --style-cross-attn-every-n-layers "${STYLE_CROSS_ATTN_EVERY_N_LAYERS}"
+    --style-tokens-per-ref "${STYLE_TOKENS_PER_REF}"
+    --content-cross-attn-indices "${CONTENT_CROSS_ATTN_INDICES}"
+    --style-token-cross-attn-indices "${STYLE_TOKEN_CROSS_ATTN_INDICES}"
+    --vae-bottleneck-channels "${VAE_BOTTLENECK_CHANNELS}"
+    --vae-encoder-16x16-blocks "${VAE_ENCODER_16X16_BLOCKS}"
+    --vae-decoder-16x16-blocks "${VAE_DECODER_16X16_BLOCKS}"
+    --vae-decoder-tail-blocks "${VAE_DECODER_TAIL_BLOCKS}"
     --contrastive-proj-dim "${CONTRASTIVE_PROJ_DIM}"
     --contrastive-temperature "${CONTRASTIVE_TEMPERATURE}"
   )
@@ -237,12 +240,13 @@ cmd=(
   --dit-depth "${DIT_DEPTH}"
   --dit-heads "${DIT_HEADS}"
   --dit-mlp-ratio "${DIT_MLP_RATIO}"
-  --style-mid-tokens-per-ref "${STYLE_MID_TOKENS_PER_REF}"
-  --local-style-tokens-per-ref "${LOCAL_STYLE_TOKENS_PER_REF}"
-  --style-residual-tokens "${STYLE_RESIDUAL_TOKENS}"
-  --style-residual-gate-init "${STYLE_RESIDUAL_GATE_INIT}"
-  --content-cross-attn-layers "${CONTENT_CROSS_ATTN_LAYERS}"
-  --style-cross-attn-every-n-layers "${STYLE_CROSS_ATTN_EVERY_N_LAYERS}"
+  --style-tokens-per-ref "${STYLE_TOKENS_PER_REF}"
+  --content-cross-attn-indices "${CONTENT_CROSS_ATTN_INDICES}"
+  --style-token-cross-attn-indices "${STYLE_TOKEN_CROSS_ATTN_INDICES}"
+  --vae-bottleneck-channels "${VAE_BOTTLENECK_CHANNELS}"
+  --vae-encoder-16x16-blocks "${VAE_ENCODER_16X16_BLOCKS}"
+  --vae-decoder-16x16-blocks "${VAE_DECODER_16X16_BLOCKS}"
+  --vae-decoder-tail-blocks "${VAE_DECODER_TAIL_BLOCKS}"
   --contrastive-proj-dim "${CONTRASTIVE_PROJ_DIM}"
   --contrastive-temperature "${CONTRASTIVE_TEMPERATURE}"
   --epochs 1000000
@@ -267,7 +271,7 @@ echo "[run_style_pretrain_colab] save_dir=${SAVE_DIR}"
 echo "[run_style_pretrain_colab] log_file=${LOG_FILE}"
 echo "[run_style_pretrain_colab] device=${DEVICE_ARG} seed=${SEED}"
 echo "[run_style_pretrain_colab] batch=${BATCH_SIZE} lr=${LR} total_steps=${TARGET_STEPS}"
-echo "[run_style_pretrain_colab] style_ref_count=${STYLE_REF_COUNT} style_mid_tokens_per_ref=${STYLE_MID_TOKENS_PER_REF} local_style_tokens_per_ref=${LOCAL_STYLE_TOKENS_PER_REF} style_residual_tokens=${STYLE_RESIDUAL_TOKENS} style_residual_gate_init=${STYLE_RESIDUAL_GATE_INIT}"
+echo "[run_style_pretrain_colab] style_ref_count=${STYLE_REF_COUNT} style_tokens_per_ref=${STYLE_TOKENS_PER_REF} total_style_tokens=$((STYLE_REF_COUNT * STYLE_TOKENS_PER_REF)) content_cross_attn_indices=${CONTENT_CROSS_ATTN_INDICES} vae_bottleneck_channels=${VAE_BOTTLENECK_CHANNELS} vae_encoder_16x16_blocks=${VAE_ENCODER_16X16_BLOCKS} vae_decoder_16x16_blocks=${VAE_DECODER_16X16_BLOCKS} vae_decoder_tail_blocks=${VAE_DECODER_TAIL_BLOCKS}"
 echo "[run_style_pretrain_colab] contrastive_proj_dim=${CONTRASTIVE_PROJ_DIM} contrastive_temperature=${CONTRASTIVE_TEMPERATURE}"
 printf '[run_style_pretrain_colab] cmd='
 printf ' %q' "${cmd[@]}"

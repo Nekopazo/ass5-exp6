@@ -1,9 +1,0 @@
-all-font average @ step 50000
-6ch	mean_mae=0.001872	mean_mse=0.000131	mean_psnr=41.0128
-8ch	mean_mae=0.001951	mean_mse=0.000117	mean_psnr=40.9445
-10ch	mean_mae=0.001807	mean_mse=0.000100	mean_psnr=41.7480
-
-common worst8 subset @ step 50000
-6ch	mean_mae=0.005639	mean_mse=0.001056	mean_psnr=30.9291
-8ch	mean_mae=0.005267	mean_mse=0.000874	mean_psnr=31.7846
-10ch	mean_mae=0.004925	mean_mse=0.000730	mean_psnr=32.4012

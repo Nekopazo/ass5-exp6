@@ -17,7 +17,7 @@ FONT_SPLIT="train"
 FONT_SPLIT_SEED=""
 FONT_TRAIN_RATIO="0.95"
 
-TARGET_STEPS=50000
+TARGET_STEPS=80000
 SAVE_EVERY=2000
 SAMPLE_EVERY=500
 LR="2e-4"
@@ -29,26 +29,33 @@ NUM_WORKERS=8
 MAX_FONTS=0
 IMAGE_SIZE=128
 
-LATENT_CHANNELS=10
+LATENT_CHANNELS=4
 LATENT_SIZE=16
 ENCODER_PATCH_SIZE=8
 ENCODER_HIDDEN_DIM=512
 ENCODER_DEPTH=4
 ENCODER_HEADS=8
 DIT_HIDDEN_DIM=512
-DIT_DEPTH=16
+DIT_DEPTH=12
 DIT_HEADS=8
 DIT_MLP_RATIO="4.0"
-STYLE_MID_TOKENS_PER_REF=12
-LOCAL_STYLE_TOKENS_PER_REF=24
-STYLE_RESIDUAL_TOKENS=8
-STYLE_RESIDUAL_GATE_INIT="0.3"
-CONTENT_CROSS_ATTN_LAYERS="8"
-STYLE_CROSS_ATTN_EVERY_N_LAYERS=1
+STYLE_TOKENS_PER_REF=8
+CONTENT_CROSS_ATTN_INDICES="0,1,2,3,4,5,8,10"
+STYLE_TOKEN_CROSS_ATTN_INDICES="6,7,8,9,10,11"
+VAE_BOTTLENECK_CHANNELS=192
+VAE_ENCODER_16X16_BLOCKS=2
+VAE_DECODER_16X16_BLOCKS=2
+VAE_DECODER_TAIL_BLOCKS=1
+LATENT_NORMALIZE_FOR_DIT=1
 STYLE_REF_COUNT=8
 VAE_LAMBDA_REC="1.0"
 VAE_LAMBDA_PERC="0.18"
-VAE_LAMBDA_KL="1e-4"
+VAE_LAMBDA_KL="2e-4"
+VAE_KL_WARMUP_STEPS=10000
+VAE_LATENT_MEAN_WEIGHT="1e-3"
+VAE_LATENT_STD_WEIGHT="1e-3"
+VAE_LATENT_CORR_WEIGHT="5e-4"
+VAE_LATENT_STD_TARGET="1.0"
 VAE_DIFFICULTY_WARMUP_STEPS=2000
 VAE_DIFFICULTY_EMA_DECAY="0.95"
 VAE_DIFFICULTY_ALPHA="1.0"
@@ -89,16 +96,24 @@ while [[ $# -gt 0 ]]; do
     --dit-depth) DIT_DEPTH="${2:?}"; shift 2 ;;
     --dit-heads) DIT_HEADS="${2:?}"; shift 2 ;;
     --dit-mlp-ratio) DIT_MLP_RATIO="${2:?}"; shift 2 ;;
-    --style-mid-tokens-per-ref) STYLE_MID_TOKENS_PER_REF="${2:?}"; shift 2 ;;
-    --local-style-tokens-per-ref) LOCAL_STYLE_TOKENS_PER_REF="${2:?}"; shift 2 ;;
-    --style-residual-tokens) STYLE_RESIDUAL_TOKENS="${2:?}"; shift 2 ;;
-    --style-residual-gate-init) STYLE_RESIDUAL_GATE_INIT="${2:?}"; shift 2 ;;
-    --content-cross-attn-layers) CONTENT_CROSS_ATTN_LAYERS="${2:?}"; shift 2 ;;
-    --style-cross-attn-every-n-layers) STYLE_CROSS_ATTN_EVERY_N_LAYERS="${2:?}"; shift 2 ;;
+    --style-tokens-per-ref) STYLE_TOKENS_PER_REF="${2:?}"; shift 2 ;;
+    --content-cross-attn-indices) CONTENT_CROSS_ATTN_INDICES="${2:?}"; shift 2 ;;
+    --style-token-cross-attn-indices) STYLE_TOKEN_CROSS_ATTN_INDICES="${2:?}"; shift 2 ;;
+    --vae-bottleneck-channels) VAE_BOTTLENECK_CHANNELS="${2:?}"; shift 2 ;;
+    --vae-encoder-16x16-blocks) VAE_ENCODER_16X16_BLOCKS="${2:?}"; shift 2 ;;
+    --vae-decoder-16x16-blocks) VAE_DECODER_16X16_BLOCKS="${2:?}"; shift 2 ;;
+    --vae-decoder-tail-blocks) VAE_DECODER_TAIL_BLOCKS="${2:?}"; shift 2 ;;
+    --latent-normalize-for-dit) LATENT_NORMALIZE_FOR_DIT=1; shift ;;
+    --no-latent-normalize-for-dit) LATENT_NORMALIZE_FOR_DIT=0; shift ;;
     --style-ref-count) STYLE_REF_COUNT="${2:?}"; shift 2 ;;
     --vae-lambda-rec) VAE_LAMBDA_REC="${2:?}"; shift 2 ;;
     --vae-lambda-perc) VAE_LAMBDA_PERC="${2:?}"; shift 2 ;;
     --vae-lambda-kl) VAE_LAMBDA_KL="${2:?}"; shift 2 ;;
+    --vae-kl-warmup-steps) VAE_KL_WARMUP_STEPS="${2:?}"; shift 2 ;;
+    --vae-latent-mean-weight) VAE_LATENT_MEAN_WEIGHT="${2:?}"; shift 2 ;;
+    --vae-latent-std-weight) VAE_LATENT_STD_WEIGHT="${2:?}"; shift 2 ;;
+    --vae-latent-corr-weight) VAE_LATENT_CORR_WEIGHT="${2:?}"; shift 2 ;;
+    --vae-latent-std-target) VAE_LATENT_STD_TARGET="${2:?}"; shift 2 ;;
     --vae-difficulty-warmup-steps) VAE_DIFFICULTY_WARMUP_STEPS="${2:?}"; shift 2 ;;
     --vae-difficulty-ema-decay) VAE_DIFFICULTY_EMA_DECAY="${2:?}"; shift 2 ;;
     --vae-difficulty-alpha) VAE_DIFFICULTY_ALPHA="${2:?}"; shift 2 ;;
@@ -149,22 +164,33 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --dit-depth "${DIT_DEPTH}"
     --dit-heads "${DIT_HEADS}"
     --dit-mlp-ratio "${DIT_MLP_RATIO}"
-    --style-mid-tokens-per-ref "${STYLE_MID_TOKENS_PER_REF}"
-    --local-style-tokens-per-ref "${LOCAL_STYLE_TOKENS_PER_REF}"
-    --style-residual-tokens "${STYLE_RESIDUAL_TOKENS}"
-    --style-residual-gate-init "${STYLE_RESIDUAL_GATE_INIT}"
-    --content-cross-attn-layers "${CONTENT_CROSS_ATTN_LAYERS}"
-    --style-cross-attn-every-n-layers "${STYLE_CROSS_ATTN_EVERY_N_LAYERS}"
+    --style-tokens-per-ref "${STYLE_TOKENS_PER_REF}"
+    --content-cross-attn-indices "${CONTENT_CROSS_ATTN_INDICES}"
+    --style-token-cross-attn-indices "${STYLE_TOKEN_CROSS_ATTN_INDICES}"
+    --vae-bottleneck-channels "${VAE_BOTTLENECK_CHANNELS}"
+    --vae-encoder-16x16-blocks "${VAE_ENCODER_16X16_BLOCKS}"
+    --vae-decoder-16x16-blocks "${VAE_DECODER_16X16_BLOCKS}"
+    --vae-decoder-tail-blocks "${VAE_DECODER_TAIL_BLOCKS}"
     --style-ref-count "${STYLE_REF_COUNT}"
     --vae-lambda-rec "${VAE_LAMBDA_REC}"
     --vae-lambda-perc "${VAE_LAMBDA_PERC}"
     --vae-lambda-kl "${VAE_LAMBDA_KL}"
+    --vae-kl-warmup-steps "${VAE_KL_WARMUP_STEPS}"
+    --vae-latent-mean-weight "${VAE_LATENT_MEAN_WEIGHT}"
+    --vae-latent-std-weight "${VAE_LATENT_STD_WEIGHT}"
+    --vae-latent-corr-weight "${VAE_LATENT_CORR_WEIGHT}"
+    --vae-latent-std-target "${VAE_LATENT_STD_TARGET}"
     --vae-difficulty-warmup-steps "${VAE_DIFFICULTY_WARMUP_STEPS}"
     --vae-difficulty-ema-decay "${VAE_DIFFICULTY_EMA_DECAY}"
     --vae-difficulty-alpha "${VAE_DIFFICULTY_ALPHA}"
     --vae-difficulty-min-weight "${VAE_DIFFICULTY_MIN_WEIGHT}"
     --vae-difficulty-max-weight "${VAE_DIFFICULTY_MAX_WEIGHT}"
   )
+  if [[ "${LATENT_NORMALIZE_FOR_DIT}" == "1" ]]; then
+    daemon_args+=(--latent-normalize-for-dit)
+  else
+    daemon_args+=(--no-latent-normalize-for-dit)
+  fi
   if [[ -n "${FONT_SPLIT_SEED}" ]]; then
     daemon_args+=(--font-split-seed "${FONT_SPLIT_SEED}")
   fi
@@ -265,16 +291,22 @@ cmd=(
   --dit-depth "${DIT_DEPTH}"
   --dit-heads "${DIT_HEADS}"
   --dit-mlp-ratio "${DIT_MLP_RATIO}"
-  --style-mid-tokens-per-ref "${STYLE_MID_TOKENS_PER_REF}"
-  --local-style-tokens-per-ref "${LOCAL_STYLE_TOKENS_PER_REF}"
-  --style-residual-tokens "${STYLE_RESIDUAL_TOKENS}"
-  --style-residual-gate-init "${STYLE_RESIDUAL_GATE_INIT}"
-  --content-cross-attn-layers "${CONTENT_CROSS_ATTN_LAYERS}"
-  --style-cross-attn-every-n-layers "${STYLE_CROSS_ATTN_EVERY_N_LAYERS}"
+  --style-tokens-per-ref "${STYLE_TOKENS_PER_REF}"
+  --content-cross-attn-indices "${CONTENT_CROSS_ATTN_INDICES}"
+  --style-token-cross-attn-indices "${STYLE_TOKEN_CROSS_ATTN_INDICES}"
+  --vae-bottleneck-channels "${VAE_BOTTLENECK_CHANNELS}"
+  --vae-encoder-16x16-blocks "${VAE_ENCODER_16X16_BLOCKS}"
+  --vae-decoder-16x16-blocks "${VAE_DECODER_16X16_BLOCKS}"
+  --vae-decoder-tail-blocks "${VAE_DECODER_TAIL_BLOCKS}"
   --style-ref-count "${STYLE_REF_COUNT}"
   --vae-lambda-rec "${VAE_LAMBDA_REC}"
   --vae-lambda-perc "${VAE_LAMBDA_PERC}"
   --vae-lambda-kl "${VAE_LAMBDA_KL}"
+  --vae-kl-warmup-steps "${VAE_KL_WARMUP_STEPS}"
+  --vae-latent-mean-weight "${VAE_LATENT_MEAN_WEIGHT}"
+  --vae-latent-std-weight "${VAE_LATENT_STD_WEIGHT}"
+  --vae-latent-corr-weight "${VAE_LATENT_CORR_WEIGHT}"
+  --vae-latent-std-target "${VAE_LATENT_STD_TARGET}"
   --vae-difficulty-warmup-steps "${VAE_DIFFICULTY_WARMUP_STEPS}"
   --vae-difficulty-ema-decay "${VAE_DIFFICULTY_EMA_DECAY}"
   --vae-difficulty-alpha "${VAE_DIFFICULTY_ALPHA}"
@@ -287,6 +319,11 @@ cmd=(
   --save-every-steps "${SAVE_EVERY}"
   --sample-every-steps "${SAMPLE_EVERY}"
 )
+if [[ "${LATENT_NORMALIZE_FOR_DIT}" == "1" ]]; then
+  cmd+=(--latent-normalize-for-dit)
+else
+  cmd+=(--no-latent-normalize-for-dit)
+fi
 
 if [[ -n "${FONT_SPLIT_SEED}" ]]; then
   cmd+=(--font-split-seed "${FONT_SPLIT_SEED}")
@@ -303,8 +340,9 @@ echo "[run_vae_pretrain_colab] save_dir=${SAVE_DIR}"
 echo "[run_vae_pretrain_colab] log_file=${LOG_FILE}"
 echo "[run_vae_pretrain_colab] device=${DEVICE_ARG} seed=${SEED}"
 echo "[run_vae_pretrain_colab] batch=${BATCH_SIZE} lr=${LR} lr_warmup_steps=${LR_WARMUP_STEPS} lr_min_scale=${LR_MIN_SCALE}"
-echo "[run_vae_pretrain_colab] style_mid_tokens_per_ref=${STYLE_MID_TOKENS_PER_REF} local_style_tokens_per_ref=${LOCAL_STYLE_TOKENS_PER_REF} style_residual_tokens=${STYLE_RESIDUAL_TOKENS} style_residual_gate_init=${STYLE_RESIDUAL_GATE_INIT}"
-echo "[run_vae_pretrain_colab] total_steps=${TARGET_STEPS} vae_lambda_rec=${VAE_LAMBDA_REC} vae_lambda_perc=${VAE_LAMBDA_PERC} vae_lambda_kl=${VAE_LAMBDA_KL}"
+echo "[run_vae_pretrain_colab] style_tokens_per_ref=${STYLE_TOKENS_PER_REF} total_style_tokens=$((STYLE_REF_COUNT * STYLE_TOKENS_PER_REF)) content_cross_attn_indices=${CONTENT_CROSS_ATTN_INDICES} vae_bottleneck_channels=${VAE_BOTTLENECK_CHANNELS} vae_encoder_16x16_blocks=${VAE_ENCODER_16X16_BLOCKS} vae_decoder_16x16_blocks=${VAE_DECODER_16X16_BLOCKS} vae_decoder_tail_blocks=${VAE_DECODER_TAIL_BLOCKS} latent_normalize_for_dit=${LATENT_NORMALIZE_FOR_DIT}"
+echo "[run_vae_pretrain_colab] total_steps=${TARGET_STEPS} vae_lambda_rec=${VAE_LAMBDA_REC} vae_lambda_perc=${VAE_LAMBDA_PERC} vae_lambda_kl=${VAE_LAMBDA_KL} vae_kl_warmup_steps=${VAE_KL_WARMUP_STEPS}"
+echo "[run_vae_pretrain_colab] vae_latent_mean_weight=${VAE_LATENT_MEAN_WEIGHT} vae_latent_std_weight=${VAE_LATENT_STD_WEIGHT} vae_latent_corr_weight=${VAE_LATENT_CORR_WEIGHT} vae_latent_std_target=${VAE_LATENT_STD_TARGET}"
 echo "[run_vae_pretrain_colab] vae_difficulty_warmup_steps=${VAE_DIFFICULTY_WARMUP_STEPS} vae_difficulty_ema_decay=${VAE_DIFFICULTY_EMA_DECAY} vae_difficulty_alpha=${VAE_DIFFICULTY_ALPHA} vae_difficulty_min_weight=${VAE_DIFFICULTY_MIN_WEIGHT} vae_difficulty_max_weight=${VAE_DIFFICULTY_MAX_WEIGHT}"
 printf '[run_vae_pretrain_colab] cmd='
 printf ' %q' "${cmd[@]}"
