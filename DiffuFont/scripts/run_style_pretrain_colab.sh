@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/scratch/yangximing/code/ass5-exp6/DiffuFont"
-PYTHON_BIN="/scratch/yangximing/miniconda3/envs/sg3/bin/python"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-/scratch/yangximing/miniconda3/envs/sg3/bin/python}"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+LOG_MAX_LINES=1500
 
 RUN_MODE="daemon"
 LOG_FILE=""
@@ -11,41 +12,49 @@ PID_FILE=""
 SAVE_DIR="checkpoints/style_pretrain_$(date '+%Y%m%d_%H%M%S')"
 
 RESUME_CKPT=""
-DEVICE_ARG="cuda:0"
+DEVICE_ARG="auto"
 SEED=42
 FONT_SPLIT="train"
 FONT_SPLIT_SEED=""
 FONT_TRAIN_RATIO="0.95"
 
-TARGET_STEPS=40000
+TARGET_STEPS=10000
 SAVE_EVERY=5000
-LR="2e-4"
+LOG_EVERY=100
+VAL_EVERY=100
+VAL_MAX_BATCHES=16
+LR="1e-4"
+LR_WARMUP_STEPS=2000
+LR_MIN_RATIO="0.1"
+WEIGHT_DECAY="0.0"
+GRAD_CLIP_NORM="1.0"
 
-BATCH_SIZE=64
+BATCH_SIZE=128
 NUM_WORKERS=8
 MAX_FONTS=0
 STYLE_REF_COUNT=8
 IMAGE_SIZE=128
 
-LATENT_CHANNELS=12
-LATENT_SIZE=16
-ENCODER_PATCH_SIZE=8
+PATCH_SIZE=16
 ENCODER_HIDDEN_DIM=512
 ENCODER_DEPTH=4
 ENCODER_HEADS=8
-DIT_HIDDEN_DIM=512
-DIT_DEPTH=12
-DIT_HEADS=8
-DIT_MLP_RATIO="4.0"
-STYLE_TOKENS_PER_REF=8
-CONTENT_CROSS_ATTN_INDICES="0,1,2,3,4,5,8,10"
-STYLE_TOKEN_CROSS_ATTN_INDICES="6,7,8,9,10,11"
-VAE_BOTTLENECK_CHANNELS=192
-VAE_ENCODER_16X16_BLOCKS=2
-VAE_DECODER_16X16_BLOCKS=2
-VAE_DECODER_TAIL_BLOCKS=1
+ENCODER_MLP_RATIO="4.0"
+STYLE_GLOBAL_DIM=256
+PATCH_HIDDEN_DIM=512
+PATCH_DEPTH=12
+PATCH_HEADS=8
+PATCH_MLP_RATIO="4.0"
+PIXEL_HIDDEN_DIM=32
+PIT_DEPTH=2
+PIT_HEADS=8
+PIT_MLP_RATIO="4.0"
+STYLE_FUSION_START=8
 CONTRASTIVE_PROJ_DIM=128
 CONTRASTIVE_TEMPERATURE="0.1"
+
+OOM_RETRY_SLEEP=60
+MAX_OOM_RETRIES=0
 EXTRA_TRAIN_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -63,31 +72,38 @@ while [[ $# -gt 0 ]]; do
     --font-train-ratio) FONT_TRAIN_RATIO="${2:?}"; shift 2 ;;
     --target-steps) TARGET_STEPS="${2:?}"; shift 2 ;;
     --save-every-steps) SAVE_EVERY="${2:?}"; shift 2 ;;
+    --log-every-steps) LOG_EVERY="${2:?}"; shift 2 ;;
+    --val-every-steps) VAL_EVERY="${2:?}"; shift 2 ;;
+    --val-max-batches) VAL_MAX_BATCHES="${2:?}"; shift 2 ;;
     --lr) LR="${2:?}"; shift 2 ;;
+    --lr-warmup-steps) LR_WARMUP_STEPS="${2:?}"; shift 2 ;;
+    --lr-min-ratio) LR_MIN_RATIO="${2:?}"; shift 2 ;;
+    --weight-decay) WEIGHT_DECAY="${2:?}"; shift 2 ;;
+    --grad-clip-norm) GRAD_CLIP_NORM="${2:?}"; shift 2 ;;
     --batch) BATCH_SIZE="${2:?}"; shift 2 ;;
     --num-workers) NUM_WORKERS="${2:?}"; shift 2 ;;
     --max-fonts) MAX_FONTS="${2:?}"; shift 2 ;;
     --style-ref-count) STYLE_REF_COUNT="${2:?}"; shift 2 ;;
     --image-size) IMAGE_SIZE="${2:?}"; shift 2 ;;
-    --latent-channels) LATENT_CHANNELS="${2:?}"; shift 2 ;;
-    --latent-size) LATENT_SIZE="${2:?}"; shift 2 ;;
-    --encoder-patch-size) ENCODER_PATCH_SIZE="${2:?}"; shift 2 ;;
+    --patch-size) PATCH_SIZE="${2:?}"; shift 2 ;;
     --encoder-hidden-dim) ENCODER_HIDDEN_DIM="${2:?}"; shift 2 ;;
     --encoder-depth) ENCODER_DEPTH="${2:?}"; shift 2 ;;
     --encoder-heads) ENCODER_HEADS="${2:?}"; shift 2 ;;
-    --dit-hidden-dim) DIT_HIDDEN_DIM="${2:?}"; shift 2 ;;
-    --dit-depth) DIT_DEPTH="${2:?}"; shift 2 ;;
-    --dit-heads) DIT_HEADS="${2:?}"; shift 2 ;;
-    --dit-mlp-ratio) DIT_MLP_RATIO="${2:?}"; shift 2 ;;
-    --style-tokens-per-ref) STYLE_TOKENS_PER_REF="${2:?}"; shift 2 ;;
-    --content-cross-attn-indices) CONTENT_CROSS_ATTN_INDICES="${2:?}"; shift 2 ;;
-    --style-token-cross-attn-indices) STYLE_TOKEN_CROSS_ATTN_INDICES="${2:?}"; shift 2 ;;
-    --vae-bottleneck-channels) VAE_BOTTLENECK_CHANNELS="${2:?}"; shift 2 ;;
-    --vae-encoder-16x16-blocks) VAE_ENCODER_16X16_BLOCKS="${2:?}"; shift 2 ;;
-    --vae-decoder-16x16-blocks) VAE_DECODER_16X16_BLOCKS="${2:?}"; shift 2 ;;
-    --vae-decoder-tail-blocks) VAE_DECODER_TAIL_BLOCKS="${2:?}"; shift 2 ;;
+    --encoder-mlp-ratio) ENCODER_MLP_RATIO="${2:?}"; shift 2 ;;
+    --style-global-dim) STYLE_GLOBAL_DIM="${2:?}"; shift 2 ;;
+    --patch-hidden-dim) PATCH_HIDDEN_DIM="${2:?}"; shift 2 ;;
+    --patch-depth) PATCH_DEPTH="${2:?}"; shift 2 ;;
+    --patch-heads) PATCH_HEADS="${2:?}"; shift 2 ;;
+    --patch-mlp-ratio) PATCH_MLP_RATIO="${2:?}"; shift 2 ;;
+    --pixel-hidden-dim) PIXEL_HIDDEN_DIM="${2:?}"; shift 2 ;;
+    --pit-depth) PIT_DEPTH="${2:?}"; shift 2 ;;
+    --pit-heads) PIT_HEADS="${2:?}"; shift 2 ;;
+    --pit-mlp-ratio) PIT_MLP_RATIO="${2:?}"; shift 2 ;;
+    --style-fusion-start) STYLE_FUSION_START="${2:?}"; shift 2 ;;
     --contrastive-proj-dim) CONTRASTIVE_PROJ_DIM="${2:?}"; shift 2 ;;
     --contrastive-temperature) CONTRASTIVE_TEMPERATURE="${2:?}"; shift 2 ;;
+    --oom-retry-sleep) OOM_RETRY_SLEEP="${2:?}"; shift 2 ;;
+    --max-oom-retries) MAX_OOM_RETRIES="${2:?}"; shift 2 ;;
     --) shift; EXTRA_TRAIN_ARGS+=("$@"); break ;;
     *) EXTRA_TRAIN_ARGS+=("$1"); shift ;;
   esac
@@ -100,6 +116,7 @@ mkdir -p logs checkpoints
 [[ -z "${PID_FILE}" ]] && PID_FILE="logs/$(basename "${SAVE_DIR}").pid"
 
 if [[ -n "${RESUME_CKPT}" && ! -f "${RESUME_CKPT}" ]]; then
+  echo "[run_style_pretrain_colab] missing resume checkpoint: ${RESUME_CKPT}" >&2
   exit 2
 fi
 
@@ -115,31 +132,38 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --font-train-ratio "${FONT_TRAIN_RATIO}"
     --target-steps "${TARGET_STEPS}"
     --save-every-steps "${SAVE_EVERY}"
+    --log-every-steps "${LOG_EVERY}"
+    --val-every-steps "${VAL_EVERY}"
+    --val-max-batches "${VAL_MAX_BATCHES}"
     --lr "${LR}"
+    --lr-warmup-steps "${LR_WARMUP_STEPS}"
+    --lr-min-ratio "${LR_MIN_RATIO}"
+    --weight-decay "${WEIGHT_DECAY}"
+    --grad-clip-norm "${GRAD_CLIP_NORM}"
     --batch "${BATCH_SIZE}"
     --num-workers "${NUM_WORKERS}"
     --max-fonts "${MAX_FONTS}"
     --style-ref-count "${STYLE_REF_COUNT}"
     --image-size "${IMAGE_SIZE}"
-    --latent-channels "${LATENT_CHANNELS}"
-    --latent-size "${LATENT_SIZE}"
-    --encoder-patch-size "${ENCODER_PATCH_SIZE}"
+    --patch-size "${PATCH_SIZE}"
     --encoder-hidden-dim "${ENCODER_HIDDEN_DIM}"
     --encoder-depth "${ENCODER_DEPTH}"
     --encoder-heads "${ENCODER_HEADS}"
-    --dit-hidden-dim "${DIT_HIDDEN_DIM}"
-    --dit-depth "${DIT_DEPTH}"
-    --dit-heads "${DIT_HEADS}"
-    --dit-mlp-ratio "${DIT_MLP_RATIO}"
-    --style-tokens-per-ref "${STYLE_TOKENS_PER_REF}"
-    --content-cross-attn-indices "${CONTENT_CROSS_ATTN_INDICES}"
-    --style-token-cross-attn-indices "${STYLE_TOKEN_CROSS_ATTN_INDICES}"
-    --vae-bottleneck-channels "${VAE_BOTTLENECK_CHANNELS}"
-    --vae-encoder-16x16-blocks "${VAE_ENCODER_16X16_BLOCKS}"
-    --vae-decoder-16x16-blocks "${VAE_DECODER_16X16_BLOCKS}"
-    --vae-decoder-tail-blocks "${VAE_DECODER_TAIL_BLOCKS}"
+    --encoder-mlp-ratio "${ENCODER_MLP_RATIO}"
+    --style-global-dim "${STYLE_GLOBAL_DIM}"
+    --patch-hidden-dim "${PATCH_HIDDEN_DIM}"
+    --patch-depth "${PATCH_DEPTH}"
+    --patch-heads "${PATCH_HEADS}"
+    --patch-mlp-ratio "${PATCH_MLP_RATIO}"
+    --pixel-hidden-dim "${PIXEL_HIDDEN_DIM}"
+    --pit-depth "${PIT_DEPTH}"
+    --pit-heads "${PIT_HEADS}"
+    --pit-mlp-ratio "${PIT_MLP_RATIO}"
+    --style-fusion-start "${STYLE_FUSION_START}"
     --contrastive-proj-dim "${CONTRASTIVE_PROJ_DIM}"
     --contrastive-temperature "${CONTRASTIVE_TEMPERATURE}"
+    --oom-retry-sleep "${OOM_RETRY_SLEEP}"
+    --max-oom-retries "${MAX_OOM_RETRIES}"
   )
   if [[ -n "${FONT_SPLIT_SEED}" ]]; then
     daemon_args+=(--font-split-seed "${FONT_SPLIT_SEED}")
@@ -212,76 +236,199 @@ trap 'handle_signal TERM' TERM
 trap 'handle_signal INT' INT
 trap 'handle_exit' EXIT
 
-exec > >(tee -a "${LOG_FILE}") 2>&1
+capped_logger() {
+  "${PYTHON_BIN}" -u -c '
+import os
+import sys
+from collections import deque
+
+log_path = sys.argv[1]
+max_lines = int(sys.argv[2])
+buffer = deque(maxlen=max_lines)
+
+if os.path.exists(log_path):
+    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            buffer.append(line)
+    with open(log_path, "w", encoding="utf-8", errors="replace") as f:
+        f.writelines(buffer)
+
+for line in sys.stdin:
+    sys.stdout.write(line)
+    sys.stdout.flush()
+    buffer.append(line)
+    tmp_path = log_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8", errors="replace") as f:
+        f.writelines(buffer)
+    os.replace(tmp_path, log_path)
+' "${LOG_FILE}" "${LOG_MAX_LINES}"
+}
+
+exec > >(capped_logger) 2>&1
 echo "$$" > "${PID_FILE}"
 
-cmd=(
+select_launch_device() {
+  if [[ "${DEVICE_ARG}" != "auto" ]]; then
+    echo "${DEVICE_ARG}"
+    return 0
+  fi
+
+  "${PYTHON_BIN}" - <<'PY'
+import sys
+import torch
+
+if not torch.cuda.is_available():
+    print("[run_style_pretrain_colab] torch.cuda.is_available()=False, falling back to cpu", file=sys.stderr)
+    print("cpu")
+    raise SystemExit(0)
+
+device_count = torch.cuda.device_count()
+probe_count = min(4, device_count)
+best_idx = 0
+best_free = -1
+
+for idx in range(probe_count):
+    try:
+        with torch.cuda.device(idx):
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+    except Exception as exc:
+        print(f"[run_style_pretrain_colab] gpu_probe_failed cuda:{idx} error={exc}", file=sys.stderr)
+        continue
+    free_gb = free_bytes / float(1024 ** 3)
+    total_gb = total_bytes / float(1024 ** 3)
+    print(
+        f"[run_style_pretrain_colab] gpu_probe cuda:{idx} free_gb={free_gb:.2f} total_gb={total_gb:.2f}",
+        file=sys.stderr,
+    )
+    if free_bytes > best_free:
+        best_free = free_bytes
+        best_idx = idx
+
+print(f"cuda:{best_idx}")
+PY
+}
+
+is_oom_failure() {
+  local attempt_marker="$1"
+  if [[ ! -f "${LOG_FILE}" ]]; then
+    return 1
+  fi
+  if [[ -n "${attempt_marker}" ]] && grep -Fq "${attempt_marker}" "${LOG_FILE}"; then
+    awk -v marker="${attempt_marker}" '
+      found { print; next }
+      index($0, marker) { found = 1; print }
+    ' "${LOG_FILE}" | grep -Eiq \
+      'torch\.OutOfMemoryError|CUDA out of memory|out of memory|CUDACachingAllocator|cuda runtime error'
+    return $?
+  fi
+  grep -Eiq \
+    'torch\.OutOfMemoryError|CUDA out of memory|out of memory|CUDACachingAllocator|cuda runtime error' \
+    "${LOG_FILE}"
+}
+
+cmd_common=(
   "${PYTHON_BIN}" -u train.py
   --stage style
   --data-root "${ROOT}"
   --save-dir "${SAVE_DIR}"
-  --device "${DEVICE_ARG}"
   --seed "${SEED}"
   --font-split "${FONT_SPLIT}"
   --font-train-ratio "${FONT_TRAIN_RATIO}"
   --lr "${LR}"
+  --lr-warmup-steps "${LR_WARMUP_STEPS}"
+  --lr-min-ratio "${LR_MIN_RATIO}"
+  --weight-decay "${WEIGHT_DECAY}"
+  --grad-clip-norm "${GRAD_CLIP_NORM}"
   --batch "${BATCH_SIZE}"
   --num-workers "${NUM_WORKERS}"
   --max-fonts "${MAX_FONTS}"
   --style-ref-count "${STYLE_REF_COUNT}"
   --image-size "${IMAGE_SIZE}"
-  --latent-channels "${LATENT_CHANNELS}"
-  --latent-size "${LATENT_SIZE}"
-  --encoder-patch-size "${ENCODER_PATCH_SIZE}"
+  --patch-size "${PATCH_SIZE}"
   --encoder-hidden-dim "${ENCODER_HIDDEN_DIM}"
   --encoder-depth "${ENCODER_DEPTH}"
   --encoder-heads "${ENCODER_HEADS}"
-  --dit-hidden-dim "${DIT_HIDDEN_DIM}"
-  --dit-depth "${DIT_DEPTH}"
-  --dit-heads "${DIT_HEADS}"
-  --dit-mlp-ratio "${DIT_MLP_RATIO}"
-  --style-tokens-per-ref "${STYLE_TOKENS_PER_REF}"
-  --content-cross-attn-indices "${CONTENT_CROSS_ATTN_INDICES}"
-  --style-token-cross-attn-indices "${STYLE_TOKEN_CROSS_ATTN_INDICES}"
-  --vae-bottleneck-channels "${VAE_BOTTLENECK_CHANNELS}"
-  --vae-encoder-16x16-blocks "${VAE_ENCODER_16X16_BLOCKS}"
-  --vae-decoder-16x16-blocks "${VAE_DECODER_16X16_BLOCKS}"
-  --vae-decoder-tail-blocks "${VAE_DECODER_TAIL_BLOCKS}"
+  --encoder-mlp-ratio "${ENCODER_MLP_RATIO}"
+  --style-global-dim "${STYLE_GLOBAL_DIM}"
+  --patch-hidden-dim "${PATCH_HIDDEN_DIM}"
+  --patch-depth "${PATCH_DEPTH}"
+  --patch-heads "${PATCH_HEADS}"
+  --patch-mlp-ratio "${PATCH_MLP_RATIO}"
+  --pixel-hidden-dim "${PIXEL_HIDDEN_DIM}"
+  --pit-depth "${PIT_DEPTH}"
+  --pit-heads "${PIT_HEADS}"
+  --pit-mlp-ratio "${PIT_MLP_RATIO}"
+  --style-fusion-start "${STYLE_FUSION_START}"
   --contrastive-proj-dim "${CONTRASTIVE_PROJ_DIM}"
   --contrastive-temperature "${CONTRASTIVE_TEMPERATURE}"
   --epochs 1000000
   --total-steps "${TARGET_STEPS}"
-  --log-every-steps 100
-  --val-every-steps 100
+  --log-every-steps "${LOG_EVERY}"
+  --val-every-steps "${VAL_EVERY}"
+  --val-max-batches "${VAL_MAX_BATCHES}"
   --save-every-steps "${SAVE_EVERY}"
 )
 
 if [[ -n "${FONT_SPLIT_SEED}" ]]; then
-  cmd+=(--font-split-seed "${FONT_SPLIT_SEED}")
+  cmd_common+=(--font-split-seed "${FONT_SPLIT_SEED}")
 fi
 if [[ -n "${RESUME_CKPT}" ]]; then
-  cmd+=(--resume "${RESUME_CKPT}")
+  cmd_common+=(--resume "${RESUME_CKPT}")
 fi
 if [[ "${#EXTRA_TRAIN_ARGS[@]}" -gt 0 ]]; then
-  cmd+=("${EXTRA_TRAIN_ARGS[@]}")
+  cmd_common+=("${EXTRA_TRAIN_ARGS[@]}")
 fi
 
 echo "[run_style_pretrain_colab] stage=style"
 echo "[run_style_pretrain_colab] save_dir=${SAVE_DIR}"
 echo "[run_style_pretrain_colab] log_file=${LOG_FILE}"
-echo "[run_style_pretrain_colab] device=${DEVICE_ARG} seed=${SEED}"
-echo "[run_style_pretrain_colab] batch=${BATCH_SIZE} lr=${LR} total_steps=${TARGET_STEPS}"
-echo "[run_style_pretrain_colab] style_ref_count=${STYLE_REF_COUNT} style_tokens_per_ref=${STYLE_TOKENS_PER_REF} total_style_tokens=$((STYLE_REF_COUNT * STYLE_TOKENS_PER_REF)) content_cross_attn_indices=${CONTENT_CROSS_ATTN_INDICES} vae_bottleneck_channels=${VAE_BOTTLENECK_CHANNELS} vae_encoder_16x16_blocks=${VAE_ENCODER_16X16_BLOCKS} vae_decoder_16x16_blocks=${VAE_DECODER_16X16_BLOCKS} vae_decoder_tail_blocks=${VAE_DECODER_TAIL_BLOCKS}"
+echo "[run_style_pretrain_colab] requested_device=${DEVICE_ARG} seed=${SEED}"
+echo "[run_style_pretrain_colab] batch=${BATCH_SIZE} lr=${LR} target_steps=${TARGET_STEPS}"
+echo "[run_style_pretrain_colab] lr=${LR} lr_warmup_steps=${LR_WARMUP_STEPS} lr_min_ratio=${LR_MIN_RATIO} weight_decay=${WEIGHT_DECAY}"
+echo "[run_style_pretrain_colab] grad_clip_norm=${GRAD_CLIP_NORM}"
+echo "[run_style_pretrain_colab] image_size=${IMAGE_SIZE} patch_size=${PATCH_SIZE}"
+echo "[run_style_pretrain_colab] encoder_hidden_dim=${ENCODER_HIDDEN_DIM} encoder_depth=${ENCODER_DEPTH} encoder_heads=${ENCODER_HEADS}"
+echo "[run_style_pretrain_colab] style_global_dim=${STYLE_GLOBAL_DIM}"
+echo "[run_style_pretrain_colab] patch_hidden_dim=${PATCH_HIDDEN_DIM} patch_depth=${PATCH_DEPTH} patch_heads=${PATCH_HEADS}"
+echo "[run_style_pretrain_colab] pixel_hidden_dim=${PIXEL_HIDDEN_DIM} pit_depth=${PIT_DEPTH} pit_heads=${PIT_HEADS}"
 echo "[run_style_pretrain_colab] contrastive_proj_dim=${CONTRASTIVE_PROJ_DIM} contrastive_temperature=${CONTRASTIVE_TEMPERATURE}"
-printf '[run_style_pretrain_colab] cmd='
-printf ' %q' "${cmd[@]}"
-printf '\n'
+echo "[run_style_pretrain_colab] oom_retry_sleep=${OOM_RETRY_SLEEP} max_oom_retries=${MAX_OOM_RETRIES}"
 
-set +e
-"${cmd[@]}" &
-child_pid=$!
-wait "${child_pid}"
-status=$?
-set -e
+attempt=1
+while true; do
+  launch_device="$(select_launch_device)"
+  attempt_marker="__run_style_pretrain_attempt_${attempt}_$(date +%s)"
+  cmd=("${cmd_common[@]}")
+  cmd+=(--device "${launch_device}")
 
-exit "${status}"
+  echo "[run_style_pretrain_colab] ${attempt_marker}"
+  echo "[run_style_pretrain_colab] attempt=${attempt} launch_device=${launch_device}"
+  printf '[run_style_pretrain_colab] cmd='
+  printf ' %q' "${cmd[@]}"
+  printf '\n'
+
+  set +e
+  "${cmd[@]}" &
+  child_pid=$!
+  wait "${child_pid}"
+  status=$?
+  set -e
+
+  if [[ ${status} -eq 0 ]]; then
+    exit 0
+  fi
+
+  if is_oom_failure "${attempt_marker}"; then
+    if [[ "${MAX_OOM_RETRIES}" != "0" && ${attempt} -ge ${MAX_OOM_RETRIES} ]]; then
+      echo "[run_style_pretrain_colab] attempt=${attempt} hit max OOM retries, aborting"
+      exit "${status}"
+    fi
+    echo "[run_style_pretrain_colab] attempt=${attempt} failed with OOM, sleeping ${OOM_RETRY_SLEEP}s before retry"
+    attempt=$((attempt + 1))
+    sleep "${OOM_RETRY_SLEEP}"
+    continue
+  fi
+
+  echo "[run_style_pretrain_colab] attempt=${attempt} failed with non-OOM status=${status}, aborting"
+  exit "${status}"
+done

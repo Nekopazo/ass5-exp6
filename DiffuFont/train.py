@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Training entry for the document-defined content+style latent flow path."""
+"""Training entry for the pixel-space content+style glyph DiT."""
 
 from __future__ import annotations
 
@@ -15,166 +15,10 @@ import torch
 from torch.utils.data import DataLoader, Sampler
 
 from dataset import FontImageDataset, UniqueFontBatchSampler
-from models.model import FlowTrainer, StylePretrainTrainer, VAETrainer
+from models.model import FlowTrainer, StylePretrainTrainer
 from models.sdpa_attention import describe_torch_sdpa_backends, enable_torch_sdpa_backends
 from models.source_part_ref_dit import SourcePartRefDiT
 from style_augment import build_base_glyph_transform
-
-
-def build_font_weight_bucket_summary(
-    font_weights: Dict[str, float],
-    *,
-    bucket_min: float,
-    bucket_max: float,
-) -> Dict[str, float | int]:
-    bucket_min = float(bucket_min)
-    bucket_max = max(bucket_min, float(bucket_max))
-    span = max(bucket_max - bucket_min, 1e-8)
-    edge_1 = bucket_min + span / 3.0
-    edge_2 = bucket_min + (2.0 * span / 3.0)
-    values = [float(weight) for weight in font_weights.values()]
-    count_low = sum(1 for weight in values if weight < edge_1)
-    count_mid = sum(1 for weight in values if edge_1 <= weight < edge_2)
-    count_high = sum(1 for weight in values if weight >= edge_2)
-    return {
-        "font_weight_bucket_min": float(bucket_min),
-        "font_weight_bucket_edge_1": float(edge_1),
-        "font_weight_bucket_edge_2": float(edge_2),
-        "font_weight_bucket_max": float(bucket_max),
-        "font_weight_bucket_count_low": int(count_low),
-        "font_weight_bucket_count_mid": int(count_mid),
-        "font_weight_bucket_count_high": int(count_high),
-    }
-
-
-def build_difficulty_sampling_info(
-    font_names: list[str],
-    *,
-    enabled: bool,
-    warmup_steps: int,
-    ema_decay: float,
-    alpha: float,
-    min_weight: float,
-    max_weight: float,
-    sampler: DynamicFontDifficultySampler | None = None,
-    refresh_every_steps: int | None = None,
-) -> Dict[str, object]:
-    info: Dict[str, object] = {
-        "enabled": int(enabled),
-        "warmup_steps": int(warmup_steps),
-        "ema_decay": float(ema_decay),
-        "alpha": float(alpha),
-        "min_weight": float(min_weight),
-        "max_weight": float(max_weight),
-    }
-    if refresh_every_steps is not None:
-        info["refresh_every_steps"] = int(refresh_every_steps)
-    if sampler is None:
-        info.update(
-            {
-                "font_weight_min": 1.0,
-                "font_weight_max": 1.0,
-                "font_weight_mean": 1.0,
-                "sample_weight_min": 1.0,
-                "sample_weight_max": 1.0,
-                **build_font_weight_bucket_summary(
-                    {font_name: 1.0 for font_name in font_names},
-                    bucket_min=float(min_weight),
-                    bucket_max=float(max_weight),
-                ),
-                "top_fonts": [],
-                "bottom_fonts": [],
-            }
-        )
-        return info
-    info.update(sampler.export_state())
-    return info
-
-
-class DynamicFontDifficultySampler(Sampler[int]):
-    def __init__(self, dataset: FontImageDataset, *, seed: int) -> None:
-        self.dataset = dataset
-        self.num_samples = len(dataset.samples)
-        self.generator = torch.Generator()
-        self.generator.manual_seed(int(seed))
-        self.font_weights: Dict[str, float] = {font_name: 1.0 for font_name in dataset.font_names}
-        self.sample_weights = torch.ones(self.num_samples, dtype=torch.double)
-        self.bucket_min = 0.5
-        self.bucket_max = 2.0
-        self.last_summary: Dict[str, object] = self._build_summary()
-
-    def __iter__(self):
-        sampled = torch.multinomial(
-            self.sample_weights,
-            self.num_samples,
-            replacement=True,
-            generator=self.generator,
-        )
-        return iter(sampled.tolist())
-
-    def __len__(self) -> int:
-        return self.num_samples
-
-    def set_font_weights(self, font_weights: Dict[str, float]) -> Dict[str, object]:
-        sample_weights = torch.ones(self.num_samples, dtype=torch.double)
-        effective_font_weights: Dict[str, float] = {}
-        for font_name in self.dataset.font_names:
-            weight = float(font_weights.get(font_name, 1.0))
-            effective_font_weights[font_name] = weight
-            sample_weights[self.dataset.sample_indices_by_font[font_name]] = weight
-        self.font_weights = effective_font_weights
-        self.sample_weights = sample_weights
-        self.last_summary = self._build_summary()
-        return self.last_summary
-
-    def export_state(self) -> Dict[str, object]:
-        return dict(self.last_summary)
-
-    def set_bucket_range(self, *, bucket_min: float, bucket_max: float) -> Dict[str, object]:
-        self.bucket_min = float(bucket_min)
-        self.bucket_max = max(self.bucket_min, float(bucket_max))
-        self.last_summary = self._build_summary()
-        return self.last_summary
-
-    def _build_summary(self) -> Dict[str, object]:
-        items = list(self.font_weights.items())
-        if not items:
-            return {
-                "font_weight_min": 1.0,
-                "font_weight_max": 1.0,
-                "font_weight_mean": 1.0,
-                "sample_weight_min": 1.0,
-                "sample_weight_max": 1.0,
-                **build_font_weight_bucket_summary(
-                    {},
-                    bucket_min=self.bucket_min,
-                    bucket_max=self.bucket_max,
-                ),
-                "top_fonts": [],
-                "bottom_fonts": [],
-            }
-        sorted_items = sorted(items, key=lambda item: (item[1], item[0]))
-        font_values = [float(weight) for _, weight in items]
-        return {
-            "font_weight_min": float(min(font_values)),
-            "font_weight_max": float(max(font_values)),
-            "font_weight_mean": float(sum(font_values) / len(font_values)),
-            "sample_weight_min": float(self.sample_weights.min().item()),
-            "sample_weight_max": float(self.sample_weights.max().item()),
-            **build_font_weight_bucket_summary(
-                self.font_weights,
-                bucket_min=self.bucket_min,
-                bucket_max=self.bucket_max,
-            ),
-            "top_fonts": [
-                {"font": font_name, "weight": float(weight)}
-                for font_name, weight in sorted(items, key=lambda item: (-item[1], item[0]))[:5]
-            ],
-            "bottom_fonts": [
-                {"font": font_name, "weight": float(weight)}
-                for font_name, weight in sorted_items[:5]
-            ],
-        }
 
 
 def set_global_seed(seed: int) -> None:
@@ -234,7 +78,7 @@ def build_dataloader(
     }
     if use_unique_font_batches:
         if sampler is not None:
-            raise ValueError("Weighted sampler cannot be combined with unique-font batch sampling.")
+            raise ValueError("sampler cannot be combined with unique-font batch sampling")
         batch_sampler = UniqueFontBatchSampler(
             dataset,
             batch_size=int(batch_size),
@@ -258,27 +102,6 @@ def slice_batch(batch: Dict[str, torch.Tensor], count: int) -> Dict[str, torch.T
         elif torch.is_tensor(value):
             output[key] = value[:count]
     return output
-
-
-def parse_layer_indices(raw_value: str, *, depth: int) -> list[int]:
-    depth = max(0, int(depth))
-    raw_value = str(raw_value).strip()
-    if not raw_value:
-        return []
-    indices: list[int] = []
-    seen: set[int] = set()
-    for part in raw_value.split(","):
-        token = part.strip()
-        if not token:
-            continue
-        index = int(token)
-        if index < 0 or index >= depth:
-            raise ValueError(f"content cross-attn index out of range: {index} for depth={depth}")
-        if index in seen:
-            continue
-        indices.append(index)
-        seen.add(index)
-    return indices
 
 
 def concat_batches(*batches: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
@@ -331,121 +154,42 @@ def build_sample_batch(
     return concat_batches(seen_batch, unseen_batch)
 
 
-def load_font_probe_list(path: Path, *, max_fonts: int) -> list[str]:
-    path = Path(path)
-    if not path.is_file():
-        return []
-    if path.suffix.lower() == ".json":
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(payload, dict):
-            if "worst10_by_mae" in payload:
-                raw_fonts = payload["worst10_by_mae"]
-            elif "common_worst10_by_avg_mae" in payload:
-                raw_fonts = payload["common_worst10_by_avg_mae"]
-            elif "fonts" in payload:
-                raw_fonts = payload["fonts"]
-            else:
-                raw_fonts = []
-        else:
-            raw_fonts = payload
-        font_names: list[str] = []
-        for entry in raw_fonts:
-            if isinstance(entry, dict):
-                font_name = str(entry.get("font", "")).strip()
-            else:
-                font_name = str(entry).strip()
-            if not font_name or font_name in font_names:
-                continue
-            font_names.append(font_name)
-    else:
-        font_names = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            font_name = line.strip()
-            if not font_name or font_name in font_names:
-                continue
-            font_names.append(font_name)
-    if max_fonts > 0:
-        font_names = font_names[: int(max_fonts)]
-    return font_names
-
-
-def build_font_probe_batch(
-    dataset: FontImageDataset,
-    *,
-    font_names: list[str],
-    seed: int,
-) -> Dict[str, torch.Tensor] | None:
-    if not font_names:
-        return None
-    select_rng = random.Random(int(seed))
-    dataset_rng_state = dataset.rng.getstate()
-    try:
-        samples = []
-        for font_name in font_names:
-            sample_indices = dataset.sample_indices_by_font.get(font_name)
-            if not sample_indices:
-                continue
-            sample_index = sample_indices[select_rng.randrange(len(sample_indices))]
-            samples.append(dataset[int(sample_index)])
-    finally:
-        dataset.rng.setstate(dataset_rng_state)
-    if not samples:
-        return None
-    return collate_fn(samples)
-
-
 def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
-    content_cross_attn_indices = parse_layer_indices(
-        str(args.content_cross_attn_indices),
-        depth=int(args.dit_depth),
-    )
     return SourcePartRefDiT(
         in_channels=1,
         image_size=int(args.image_size),
-        latent_channels=int(args.latent_channels),
-        latent_size=int(args.latent_size),
-        encoder_patch_size=int(args.encoder_patch_size),
+        patch_size=int(args.patch_size),
         encoder_hidden_dim=int(args.encoder_hidden_dim),
         encoder_depth=int(args.encoder_depth),
         encoder_heads=int(args.encoder_heads),
-        dit_hidden_dim=int(args.dit_hidden_dim),
-        dit_depth=int(args.dit_depth),
-        dit_heads=int(args.dit_heads),
-        dit_mlp_ratio=float(args.dit_mlp_ratio),
-        style_tokens_per_ref=int(args.style_tokens_per_ref),
-        content_cross_attn_indices=content_cross_attn_indices,
-        style_token_cross_attn_indices=parse_layer_indices(
-            str(args.style_token_cross_attn_indices),
-            depth=int(args.dit_depth),
-        ),
+        encoder_mlp_ratio=float(args.encoder_mlp_ratio),
+        style_global_dim=int(args.style_global_dim),
+        patch_hidden_dim=int(args.patch_hidden_dim),
+        patch_depth=int(args.patch_depth),
+        patch_heads=int(args.patch_heads),
+        patch_mlp_ratio=float(args.patch_mlp_ratio),
+        pixel_hidden_dim=int(args.pixel_hidden_dim),
+        pit_depth=int(args.pit_depth),
+        pit_heads=int(args.pit_heads),
+        pit_mlp_ratio=float(args.pit_mlp_ratio),
+        style_fusion_start=int(args.style_fusion_start),
+        use_style_tokens=bool(args.use_style_tokens),
         contrastive_proj_dim=int(args.contrastive_proj_dim),
-        vae_bottleneck_channels=int(args.vae_bottleneck_channels),
-        vae_encoder_16x16_blocks=int(args.vae_encoder_16x16_blocks),
-        vae_decoder_16x16_blocks=int(args.vae_decoder_16x16_blocks),
-        vae_decoder_tail_blocks=int(args.vae_decoder_tail_blocks),
-        latent_normalize_for_dit=bool(args.latent_normalize_for_dit),
     )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stage", type=str, default="flow", choices=["vae", "style", "flow"])
+    parser.add_argument("--stage", type=str, default="flow", choices=["style", "flow"])
     parser.add_argument("--data-root", type=Path, default=Path("."))
     parser.add_argument("--save-dir", type=Path, default=Path("checkpoints"))
     parser.add_argument("--resume", type=Path, default=None)
-    parser.add_argument("--vae-checkpoint", type=Path, default=None)
     parser.add_argument("--style-checkpoint", type=Path, default=None)
-    parser.add_argument(
-        "--train-vae-jointly",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Only used in flow stage. If false, a pretrained VAE checkpoint is required.",
-    )
     parser.add_argument(
         "--freeze-style-global",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Only used in flow stage. If true, freeze the global style extractor loaded from style pretraining.",
+        help="Only used in flow stage. If true, freeze the global style encoder loaded from style pretraining.",
     )
 
     parser.add_argument("--epochs", type=int, default=10)
@@ -460,77 +204,53 @@ def main() -> None:
     parser.add_argument("--style-ref-count", type=int, default=8)
     parser.add_argument("--image-size", type=int, default=128)
 
-    parser.add_argument("--latent-channels", type=int, default=10)
-    parser.add_argument("--latent-size", type=int, default=16)
-    parser.add_argument("--encoder-patch-size", type=int, default=8)
+    parser.add_argument("--patch-size", type=int, default=16)
     parser.add_argument("--encoder-hidden-dim", type=int, default=512)
     parser.add_argument("--encoder-depth", type=int, default=4)
     parser.add_argument("--encoder-heads", type=int, default=8)
-    parser.add_argument("--dit-hidden-dim", type=int, default=512)
-    parser.add_argument("--dit-depth", type=int, default=12)
-    parser.add_argument("--dit-heads", type=int, default=8)
-    parser.add_argument("--dit-mlp-ratio", type=float, default=4.0)
-    parser.add_argument("--style-tokens-per-ref", type=int, default=8)
-    parser.add_argument("--content-cross-attn-indices", type=str, default="0,1,2,3,4,5,8,10")
-    parser.add_argument("--style-token-cross-attn-indices", type=str, default="6,7,8,9,10,11")
-    parser.add_argument("--contrastive-proj-dim", type=int, default=128)
-    parser.add_argument("--vae-bottleneck-channels", type=int, default=192)
-    parser.add_argument("--vae-encoder-16x16-blocks", type=int, default=2)
-    parser.add_argument("--vae-decoder-16x16-blocks", type=int, default=2)
-    parser.add_argument("--vae-decoder-tail-blocks", type=int, default=1)
+    parser.add_argument("--encoder-mlp-ratio", type=float, default=4.0)
+    parser.add_argument("--style-global-dim", type=int, default=256)
+    parser.add_argument("--patch-hidden-dim", type=int, default=512)
+    parser.add_argument("--patch-depth", type=int, default=12)
+    parser.add_argument("--patch-heads", type=int, default=8)
+    parser.add_argument("--patch-mlp-ratio", type=float, default=4.0)
+    parser.add_argument("--pixel-hidden-dim", type=int, default=32)
+    parser.add_argument("--pit-depth", type=int, default=2)
+    parser.add_argument("--pit-heads", type=int, default=8)
+    parser.add_argument("--pit-mlp-ratio", type=float, default=4.0)
+    parser.add_argument("--style-fusion-start", type=int, default=8)
     parser.add_argument(
-        "--latent-normalize-for-dit",
+        "--use-style-tokens",
         action=argparse.BooleanOptionalAction,
         default=True,
+        help="If false, disable the local style-token branch and keep only content + global style conditioning.",
     )
+    parser.add_argument("--contrastive-proj-dim", type=int, default=128)
 
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--lr-warmup-steps", type=int, default=0)
-    parser.add_argument("--lr-min-scale", type=float, default=1.0)
+    parser.add_argument("--lr-warmup-steps", type=int, default=2000)
+    parser.add_argument("--lr-min-ratio", type=float, default=0.1)
+    parser.add_argument("--weight-decay", type=float, default=0.0)
+    parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--total-steps", type=int, default=0)
     parser.add_argument("--log-every-steps", type=int, default=100)
     parser.add_argument("--val-every-steps", type=int, default=100)
     parser.add_argument("--val-max-batches", type=int, default=16)
     parser.add_argument("--save-every-steps", type=int, default=0)
     parser.add_argument("--sample-every-steps", type=int, default=0)
-
-    parser.add_argument("--vae-lambda-rec", type=float, default=1.0)
-    parser.add_argument("--vae-lambda-perc", type=float, default=0.18)
-    parser.add_argument("--vae-lambda-kl", type=float, default=2e-4)
-    parser.add_argument("--vae-kl-warmup-steps", type=int, default=10000)
-    parser.add_argument("--vae-latent-mean-weight", type=float, default=1e-3)
-    parser.add_argument("--vae-latent-std-weight", type=float, default=1e-3)
-    parser.add_argument("--vae-latent-corr-weight", type=float, default=5e-4)
-    parser.add_argument("--vae-latent-std-target", type=float, default=1.0)
-    parser.add_argument("--vae-difficulty-warmup-steps", type=int, default=2000)
-    parser.add_argument("--vae-difficulty-ema-decay", type=float, default=0.95)
-    parser.add_argument("--vae-difficulty-alpha", type=float, default=1.0)
-    parser.add_argument("--vae-difficulty-min-weight", type=float, default=0.5)
-    parser.add_argument("--vae-difficulty-max-weight", type=float, default=2.0)
-
-    parser.add_argument("--flow-lambda", type=float, default=1.0)
-    parser.add_argument("--flow-lambda-img-l1", type=float, default=0.2)
-    parser.add_argument("--flow-lambda-img-perc", type=float, default=0.02)
-    parser.add_argument(
-        "--style-attn-probe-enabled",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-    )
-    parser.add_argument("--style-attn-probe-every-steps", type=int, default=1000)
-    parser.add_argument(
-        "--style-attn-probe-font-file",
-        type=Path,
-        default=Path("analysis/vae_eval_best55800_20chars_20260322_232612/report.json"),
-    )
-    parser.add_argument("--style-attn-probe-max-fonts", type=int, default=10)
-    parser.add_argument("--flow-sample-steps", type=int, default=24)
-    parser.add_argument("--flow-difficulty-warmup-steps", type=int, default=10_000)
-    parser.add_argument("--flow-difficulty-ema-decay", type=float, default=0.99)
-    parser.add_argument("--flow-difficulty-alpha", type=float, default=0.5)
-    parser.add_argument("--flow-difficulty-min-weight", type=float, default=0.7)
-    parser.add_argument("--flow-difficulty-max-weight", type=float, default=1.5)
-    parser.add_argument("--flow-difficulty-refresh-every-steps", type=int, default=1000)
     parser.add_argument("--contrastive-temperature", type=float, default=0.1)
+    parser.add_argument("--flow-lambda-rf", type=float, default=1.0)
+    parser.add_argument("--flow-lambda-img-l1", type=float, default=0.0)
+    parser.add_argument("--flow-lambda-img-perc", type=float, default=0.0)
+    parser.add_argument("--flow-sample-steps", type=int, default=20)
+    parser.add_argument("--flow-sampler", type=str, default="flow_dpm", choices=["flow_dpm", "euler", "heun"])
+    parser.add_argument(
+        "--timestep-sampling",
+        type=str,
+        default="logit_normal",
+        choices=["logit_normal", "uniform"],
+    )
+    parser.add_argument("--ema-decay", type=float, default=0.9999)
     args = parser.parse_args()
 
     set_global_seed(int(args.seed))
@@ -538,18 +258,11 @@ def main() -> None:
     device = resolve_device(args.device)
     print(f"[train] stage={args.stage} device={device} seed={int(args.seed)}")
     print(f"[train] attention_backend={describe_torch_sdpa_backends()}")
-    font_split_seed = int(args.seed) if args.font_split_seed is None else int(args.font_split_seed)
-    log_every_steps = max(1, int(args.log_every_steps))
-    val_every_steps = max(1, int(args.val_every_steps))
-    save_every_steps = int(args.save_every_steps)
-    if save_every_steps <= 0:
-        save_every_steps = 1000 if args.stage in {"vae", "style"} else 5000
-    sample_every_steps = int(args.sample_every_steps)
-    if sample_every_steps <= 0:
-        sample_every_steps = 300 if args.stage == "flow" else 0
 
+    font_split_seed = int(args.seed) if args.font_split_seed is None else int(args.font_split_seed)
     include_positive_style = args.stage == "style"
     glyph_transform = build_base_glyph_transform(image_size=int(args.image_size))
+
     dataset = FontImageDataset(
         project_root=args.data_root,
         max_fonts=int(args.max_fonts),
@@ -576,74 +289,16 @@ def main() -> None:
             transform=glyph_transform,
             style_transform=glyph_transform,
         )
-    train_use_unique_font_batches = args.stage == "style"
-    val_use_unique_font_batches = args.stage == "style"
-    train_sampler: Sampler[int] | None = None
-    vae_difficulty_sampler = None
-    flow_difficulty_sampler = None
-    vae_difficulty_info = build_difficulty_sampling_info(
-        dataset.font_names,
-        enabled=False,
-        warmup_steps=int(args.vae_difficulty_warmup_steps),
-        ema_decay=float(args.vae_difficulty_ema_decay),
-        alpha=float(args.vae_difficulty_alpha),
-        min_weight=float(args.vae_difficulty_min_weight),
-        max_weight=float(args.vae_difficulty_max_weight),
-    )
-    flow_difficulty_info = build_difficulty_sampling_info(
-        dataset.font_names,
-        enabled=False,
-        warmup_steps=int(args.flow_difficulty_warmup_steps),
-        ema_decay=float(args.flow_difficulty_ema_decay),
-        alpha=float(args.flow_difficulty_alpha),
-        min_weight=float(args.flow_difficulty_min_weight),
-        max_weight=float(args.flow_difficulty_max_weight),
-        refresh_every_steps=int(args.flow_difficulty_refresh_every_steps),
-    )
-    if args.stage == "vae":
-        vae_difficulty_sampler = DynamicFontDifficultySampler(dataset, seed=int(args.seed))
-        vae_difficulty_sampler.set_bucket_range(
-            bucket_min=float(args.vae_difficulty_min_weight),
-            bucket_max=float(args.vae_difficulty_max_weight),
-        )
-        train_sampler = vae_difficulty_sampler
-        vae_difficulty_info = build_difficulty_sampling_info(
-            dataset.font_names,
-            enabled=True,
-            warmup_steps=int(args.vae_difficulty_warmup_steps),
-            ema_decay=float(args.vae_difficulty_ema_decay),
-            alpha=float(args.vae_difficulty_alpha),
-            min_weight=float(args.vae_difficulty_min_weight),
-            max_weight=float(args.vae_difficulty_max_weight),
-            sampler=vae_difficulty_sampler,
-        )
-    elif args.stage == "flow":
-        flow_difficulty_sampler = DynamicFontDifficultySampler(dataset, seed=int(args.seed))
-        flow_difficulty_sampler.set_bucket_range(
-            bucket_min=float(args.flow_difficulty_min_weight),
-            bucket_max=float(args.flow_difficulty_max_weight),
-        )
-        train_sampler = flow_difficulty_sampler
-        flow_difficulty_info = build_difficulty_sampling_info(
-            dataset.font_names,
-            enabled=True,
-            warmup_steps=int(args.flow_difficulty_warmup_steps),
-            ema_decay=float(args.flow_difficulty_ema_decay),
-            alpha=float(args.flow_difficulty_alpha),
-            min_weight=float(args.flow_difficulty_min_weight),
-            max_weight=float(args.flow_difficulty_max_weight),
-            sampler=flow_difficulty_sampler,
-            refresh_every_steps=int(args.flow_difficulty_refresh_every_steps),
-        )
+
+    use_unique_font_batches = args.stage == "style"
     dataloader = build_dataloader(
         dataset,
         batch_size=int(args.batch),
         num_workers=int(args.num_workers),
         device=device,
         seed=int(args.seed),
-        use_unique_font_batches=train_use_unique_font_batches,
+        use_unique_font_batches=use_unique_font_batches,
         shuffle=True,
-        sampler=train_sampler,
     )
     val_dataloader = None
     if val_dataset is not None:
@@ -653,134 +308,49 @@ def main() -> None:
             num_workers=int(args.num_workers),
             device=device,
             seed=int(args.seed) + 1,
-            use_unique_font_batches=val_use_unique_font_batches,
+            use_unique_font_batches=use_unique_font_batches,
             shuffle=False,
         )
-    if train_use_unique_font_batches:
-        print(f"[train] using unique-font batch sampler for contrastive training, batch={int(args.batch)}")
-    elif vae_difficulty_sampler is not None:
-        print(
-            "[train] using dynamic VAE difficulty sampler "
-            f"warmup_steps={int(vae_difficulty_info['warmup_steps'])} "
-            f"ema_decay={float(vae_difficulty_info['ema_decay']):.4f} "
-            f"alpha={float(vae_difficulty_info['alpha']):.2f} "
-            f"weight_range=[{float(vae_difficulty_info['min_weight']):.2f},"
-            f"{float(vae_difficulty_info['max_weight']):.2f}]"
-        )
-    elif flow_difficulty_sampler is not None:
-        print(
-            "[train] using dynamic flow difficulty sampler "
-            f"warmup_steps={int(flow_difficulty_info['warmup_steps'])} "
-            f"refresh_every_steps={int(flow_difficulty_info['refresh_every_steps'])} "
-            f"ema_decay={float(flow_difficulty_info['ema_decay']):.4f} "
-            f"alpha={float(flow_difficulty_info['alpha']):.2f} "
-            f"weight_range=[{float(flow_difficulty_info['min_weight']):.2f},"
-            f"{float(flow_difficulty_info['max_weight']):.2f}]"
-        )
-    if val_use_unique_font_batches and val_dataset is not None:
-        print(
-            "[train] using unique-font batch sampler for contrastive validation, "
-            f"effective_batch<={min(int(args.batch), len(val_dataset.font_names))}"
-        )
-
-    style_attn_probe_batch = None
-    resolved_style_attn_probe_fonts: list[str] = []
-    if args.stage == "flow" and bool(args.style_attn_probe_enabled):
-        probe_font_names = load_font_probe_list(
-            Path(args.style_attn_probe_font_file),
-            max_fonts=int(args.style_attn_probe_max_fonts),
-        )
-        style_attn_probe_batch = build_font_probe_batch(
-            dataset,
-            font_names=probe_font_names,
-            seed=int(args.seed) + 2000,
-        )
-        if style_attn_probe_batch is None:
-            print(
-                "[train] style attention probe disabled: "
-                f"no matching fonts found from {args.style_attn_probe_font_file}",
-                flush=True,
-            )
-        else:
-            resolved_style_attn_probe_fonts = list(style_attn_probe_batch["font"])
-            print(
-                "[train] using style attention probe "
-                f"fonts={len(resolved_style_attn_probe_fonts)} "
-                f"source={args.style_attn_probe_font_file} "
-                f"every_steps={int(args.style_attn_probe_every_steps)} "
-                f"font_list={','.join(resolved_style_attn_probe_fonts)}",
-                flush=True,
-            )
 
     total_steps = int(args.total_steps)
     if total_steps <= 0:
-        if args.stage == "vae":
-            total_steps = 20_000
-        elif args.stage == "style":
+        if args.stage == "style":
             total_steps = 5000
         else:
             total_steps = max(1, len(dataloader) * int(args.epochs))
-    resolved_content_cross_attn_indices = parse_layer_indices(
-        str(args.content_cross_attn_indices),
-        depth=int(args.dit_depth),
-    )
-    resolved_style_token_cross_attn_indices = parse_layer_indices(
-        str(args.style_token_cross_attn_indices),
-        depth=int(args.dit_depth),
-    )
     resolved_epochs = max(1, int(args.epochs))
     if len(dataloader) > 0:
         resolved_epochs = max(resolved_epochs, math.ceil(total_steps / len(dataloader)))
 
     model = build_model(args)
-
-    if args.stage == "flow" and args.resume is None and not bool(args.train_vae_jointly) and args.vae_checkpoint is None:
-        raise ValueError("Flow stage requires --vae-checkpoint unless --train-vae-jointly is enabled.")
-    if args.stage == "flow" and bool(args.freeze_style_global) and args.resume is None and args.style_checkpoint is None:
-        raise ValueError("Flow stage cannot freeze global style without --style-checkpoint unless resuming.")
-    if args.vae_checkpoint is not None:
-        model.load_vae_checkpoint(args.vae_checkpoint)
-        print(f"[train] loaded VAE checkpoint: {args.vae_checkpoint}")
-    if args.style_checkpoint is not None and args.resume is None:
+    if args.style_checkpoint is not None and args.resume is None and args.stage == "flow":
         model.load_style_checkpoint(args.style_checkpoint)
         print(f"[train] loaded style checkpoint: {args.style_checkpoint}")
+    if args.stage == "flow" and bool(args.freeze_style_global) and args.resume is None and args.style_checkpoint is None:
+        raise ValueError("Flow stage cannot freeze global style without --style-checkpoint unless resuming.")
 
-    if args.stage == "vae":
-        trainer = VAETrainer(
-            model,
-            device,
-            lr=float(args.lr),
-            total_steps=total_steps,
-            lambda_rec=float(args.vae_lambda_rec),
-            lambda_perc=float(args.vae_lambda_perc),
-            lambda_kl=float(args.vae_lambda_kl),
-            kl_warmup_steps=int(args.vae_kl_warmup_steps),
-            latent_mean_weight=float(args.vae_latent_mean_weight),
-            latent_std_weight=float(args.vae_latent_std_weight),
-            latent_corr_weight=float(args.vae_latent_corr_weight),
-            latent_std_target=float(args.vae_latent_std_target),
-            difficulty_sampler=vae_difficulty_sampler,
-            difficulty_warmup_steps=int(args.vae_difficulty_warmup_steps),
-            difficulty_ema_decay=float(args.vae_difficulty_ema_decay),
-            difficulty_alpha=float(args.vae_difficulty_alpha),
-            difficulty_min_weight=float(args.vae_difficulty_min_weight),
-            difficulty_max_weight=float(args.vae_difficulty_max_weight),
-            log_every_steps=log_every_steps,
-            save_every_steps=save_every_steps,
-            val_every_steps=val_every_steps,
-            val_max_batches=int(args.val_max_batches),
-        )
-    elif args.stage == "style":
+    save_every_steps = int(args.save_every_steps)
+    if save_every_steps <= 0:
+        save_every_steps = 1000 if args.stage == "style" else 5000
+    sample_every_steps = int(args.sample_every_steps)
+    if sample_every_steps <= 0:
+        sample_every_steps = 0 if args.stage == "style" else 300
+
+    if args.stage == "style":
         trainer = StylePretrainTrainer(
             model,
             device,
             lr=float(args.lr),
             total_steps=total_steps,
             contrastive_temperature=float(args.contrastive_temperature),
-            log_every_steps=log_every_steps,
+            log_every_steps=int(args.log_every_steps),
             save_every_steps=save_every_steps,
-            val_every_steps=val_every_steps,
+            val_every_steps=int(args.val_every_steps),
             val_max_batches=int(args.val_max_batches),
+            lr_warmup_steps=int(args.lr_warmup_steps),
+            lr_min_ratio=float(args.lr_min_ratio),
+            weight_decay=float(args.weight_decay),
+            grad_clip_norm=float(args.grad_clip_norm),
         )
     else:
         trainer = FlowTrainer(
@@ -788,40 +358,32 @@ def main() -> None:
             device,
             lr=float(args.lr),
             total_steps=total_steps,
-            lambda_flow=float(args.flow_lambda),
+            lambda_rf=float(args.flow_lambda_rf),
             lambda_img_l1=float(args.flow_lambda_img_l1),
             lambda_img_perc=float(args.flow_lambda_img_perc),
-            freeze_vae=not bool(args.train_vae_jointly),
             freeze_style_global=bool(args.freeze_style_global),
-            style_attn_probe_enabled=bool(args.style_attn_probe_enabled),
-            style_attn_probe_every_steps=int(args.style_attn_probe_every_steps),
             flow_sample_steps=int(args.flow_sample_steps),
-            lr_warmup_steps=int(args.lr_warmup_steps),
-            lr_min_scale=float(args.lr_min_scale),
-            difficulty_sampler=flow_difficulty_sampler,
-            difficulty_warmup_steps=int(args.flow_difficulty_warmup_steps),
-            difficulty_ema_decay=float(args.flow_difficulty_ema_decay),
-            difficulty_alpha=float(args.flow_difficulty_alpha),
-            difficulty_min_weight=float(args.flow_difficulty_min_weight),
-            difficulty_max_weight=float(args.flow_difficulty_max_weight),
-            difficulty_refresh_every_steps=int(args.flow_difficulty_refresh_every_steps),
-            log_every_steps=log_every_steps,
+            flow_sampler=str(args.flow_sampler),
+            timestep_sampling=str(args.timestep_sampling),
+            ema_decay=float(args.ema_decay),
+            log_every_steps=int(args.log_every_steps),
             save_every_steps=save_every_steps,
-            val_every_steps=val_every_steps,
+            val_every_steps=int(args.val_every_steps),
             val_max_batches=int(args.val_max_batches),
+            lr_warmup_steps=int(args.lr_warmup_steps),
+            lr_min_ratio=float(args.lr_min_ratio),
+            weight_decay=float(args.weight_decay),
+            grad_clip_norm=float(args.grad_clip_norm),
         )
-        trainer.style_attn_probe_batch = style_attn_probe_batch
-        trainer.style_attn_probe_font_source = str(args.style_attn_probe_font_file)
 
     if args.resume is not None:
         trainer.load(args.resume)
         print(f"[train] resumed from {args.resume}")
 
-    first_batch = next(iter(dataloader))
     trainer.sample_batch = (
         build_sample_batch(dataset, val_dataset, device=device, seed=int(args.seed))
         if args.stage == "flow"
-        else first_batch
+        else None
     )
     trainer.sample_every_steps = sample_every_steps if sample_every_steps > 0 else None
     trainer.sample_dir = args.save_dir / "samples"
@@ -829,71 +391,26 @@ def main() -> None:
     run_config = {key: (str(value) if isinstance(value, Path) else value) for key, value in vars(args).items()}
     run_config["resolved_device"] = str(device)
     run_config["resolved_font_split_seed"] = int(font_split_seed)
-    run_config["resolved_log_every_steps"] = int(log_every_steps)
-    run_config["resolved_val_every_steps"] = int(val_every_steps)
-    run_config["resolved_save_every_steps"] = int(save_every_steps)
-    run_config["resolved_sample_every_steps"] = int(sample_every_steps)
     run_config["resolved_epochs"] = int(resolved_epochs)
-    run_config["resolved_content_cross_attn_indices"] = list(resolved_content_cross_attn_indices)
-    run_config["resolved_style_token_cross_attn_indices"] = list(resolved_style_token_cross_attn_indices)
+    run_config["computed_total_steps"] = int(total_steps)
     run_config["train_fonts"] = int(len(dataset.font_names))
     run_config["train_samples"] = int(len(dataset.samples))
     run_config["val_fonts"] = 0 if val_dataset is None else int(len(val_dataset.font_names))
     run_config["val_samples"] = 0 if val_dataset is None else int(len(val_dataset.samples))
-    run_config["computed_total_steps"] = int(total_steps)
-    run_config["resolved_style_attn_probe_fonts"] = list(resolved_style_attn_probe_fonts)
-    run_config["vae_dynamic_difficulty_sampling"] = {
-        "enabled": int(vae_difficulty_info["enabled"]),
-        "warmup_steps": int(vae_difficulty_info["warmup_steps"]),
-        "ema_decay": float(vae_difficulty_info["ema_decay"]),
-        "alpha": float(vae_difficulty_info["alpha"]),
-        "min_weight": float(vae_difficulty_info["min_weight"]),
-        "max_weight": float(vae_difficulty_info["max_weight"]),
-        "font_weight_min": float(vae_difficulty_info["font_weight_min"]),
-        "font_weight_max": float(vae_difficulty_info["font_weight_max"]),
-        "font_weight_mean": float(vae_difficulty_info["font_weight_mean"]),
-        "sample_weight_min": float(vae_difficulty_info["sample_weight_min"]),
-        "sample_weight_max": float(vae_difficulty_info["sample_weight_max"]),
-        "font_weight_bucket_min": float(vae_difficulty_info["font_weight_bucket_min"]),
-        "font_weight_bucket_edge_1": float(vae_difficulty_info["font_weight_bucket_edge_1"]),
-        "font_weight_bucket_edge_2": float(vae_difficulty_info["font_weight_bucket_edge_2"]),
-        "font_weight_bucket_max": float(vae_difficulty_info["font_weight_bucket_max"]),
-        "font_weight_bucket_count_low": int(vae_difficulty_info["font_weight_bucket_count_low"]),
-        "font_weight_bucket_count_mid": int(vae_difficulty_info["font_weight_bucket_count_mid"]),
-        "font_weight_bucket_count_high": int(vae_difficulty_info["font_weight_bucket_count_high"]),
-        "top_fonts": list(vae_difficulty_info["top_fonts"]),
-        "bottom_fonts": list(vae_difficulty_info["bottom_fonts"]),
-    }
-    run_config["flow_dynamic_difficulty_sampling"] = {
-        "enabled": int(flow_difficulty_info["enabled"]),
-        "warmup_steps": int(flow_difficulty_info["warmup_steps"]),
-        "refresh_every_steps": int(flow_difficulty_info["refresh_every_steps"]),
-        "ema_decay": float(flow_difficulty_info["ema_decay"]),
-        "alpha": float(flow_difficulty_info["alpha"]),
-        "min_weight": float(flow_difficulty_info["min_weight"]),
-        "max_weight": float(flow_difficulty_info["max_weight"]),
-        "font_weight_min": float(flow_difficulty_info["font_weight_min"]),
-        "font_weight_max": float(flow_difficulty_info["font_weight_max"]),
-        "font_weight_mean": float(flow_difficulty_info["font_weight_mean"]),
-        "sample_weight_min": float(flow_difficulty_info["sample_weight_min"]),
-        "sample_weight_max": float(flow_difficulty_info["sample_weight_max"]),
-        "font_weight_bucket_min": float(flow_difficulty_info["font_weight_bucket_min"]),
-        "font_weight_bucket_edge_1": float(flow_difficulty_info["font_weight_bucket_edge_1"]),
-        "font_weight_bucket_edge_2": float(flow_difficulty_info["font_weight_bucket_edge_2"]),
-        "font_weight_bucket_max": float(flow_difficulty_info["font_weight_bucket_max"]),
-        "font_weight_bucket_count_low": int(flow_difficulty_info["font_weight_bucket_count_low"]),
-        "font_weight_bucket_count_mid": int(flow_difficulty_info["font_weight_bucket_count_mid"]),
-        "font_weight_bucket_count_high": int(flow_difficulty_info["font_weight_bucket_count_high"]),
-        "top_fonts": list(flow_difficulty_info["top_fonts"]),
-        "bottom_fonts": list(flow_difficulty_info["bottom_fonts"]),
-    }
     args.save_dir.mkdir(parents=True, exist_ok=True)
     (args.save_dir / "train_config.json").write_text(
-        json.dumps(run_config, ensure_ascii=False, indent=2, sort_keys=True),
+        json.dumps(run_config, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    print(f"[train] save_dir={args.save_dir}")
+    print(f"[train] total_steps={total_steps} epochs={resolved_epochs}")
 
-    trainer.fit(dataloader, epochs=resolved_epochs, save_dir=args.save_dir, val_dataloader=val_dataloader)
+    trainer.fit(
+        dataloader,
+        epochs=resolved_epochs,
+        save_dir=args.save_dir,
+        val_dataloader=val_dataloader,
+    )
 
 
 if __name__ == "__main__":

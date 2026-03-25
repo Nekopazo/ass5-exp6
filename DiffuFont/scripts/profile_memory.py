@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Profile peak CUDA memory by major training stage for one flow step."""
+"""Profile peak CUDA memory by major pixel-space flow stages for one step."""
 
 from __future__ import annotations
 
@@ -7,14 +7,13 @@ import argparse
 import json
 from pathlib import Path
 import random
+import sys
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-import sys
-
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -69,7 +68,8 @@ def stage_record(device: torch.device, name: str, fn, records: list[dict]) -> ob
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-root", type=Path, default=PROJECT_ROOT)
-    parser.add_argument("--vae-checkpoint", type=Path, required=True)
+    parser.add_argument("--style-checkpoint", type=Path, default=None)
+    parser.add_argument("--freeze-style-global", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--device", type=str, default="cuda:1")
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--style-ref-count", type=int, default=8)
@@ -113,35 +113,16 @@ def main() -> None:
     )
     batch = next(iter(dataloader))
 
-    model = SourcePartRefDiT(
-        in_channels=1,
-        image_size=128,
-        latent_channels=10,
-        latent_size=16,
-        encoder_patch_size=8,
-        encoder_hidden_dim=512,
-        encoder_depth=4,
-        encoder_heads=8,
-        style_tokens_per_ref=8,
-        dit_hidden_dim=512,
-        dit_depth=12,
-        dit_heads=8,
-        dit_mlp_ratio=4.0,
-        content_cross_attn_indices=[0, 1, 2, 3, 4, 5, 8, 10],
-        style_token_cross_attn_indices=[6, 7, 8, 9, 10, 11],
-        vae_bottleneck_channels=192,
-        vae_encoder_16x16_blocks=2,
-        vae_decoder_16x16_blocks=2,
-        vae_decoder_tail_blocks=1,
-    )
-    model.load_vae_checkpoint(args.vae_checkpoint)
+    model = SourcePartRefDiT()
+    if args.style_checkpoint is not None:
+        model.load_style_checkpoint(args.style_checkpoint)
     trainer = FlowTrainer(
         model,
         device,
         lr=1e-4,
         total_steps=1,
-        lambda_flow=1.0,
-        freeze_vae=True,
+        lambda_rf=1.0,
+        freeze_style_global=bool(args.freeze_style_global),
         flow_sample_steps=24,
         log_every_steps=1,
         save_every_steps=None,
@@ -157,14 +138,13 @@ def main() -> None:
     records: list[dict] = []
     torch.cuda.empty_cache()
     with trainer._autocast_context():
-        z1, _, _ = stage_record(device, "vae_encode", lambda: trainer._encode_latent(target), records)
-        z0 = stage_record(device, "noise_sample", lambda: torch.randn_like(z1), records)
-        timesteps = stage_record(device, "time_sample", lambda: torch.rand(z1.size(0), device=device), records)
-        t_view = timesteps.view(-1, 1, 1, 1).to(dtype=z1.dtype)
-        zt = stage_record(device, "flow_interpolate", lambda: (1.0 - t_view) * z0 + t_view * z1, records)
-        target_flow = stage_record(device, "flow_target", lambda: z1 - z0, records)
-        content_features = stage_record(device, "content_encode_features", lambda: trainer.model.encode_content_features(content), records)
-        content_tokens = stage_record(device, "content_project", lambda: trainer.model.content_proj(content_features), records)
+        x1 = target
+        x0 = stage_record(device, "noise_sample", lambda: torch.randn_like(x1), records)
+        timesteps = stage_record(device, "time_sample", lambda: torch.rand(x1.size(0), device=device), records)
+        t_view = timesteps.view(-1, 1, 1, 1).to(dtype=x1.dtype)
+        x_t = stage_record(device, "flow_interpolate", lambda: (1.0 - t_view) * x0 + t_view * x1, records)
+        v_t = stage_record(device, "flow_target", lambda: x1 - x0, records)
+        content_tokens = stage_record(device, "content_encode", lambda: trainer.model.encode_content(content), records)
         style_pack = stage_record(
             device,
             "style_encode",
@@ -180,23 +160,23 @@ def main() -> None:
         )
         style_tokens = style_pack["style_tokens"]
         style_global = style_pack["style_global"]
-        style_token_mask = style_pack["style_token_mask"]
-        if style_tokens is None or style_token_mask is None or style_global is None:
-            raise RuntimeError("profile_memory requires style tokens.")
-        pred_flow = stage_record(
+        style_valid_mask = style_pack["style_ref_mask"]
+        if style_tokens is None or style_global is None or style_valid_mask is None:
+            raise RuntimeError("profile_memory requires style_tokens and style_global")
+        pred_v = stage_record(
             device,
-            "dit_backbone",
+            "pixeldt_backbone",
             lambda: trainer.model.predict_flow(
-                zt,
+                x_t,
                 timesteps,
                 content_tokens=content_tokens,
                 style_tokens=style_tokens,
                 style_global=style_global,
-                style_token_mask=style_token_mask,
+                style_ref_mask=style_valid_mask,
             ),
             records,
         )
-        loss = stage_record(device, "flow_loss", lambda: torch.nn.functional.mse_loss(pred_flow, target_flow), records)
+        loss = stage_record(device, "rf_loss", lambda: torch.nn.functional.mse_loss(pred_v, v_t), records)
 
     stage_record(device, "backward", lambda: loss.backward(), records)
     trainer.optimizer.step()
@@ -208,6 +188,7 @@ def main() -> None:
             "style_ref_count": int(args.style_ref_count),
             "max_fonts": int(args.max_fonts),
             "num_workers": int(args.num_workers),
+            "freeze_style_global": bool(args.freeze_style_global),
         },
         "largest_peak_stage": max(records, key=lambda row: row["peak_delta_gb"]),
         "largest_alloc_delta_stage": max(records, key=lambda row: row["allocated_delta_gb"]),

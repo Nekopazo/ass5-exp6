@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Latent DiT backbone for content+style glyph flow generation."""
+"""Pixel-space patch-level + PiT backbone for glyph generation."""
 
 from __future__ import annotations
 
@@ -46,14 +46,21 @@ def timestep_embedding(timesteps: torch.Tensor, dim: int, max_period: int = 10_0
     return embedding
 
 
-def modulate(hidden_states: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    return hidden_states * (1.0 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+class RMSNorm(nn.Module):
+    def __init__(self, hidden_dim: int, *, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.hidden_dim = int(hidden_dim)
+        self.eps = float(eps)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        denom = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).rsqrt()
+        return x * denom
 
 
 class FeedForward(nn.Module):
     def __init__(self, hidden_dim: int, mlp_ratio: float) -> None:
         super().__init__()
-        inner_dim = int(hidden_dim * mlp_ratio)
+        inner_dim = max(hidden_dim, int(hidden_dim * mlp_ratio))
         self.net = nn.Sequential(
             nn.Linear(hidden_dim, inner_dim),
             nn.GELU(approximate="tanh"),
@@ -64,302 +71,360 @@ class FeedForward(nn.Module):
         return self.net(x)
 
 
-class GlyphDiTBlock(nn.Module):
+def modulate(x: torch.Tensor, beta: torch.Tensor, gamma: torch.Tensor) -> torch.Tensor:
+    return gamma.unsqueeze(1) * x + beta.unsqueeze(1)
+
+
+def zero_init_linear(linear: nn.Linear) -> None:
+    nn.init.zeros_(linear.weight)
+    if linear.bias is not None:
+        nn.init.zeros_(linear.bias)
+
+
+class MultiReferenceStyleModule(nn.Module):
+    def __init__(self, hidden_dim: int, num_heads: int) -> None:
+        super().__init__()
+        self.norm = RMSNorm(hidden_dim)
+        self.attn = SDPAAttention(hidden_dim, num_heads)
+        self.weight_proj = nn.Linear(hidden_dim, 1)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        style_tokens: torch.Tensor,
+        style_ref_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if style_tokens.dim() != 4:
+            raise ValueError(f"style_tokens must have shape [B, K, L, D], got {tuple(style_tokens.shape)}")
+        batch_size, ref_count, token_count, hidden_dim = style_tokens.shape
+        if x.shape != (batch_size, token_count, hidden_dim):
+            raise ValueError(
+                "style_tokens and x shape mismatch: "
+                f"x={tuple(x.shape)} style={tuple(style_tokens.shape)}"
+            )
+
+        q = self.norm(x)
+        q_per_ref = q.unsqueeze(1).expand(batch_size, ref_count, token_count, hidden_dim).reshape(
+            batch_size * ref_count,
+            token_count,
+            hidden_dim,
+        )
+        kv = style_tokens.reshape(batch_size * ref_count, token_count, hidden_dim)
+        out, _ = self.attn(q_per_ref, kv, kv, need_weights=False)
+        out = out.view(batch_size, ref_count, token_count, hidden_dim).permute(0, 2, 1, 3).contiguous()
+
+        ref_logits = self.weight_proj(out).squeeze(-1)
+        if style_ref_mask is not None:
+            if style_ref_mask.shape != (batch_size, ref_count):
+                raise ValueError(
+                    "style_ref_mask shape mismatch: "
+                    f"expected {(batch_size, ref_count)}, got {tuple(style_ref_mask.shape)}"
+                )
+            valid_mask = style_ref_mask.to(device=ref_logits.device, dtype=torch.bool)
+            ref_logits = ref_logits.masked_fill(~valid_mask.unsqueeze(1), float("-inf"))
+            out = out * valid_mask.unsqueeze(1).unsqueeze(-1).to(dtype=out.dtype)
+        weights = torch.softmax(ref_logits, dim=-1).to(dtype=out.dtype)
+        return (out * weights.unsqueeze(-1)).sum(dim=2)
+
+
+class PatchConditionedBlock(nn.Module):
     def __init__(
         self,
         hidden_dim: int,
         num_heads: int,
         mlp_ratio: float,
         *,
-        use_content_cross_attn: bool = True,
-        use_style_cross_attn: bool = True,
+        use_style: bool,
     ) -> None:
         super().__init__()
-        self.use_content_cross_attn = bool(use_content_cross_attn)
-        self.use_style_cross_attn = bool(use_style_cross_attn)
-        self.norm_self = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
-        self.norm_content = (
-            nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
-            if self.use_content_cross_attn
-            else None
-        )
-        self.norm_style = (
-            nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
-            if self.use_style_cross_attn
-            else None
-        )
-        self.norm_mlp = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
-
+        self.use_style = bool(use_style)
+        self.norm_attn = RMSNorm(hidden_dim)
+        self.norm_mlp = RMSNorm(hidden_dim)
         self.self_attn = SDPAAttention(hidden_dim, num_heads)
-        self.content_attn = SDPAAttention(hidden_dim, num_heads) if self.use_content_cross_attn else None
-        self.style_attn = SDPAAttention(hidden_dim, num_heads) if self.use_style_cross_attn else None
         self.mlp = FeedForward(hidden_dim, mlp_ratio)
-
-        self.global_modulation_chunk_count = 6
-        if self.use_content_cross_attn:
-            self.global_modulation_chunk_count += 3
-
-        self.global_modulation = nn.Sequential(
+        self.cond_proj = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim * self.global_modulation_chunk_count),
+            nn.Linear(hidden_dim, hidden_dim * 6),
         )
-        nn.init.zeros_(self.global_modulation[-1].weight)
-        nn.init.zeros_(self.global_modulation[-1].bias)
+        self.style_module = MultiReferenceStyleModule(hidden_dim, num_heads) if self.use_style else None
+        self.style_gate = nn.Parameter(torch.zeros(1)) if self.use_style else None
+        zero_init_linear(self.cond_proj[-1])
 
     def forward(
         self,
-        latent_tokens: torch.Tensor,
+        x: torch.Tensor,
         *,
         global_cond: torch.Tensor,
-        content_tokens: torch.Tensor | None,
         style_tokens: torch.Tensor | None,
-        style_token_mask: torch.Tensor | None = None,
-        return_style_attn_weights: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor] | None]:
-        global_modulation_chunks = self.global_modulation(global_cond).chunk(self.global_modulation_chunk_count, dim=-1)
-        chunk_idx = 0
-
-        shift_self = global_modulation_chunks[chunk_idx]
-        scale_self = global_modulation_chunks[chunk_idx + 1]
-        gate_self = global_modulation_chunks[chunk_idx + 2]
-        chunk_idx += 3
-
-        shift_content = scale_content = gate_content = None
-        if self.use_content_cross_attn:
-            shift_content = global_modulation_chunks[chunk_idx]
-            scale_content = global_modulation_chunks[chunk_idx + 1]
-            gate_content = global_modulation_chunks[chunk_idx + 2]
-            chunk_idx += 3
-
-        shift_mlp = global_modulation_chunks[chunk_idx]
-        scale_mlp = global_modulation_chunks[chunk_idx + 1]
-        gate_mlp = global_modulation_chunks[chunk_idx + 2]
-
-        x = latent_tokens
-        style_attn_weights = None
-        q = modulate(self.norm_self(x), shift_self, scale_self)
-        self_out, _ = self.self_attn(q, q, q, need_weights=False)
-        x = x + gate_self.unsqueeze(1) * self_out
-
-        if self.use_content_cross_attn:
-            if content_tokens is None or self.norm_content is None or self.content_attn is None:
-                raise RuntimeError("content_tokens must be provided when content cross-attention is enabled")
-            q = modulate(self.norm_content(x), shift_content, scale_content)
-            content_out, _ = self.content_attn(q, content_tokens, content_tokens, need_weights=False)
-            x = x + gate_content.unsqueeze(1) * content_out
-
-        if self.use_style_cross_attn:
-            if style_tokens is None or self.norm_style is None or self.style_attn is None:
-                raise RuntimeError("style_tokens must be provided when style cross-attention is enabled")
-            if style_tokens.dim() != 4:
-                raise ValueError(f"style_tokens must be 4D (B,R,K,C), got {tuple(style_tokens.shape)}")
-            batch_size, ref_count, tokens_per_ref, hidden_dim = style_tokens.shape
-            if latent_tokens.size(0) != batch_size:
-                raise ValueError(
-                    "style_tokens batch mismatch: "
-                    f"latent batch={latent_tokens.size(0)} style batch={batch_size}"
-                )
-            q = self.norm_style(x)
-            if style_token_mask is None:
-                style_token_mask = torch.ones(
-                    (batch_size, ref_count, tokens_per_ref),
-                    device=q.device,
-                    dtype=torch.bool,
-                )
-            else:
-                if style_token_mask.shape != (batch_size, ref_count, tokens_per_ref):
-                    raise ValueError(
-                        "style_token_mask shape mismatch: "
-                        f"expected {(batch_size, ref_count, tokens_per_ref)}, got {tuple(style_token_mask.shape)}"
-                    )
-                style_token_mask = style_token_mask.bool()
-            valid_ref_mask = style_token_mask.any(dim=-1)
-            key_padding_mask = None
-            if style_token_mask is not None:
-                key_padding_mask = ~style_token_mask.reshape(batch_size * ref_count, tokens_per_ref)
-
-            q_per_ref = q.unsqueeze(1).expand(batch_size, ref_count, q.size(1), hidden_dim).reshape(
-                batch_size * ref_count,
-                q.size(1),
-                hidden_dim,
-            )
-            style_tokens_per_ref_view = style_tokens.reshape(batch_size * ref_count, tokens_per_ref, hidden_dim)
-            style_out, token_attn_weights = self.style_attn(
-                q_per_ref,
-                style_tokens_per_ref_view,
-                style_tokens_per_ref_view,
-                key_padding_mask=key_padding_mask,
-                need_weights=return_style_attn_weights,
-            )
-            style_out = style_out.view(batch_size, ref_count, q.size(1), hidden_dim)
-
-            ref_token_mask = style_token_mask.unsqueeze(-1).to(dtype=style_tokens.dtype)
-            ref_token_count = ref_token_mask.sum(dim=2).clamp_min(1.0)
-            ref_summary = (style_tokens * ref_token_mask).sum(dim=2) / ref_token_count
-            q_score = F.normalize(q.float(), dim=-1)
-            ref_score = F.normalize(ref_summary.float(), dim=-1)
-            ref_logits = torch.einsum("btc,brc->btr", q_score, ref_score)
-            ref_logits = ref_logits.masked_fill(~valid_ref_mask.unsqueeze(1), float("-inf"))
-            ref_weights = torch.softmax(ref_logits, dim=-1).to(dtype=style_out.dtype)
-            fused_style_out = (style_out.permute(0, 2, 1, 3) * ref_weights.unsqueeze(-1)).sum(dim=2)
-            x = x + fused_style_out
-
-            if return_style_attn_weights:
-                style_attn_weights = {
-                    "ref_weights": ref_weights,
-                    "token_weights": token_attn_weights.view(batch_size, ref_count, q.size(1), tokens_per_ref),
-                    "valid_ref_mask": valid_ref_mask,
-                }
-
-        mlp_out = self.mlp(modulate(self.norm_mlp(x), shift_mlp, scale_mlp))
-        x = x + gate_mlp.unsqueeze(1) * mlp_out
-        if return_style_attn_weights:
-            return x, style_attn_weights
+        style_ref_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        beta1, gamma1, alpha1, beta2, gamma2, alpha2 = self.cond_proj(global_cond).chunk(6, dim=-1)
+        attn_in = modulate(self.norm_attn(x), beta1, gamma1)
+        attn_out, _ = self.self_attn(attn_in, attn_in, attn_in, need_weights=False)
+        x = x + alpha1.unsqueeze(1) * attn_out
+        if self.use_style:
+            if style_tokens is None or self.style_module is None or self.style_gate is None:
+                raise RuntimeError("style_tokens must be provided for style-enabled patch blocks")
+            style_out = self.style_module(x, style_tokens=style_tokens, style_ref_mask=style_ref_mask)
+            x = x + self.style_gate.to(device=x.device, dtype=x.dtype) * style_out
+        mlp_out = self.mlp(modulate(self.norm_mlp(x), beta2, gamma2))
+        x = x + alpha2.unsqueeze(1) * mlp_out
         return x
 
 
-class DiffusionTransformerBackbone(nn.Module):
+class PixelTransformerBlock(nn.Module):
     def __init__(
         self,
         *,
-        latent_channels: int = 4,
-        latent_size: int = 16,
-        hidden_dim: int = 512,
-        depth: int = 16,
-        num_heads: int = 8,
-        mlp_ratio: float = 4.0,
-        content_cross_attn_indices: list[int] | tuple[int, ...] | None = None,
-        style_token_cross_attn_indices: list[int] | tuple[int, ...] | None = None,
+        patch_area: int,
+        patch_hidden_dim: int,
+        pixel_hidden_dim: int,
+        num_heads: int,
+        mlp_ratio: float,
+        grid_size: int,
     ) -> None:
         super().__init__()
-        self.latent_channels = int(latent_channels)
-        self.latent_size = int(latent_size)
-        self.hidden_dim = int(hidden_dim)
-        self.depth = int(depth)
-        self.num_heads = int(num_heads)
-        self.num_tokens = self.latent_size * self.latent_size
-        self.content_cross_attn_indices = self._normalize_layer_indices(
-            self.depth,
-            content_cross_attn_indices,
-            default_to_all=True,
-        )
-        self.style_token_cross_attn_indices = self._normalize_layer_indices(
-            self.depth,
-            style_token_cross_attn_indices,
-            default_to_all=False,
-        )
-        self.has_content_cross_attn = bool(self.content_cross_attn_indices)
-        self.has_style_cross_attn = bool(self.style_token_cross_attn_indices)
+        self.patch_area = int(patch_area)
+        self.patch_hidden_dim = int(patch_hidden_dim)
+        self.pixel_hidden_dim = int(pixel_hidden_dim)
 
-        self.latent_proj = nn.Linear(self.latent_channels, self.hidden_dim)
-        pos_embed = build_2d_sincos_pos_embed(self.hidden_dim, self.latent_size, self.latent_size)
+        self.norm_attn = RMSNorm(self.pixel_hidden_dim)
+        self.norm_mlp = RMSNorm(self.pixel_hidden_dim)
+        self.global_norm = RMSNorm(self.patch_hidden_dim)
+        self.cond_proj = nn.Linear(self.patch_hidden_dim, self.patch_area * 6 * self.pixel_hidden_dim)
+        self.compact_proj = nn.Linear(self.patch_area * self.pixel_hidden_dim, self.patch_hidden_dim)
+        self.global_attn = SDPAAttention(self.patch_hidden_dim, num_heads)
+        self.expand_proj = nn.Linear(self.patch_hidden_dim, self.patch_area * self.pixel_hidden_dim)
+        self.mlp = FeedForward(self.pixel_hidden_dim, mlp_ratio)
+        zero_init_linear(self.cond_proj)
+
+        pos_embed = build_2d_sincos_pos_embed(self.patch_hidden_dim, grid_size, grid_size)
         self.register_buffer("pos_embed", pos_embed.unsqueeze(0), persistent=False)
 
-        self.time_mlp = nn.Sequential(
-            nn.Linear(self.hidden_dim, self.hidden_dim),
-            nn.SiLU(),
-            nn.Linear(self.hidden_dim, self.hidden_dim),
-        )
-        self.global_style_cond_proj = nn.Linear(self.hidden_dim, self.hidden_dim)
-        self.blocks = nn.ModuleList()
-        for block_idx in range(self.depth):
-            self.blocks.append(
-                GlyphDiTBlock(
-                    self.hidden_dim,
-                    self.num_heads,
-                    mlp_ratio,
-                    use_content_cross_attn=(block_idx in self.content_cross_attn_indices),
-                    use_style_cross_attn=(block_idx in self.style_token_cross_attn_indices),
-                )
-            )
-        self.final_norm = nn.LayerNorm(self.hidden_dim, eps=1e-6)
-        self.final_proj = nn.Linear(self.hidden_dim, self.latent_channels)
-        nn.init.zeros_(self.final_proj.weight)
-        nn.init.zeros_(self.final_proj.bias)
+    def forward(self, x: torch.Tensor, *, s_cond: torch.Tensor) -> torch.Tensor:
+        if x.dim() != 4:
+            raise ValueError(f"pixel tokens must have shape [B, L, P, Dpix], got {tuple(x.shape)}")
+        if s_cond.shape[:2] != x.shape[:2]:
+            raise ValueError(f"s_cond shape mismatch: x={tuple(x.shape)} s_cond={tuple(s_cond.shape)}")
 
-    @staticmethod
-    def _normalize_layer_indices(
-        depth: int,
-        indices: list[int] | tuple[int, ...] | None,
+        batch_size, token_count, patch_area, pixel_hidden_dim = x.shape
+        if patch_area != self.patch_area or pixel_hidden_dim != self.pixel_hidden_dim:
+            raise ValueError(
+                "pixel token inner shape mismatch: "
+                f"expected {(self.patch_area, self.pixel_hidden_dim)}, got {(patch_area, pixel_hidden_dim)}"
+            )
+
+        x_flat = x.view(batch_size * token_count, patch_area, pixel_hidden_dim)
+        cond = self.cond_proj(s_cond.reshape(batch_size * token_count, -1)).view(
+            batch_size * token_count,
+            patch_area,
+            6,
+            pixel_hidden_dim,
+        )
+        beta1, gamma1, alpha1, beta2, gamma2, alpha2 = cond.unbind(dim=2)
+
+        attn_in = gamma1 * self.norm_attn(x_flat) + beta1
+        compact = self.compact_proj(attn_in.reshape(batch_size, token_count, patch_area * pixel_hidden_dim))
+        compact = compact + self.pos_embed.to(device=compact.device, dtype=compact.dtype)
+        compact = self.global_norm(compact)
+        attn_out, _ = self.global_attn(compact, compact, compact, need_weights=False)
+        expand = self.expand_proj(attn_out).view(batch_size * token_count, patch_area, pixel_hidden_dim)
+        x_flat = x_flat + alpha1 * expand
+
+        mlp_in = gamma2 * self.norm_mlp(x_flat) + beta2
+        mlp_out = self.mlp(mlp_in)
+        x_flat = x_flat + alpha2 * mlp_out
+        return x_flat.view(batch_size, token_count, patch_area, pixel_hidden_dim)
+
+
+class PixelDiffusionTransformerBackbone(nn.Module):
+    def __init__(
+        self,
         *,
-        default_to_all: bool,
-    ) -> set[int]:
-        depth = max(0, int(depth))
-        if indices is None:
-            return set(range(depth)) if default_to_all else set()
-        normalized: set[int] = set()
-        for raw_index in indices:
-            index = int(raw_index)
-            if index < 0 or index >= depth:
-                raise ValueError(f"attention index out of range: {index} for depth={depth}")
-            normalized.add(index)
-        return normalized
+        image_size: int,
+        in_channels: int,
+        patch_size: int,
+        patch_hidden_dim: int,
+        patch_depth: int,
+        patch_heads: int,
+        patch_mlp_ratio: float,
+        pixel_hidden_dim: int,
+        pit_depth: int,
+        pit_heads: int,
+        pit_mlp_ratio: float,
+        style_fusion_start: int,
+        use_style_tokens: bool,
+    ) -> None:
+        super().__init__()
+        self.image_size = int(image_size)
+        self.in_channels = int(in_channels)
+        self.patch_size = int(patch_size)
+        self.patch_hidden_dim = int(patch_hidden_dim)
+        self.patch_depth = int(patch_depth)
+        self.patch_heads = int(patch_heads)
+        self.pixel_hidden_dim = int(pixel_hidden_dim)
+        self.pit_depth = int(pit_depth)
+        self.pit_heads = int(pit_heads)
+
+        if self.image_size % self.patch_size != 0:
+            raise ValueError(
+                f"image_size must be divisible by patch_size, got {self.image_size} and {self.patch_size}"
+            )
+        self.grid_size = self.image_size // self.patch_size
+        self.num_patches = self.grid_size * self.grid_size
+        self.patch_area = self.patch_size * self.patch_size
+        self.style_fusion_start = int(style_fusion_start)
+        self.use_style_tokens = bool(use_style_tokens)
+        if self.style_fusion_start < 0 or self.style_fusion_start > self.patch_depth:
+            raise ValueError(
+                f"style_fusion_start must be in [0, {self.patch_depth}], got {self.style_fusion_start}"
+            )
+
+        self.patch_embed = nn.Conv2d(
+            self.in_channels,
+            self.patch_hidden_dim,
+            kernel_size=self.patch_size,
+            stride=self.patch_size,
+        )
+        patch_pos_embed = build_2d_sincos_pos_embed(self.patch_hidden_dim, self.grid_size, self.grid_size)
+        self.register_buffer("patch_pos_embed", patch_pos_embed.unsqueeze(0), persistent=False)
+        self.patch_input_proj = nn.Linear(self.patch_hidden_dim * 2, self.patch_hidden_dim)
+
+        self.time_mlp = nn.Sequential(
+            nn.Linear(self.patch_hidden_dim, self.patch_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(self.patch_hidden_dim, self.patch_hidden_dim),
+        )
+        self.global_cond_proj = nn.Sequential(
+            nn.Linear(self.patch_hidden_dim * 2, self.patch_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(self.patch_hidden_dim, self.patch_hidden_dim),
+        )
+        self.patch_blocks = nn.ModuleList(
+            [
+                PatchConditionedBlock(
+                    self.patch_hidden_dim,
+                    self.patch_heads,
+                    patch_mlp_ratio,
+                    use_style=(self.use_style_tokens and block_idx >= self.style_fusion_start),
+                )
+                for block_idx in range(self.patch_depth)
+            ]
+        )
+
+        self.pixel_embed = nn.Conv2d(self.in_channels, self.pixel_hidden_dim, kernel_size=1, stride=1)
+        self.pit_blocks = nn.ModuleList(
+            [
+                PixelTransformerBlock(
+                    patch_area=self.patch_area,
+                    patch_hidden_dim=self.patch_hidden_dim,
+                    pixel_hidden_dim=self.pixel_hidden_dim,
+                    num_heads=self.pit_heads,
+                    mlp_ratio=pit_mlp_ratio,
+                    grid_size=self.grid_size,
+                )
+                for _ in range(self.pit_depth)
+            ]
+        )
+        self.out_proj = nn.Conv2d(self.pixel_hidden_dim, self.in_channels, kernel_size=1, stride=1)
+
+    def _patchify_pixels(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size, _, height, width = x.shape
+        if height != self.image_size or width != self.image_size:
+            raise ValueError(
+                f"input image size mismatch: expected {(self.image_size, self.image_size)}, got {(height, width)}"
+            )
+        x = x.permute(0, 2, 3, 1).contiguous()
+        x = x.view(
+            batch_size,
+            self.grid_size,
+            self.patch_size,
+            self.grid_size,
+            self.patch_size,
+            self.pixel_hidden_dim,
+        )
+        x = x.permute(0, 1, 3, 2, 4, 5).contiguous()
+        return x.view(batch_size, self.num_patches, self.patch_area, self.pixel_hidden_dim)
+
+    def _unpatchify_pixels(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size = x.size(0)
+        x = x.view(
+            batch_size,
+            self.grid_size,
+            self.grid_size,
+            self.patch_size,
+            self.patch_size,
+            self.pixel_hidden_dim,
+        )
+        x = x.permute(0, 1, 3, 2, 4, 5).contiguous()
+        x = x.view(batch_size, self.image_size, self.image_size, self.pixel_hidden_dim)
+        return x.permute(0, 3, 1, 2).contiguous()
 
     def forward(
         self,
-        latent: torch.Tensor,
+        x_t: torch.Tensor,
         timesteps: torch.Tensor,
         *,
         content_tokens: torch.Tensor,
-        style_tokens: torch.Tensor,
+        style_tokens: torch.Tensor | None,
         style_global: torch.Tensor,
-        style_token_mask: torch.Tensor | None = None,
-        return_style_attn_weights: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, list[dict[str, torch.Tensor] | None]]:
-        if latent.dim() != 4:
-            raise ValueError(f"latent must be 4D, got {tuple(latent.shape)}")
-        if tuple(latent.shape[1:]) != (self.latent_channels, self.latent_size, self.latent_size):
+        style_ref_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if x_t.dim() != 4:
+            raise ValueError(f"x_t must be BCHW, got {tuple(x_t.shape)}")
+        if tuple(x_t.shape[1:]) != (self.in_channels, self.image_size, self.image_size):
             raise ValueError(
-                "latent shape mismatch: "
-                f"expected (*, {self.latent_channels}, {self.latent_size}, {self.latent_size}), "
-                f"got {tuple(latent.shape)}"
+                "x_t shape mismatch: "
+                f"expected (*, {self.in_channels}, {self.image_size}, {self.image_size}), got {tuple(x_t.shape)}"
+            )
+        if content_tokens.shape != (x_t.size(0), self.num_patches, self.patch_hidden_dim):
+            raise ValueError(
+                "content_tokens shape mismatch: "
+                f"expected {(x_t.size(0), self.num_patches, self.patch_hidden_dim)}, got {tuple(content_tokens.shape)}"
+            )
+        if self.use_style_tokens:
+            if style_tokens is None:
+                raise ValueError("style_tokens must be provided when use_style_tokens=True")
+            if style_tokens.shape[:3] != (x_t.size(0), style_tokens.size(1), self.num_patches):
+                raise ValueError(f"style_tokens shape mismatch: got {tuple(style_tokens.shape)}")
+            if style_tokens.size(-1) != self.patch_hidden_dim:
+                raise ValueError(
+                    f"style_tokens hidden dim mismatch: expected {self.patch_hidden_dim}, got {style_tokens.size(-1)}"
+                )
+        if style_global.shape != (x_t.size(0), self.patch_hidden_dim):
+            raise ValueError(
+                f"style_global shape mismatch: expected {(x_t.size(0), self.patch_hidden_dim)}, got {tuple(style_global.shape)}"
             )
 
-        x = latent.flatten(2).transpose(1, 2).contiguous()
-        x = self.latent_proj(x)
-        x = x + self.pos_embed.to(device=x.device, dtype=x.dtype)
+        patch_tokens = self.patch_embed(x_t).flatten(2).transpose(1, 2).contiguous()
+        patch_tokens = patch_tokens + self.patch_pos_embed.to(device=patch_tokens.device, dtype=patch_tokens.dtype)
+        content_tokens = content_tokens.to(device=patch_tokens.device, dtype=patch_tokens.dtype)
+        patch_tokens = self.patch_input_proj(torch.cat([patch_tokens, content_tokens], dim=-1))
 
-        t_embed = timestep_embedding(timesteps, self.hidden_dim).to(dtype=x.dtype)
+        t_embed = timestep_embedding(timesteps, self.patch_hidden_dim).to(dtype=patch_tokens.dtype)
         t_embed = self.time_mlp(t_embed)
-        global_cond = t_embed + self.global_style_cond_proj(style_global.to(dtype=x.dtype))
+        global_cond = self.global_cond_proj(torch.cat([t_embed, style_global.to(dtype=patch_tokens.dtype)], dim=-1))
 
-        content_tokens = (
-            content_tokens.to(device=x.device, dtype=x.dtype)
-            if self.has_content_cross_attn
-            else None
+        if style_tokens is not None:
+            style_tokens = style_tokens.to(device=patch_tokens.device, dtype=patch_tokens.dtype)
+        style_ref_mask = (
+            None if style_ref_mask is None else style_ref_mask.to(device=patch_tokens.device, dtype=torch.bool)
         )
-        style_tokens = (
-            style_tokens.to(device=x.device, dtype=x.dtype)
-            if self.has_style_cross_attn
-            else None
-        )
-        if self.has_style_cross_attn and style_token_mask is not None:
-            style_token_mask = style_token_mask.to(device=x.device, dtype=torch.bool)
-
-        style_attn_weights: list[dict[str, torch.Tensor] | None] = []
-        for block in self.blocks:
-            block_out = block(
-                x,
+        for block in self.patch_blocks:
+            patch_tokens = block(
+                patch_tokens,
                 global_cond=global_cond,
-                content_tokens=content_tokens if block.use_content_cross_attn else None,
-                style_tokens=style_tokens if block.use_style_cross_attn else None,
-                style_token_mask=style_token_mask if block.use_style_cross_attn else None,
-                return_style_attn_weights=return_style_attn_weights,
+                style_tokens=style_tokens if block.use_style else None,
+                style_ref_mask=style_ref_mask,
             )
-            if return_style_attn_weights:
-                x, block_style_weights = block_out
-                style_attn_weights.append(block_style_weights)
-            else:
-                x = block_out
 
-        x = self.final_norm(x)
-        x = self.final_proj(x)
-        x = x.transpose(1, 2).contiguous().view(
-            latent.size(0),
-            self.latent_channels,
-            self.latent_size,
-            self.latent_size,
-        )
-        if return_style_attn_weights:
-            return x, style_attn_weights
-        return x
+        s_cond = patch_tokens + t_embed.unsqueeze(1)
+
+        pixel_tokens = self.pixel_embed(x_t)
+        pixel_tokens = self._patchify_pixels(pixel_tokens)
+        for block in self.pit_blocks:
+            pixel_tokens = block(pixel_tokens, s_cond=s_cond)
+
+        pixel_map = self._unpatchify_pixels(pixel_tokens)
+        return self.out_proj(pixel_map)

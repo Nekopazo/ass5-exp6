@@ -1,0 +1,89 @@
+{
+  "config": {
+    "device": "cuda:0",
+    "batch": 4,
+    "style_ref_count": 8,
+    "max_fonts": 2,
+    "num_workers": 0,
+    "freeze_style_global": true
+  },
+  "largest_peak_stage": {
+    "stage": "pixeldt_backbone",
+    "allocated_before_gb": 0.758,
+    "allocated_after_gb": 1.2091,
+    "allocated_delta_gb": 0.4511,
+    "peak_delta_gb": 0.4615
+  },
+  "largest_alloc_delta_stage": {
+    "stage": "pixeldt_backbone",
+    "allocated_before_gb": 0.758,
+    "allocated_after_gb": 1.2091,
+    "allocated_delta_gb": 0.4511,
+    "peak_delta_gb": 0.4615
+  },
+  "records": [
+    {
+      "stage": "noise_sample",
+      "allocated_before_gb": 0.5984,
+      "allocated_after_gb": 0.5985,
+      "allocated_delta_gb": 0.0001,
+      "peak_delta_gb": 0.0001
+    },
+    {
+      "stage": "time_sample",
+      "allocated_before_gb": 0.5985,
+      "allocated_after_gb": 0.5985,
+      "allocated_delta_gb": 0.0,
+      "peak_delta_gb": 0.0
+    },
+    {
+      "stage": "flow_interpolate",
+      "allocated_before_gb": 0.5985,
+      "allocated_after_gb": 0.5986,
+      "allocated_delta_gb": 0.0001,
+      "peak_delta_gb": 0.0004
+    },
+    {
+      "stage": "flow_target",
+      "allocated_before_gb": 0.5986,
+      "allocated_after_gb": 0.5987,
+      "allocated_delta_gb": 0.0001,
+      "peak_delta_gb": 0.0001
+    },
+    {
+      "stage": "content_encode",
+      "allocated_before_gb": 0.5987,
+      "allocated_after_gb": 0.6428,
+      "allocated_delta_gb": 0.0441,
+      "peak_delta_gb": 0.0442
+    },
+    {
+      "stage": "style_encode",
+      "allocated_before_gb": 0.6428,
+      "allocated_after_gb": 0.758,
+      "allocated_delta_gb": 0.1152,
+      "peak_delta_gb": 0.124
+    },
+    {
+      "stage": "pixeldt_backbone",
+      "allocated_before_gb": 0.758,
+      "allocated_after_gb": 1.2091,
+      "allocated_delta_gb": 0.4511,
+      "peak_delta_gb": 0.4615
+    },
+    {
+      "stage": "rf_loss",
+      "allocated_before_gb": 1.2091,
+      "allocated_after_gb": 1.2093,
+      "allocated_delta_gb": 0.0002,
+      "peak_delta_gb": 0.0004
+    },
+    {
+      "stage": "backward",
+      "allocated_before_gb": 1.2083,
+      "allocated_after_gb": 1.2191,
+      "allocated_delta_gb": 0.0108,
+      "peak_delta_gb": 0.0789
+    }
+  ]
+}
