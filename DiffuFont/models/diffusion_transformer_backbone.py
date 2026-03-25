@@ -81,51 +81,25 @@ def zero_init_linear(linear: nn.Linear) -> None:
         nn.init.zeros_(linear.bias)
 
 
-class MultiReferenceStyleModule(nn.Module):
+class StyleMemoryCrossAttention(nn.Module):
     def __init__(self, hidden_dim: int, num_heads: int) -> None:
         super().__init__()
-        self.norm = RMSNorm(hidden_dim)
+        self.query_norm = RMSNorm(hidden_dim)
+        self.memory_norm = RMSNorm(hidden_dim)
         self.attn = SDPAAttention(hidden_dim, num_heads)
-        self.weight_proj = nn.Linear(hidden_dim, 1)
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        *,
-        style_tokens: torch.Tensor,
-        style_ref_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if style_tokens.dim() != 4:
-            raise ValueError(f"style_tokens must have shape [B, K, L, D], got {tuple(style_tokens.shape)}")
-        batch_size, ref_count, token_count, hidden_dim = style_tokens.shape
-        if x.shape != (batch_size, token_count, hidden_dim):
+    def forward(self, x: torch.Tensor, *, style_memory: torch.Tensor) -> torch.Tensor:
+        if style_memory.dim() != 3:
+            raise ValueError(f"style_memory must have shape [B, K, D], got {tuple(style_memory.shape)}")
+        if style_memory.size(0) != x.size(0) or style_memory.size(-1) != x.size(-1):
             raise ValueError(
-                "style_tokens and x shape mismatch: "
-                f"x={tuple(x.shape)} style={tuple(style_tokens.shape)}"
+                "style_memory shape mismatch: "
+                f"x={tuple(x.shape)} style_memory={tuple(style_memory.shape)}"
             )
-
-        q = self.norm(x)
-        q_per_ref = q.unsqueeze(1).expand(batch_size, ref_count, token_count, hidden_dim).reshape(
-            batch_size * ref_count,
-            token_count,
-            hidden_dim,
-        )
-        kv = style_tokens.reshape(batch_size * ref_count, token_count, hidden_dim)
-        out, _ = self.attn(q_per_ref, kv, kv, need_weights=False)
-        out = out.view(batch_size, ref_count, token_count, hidden_dim).permute(0, 2, 1, 3).contiguous()
-
-        ref_logits = self.weight_proj(out).squeeze(-1)
-        if style_ref_mask is not None:
-            if style_ref_mask.shape != (batch_size, ref_count):
-                raise ValueError(
-                    "style_ref_mask shape mismatch: "
-                    f"expected {(batch_size, ref_count)}, got {tuple(style_ref_mask.shape)}"
-                )
-            valid_mask = style_ref_mask.to(device=ref_logits.device, dtype=torch.bool)
-            ref_logits = ref_logits.masked_fill(~valid_mask.unsqueeze(1), float("-inf"))
-            out = out * valid_mask.unsqueeze(1).unsqueeze(-1).to(dtype=out.dtype)
-        weights = torch.softmax(ref_logits, dim=-1).to(dtype=out.dtype)
-        return (out * weights.unsqueeze(-1)).sum(dim=2)
+        query = self.query_norm(x)
+        memory = self.memory_norm(style_memory)
+        out, _ = self.attn(query, memory, memory, need_weights=False)
+        return out
 
 
 class PatchConditionedBlock(nn.Module):
@@ -147,27 +121,25 @@ class PatchConditionedBlock(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim * 6),
         )
-        self.style_module = MultiReferenceStyleModule(hidden_dim, num_heads) if self.use_style else None
-        self.style_gate = nn.Parameter(torch.zeros(1)) if self.use_style else None
+        self.style_cross_attn = StyleMemoryCrossAttention(hidden_dim, num_heads) if self.use_style else None
         zero_init_linear(self.cond_proj[-1])
 
     def forward(
         self,
         x: torch.Tensor,
         *,
-        global_cond: torch.Tensor,
-        style_tokens: torch.Tensor | None,
-        style_ref_mask: torch.Tensor | None,
+        time_cond: torch.Tensor,
+        style_memory: torch.Tensor | None,
     ) -> torch.Tensor:
-        beta1, gamma1, alpha1, beta2, gamma2, alpha2 = self.cond_proj(global_cond).chunk(6, dim=-1)
+        beta1, gamma1, alpha1, beta2, gamma2, alpha2 = self.cond_proj(time_cond).chunk(6, dim=-1)
         attn_in = modulate(self.norm_attn(x), beta1, gamma1)
         attn_out, _ = self.self_attn(attn_in, attn_in, attn_in, need_weights=False)
         x = x + alpha1.unsqueeze(1) * attn_out
         if self.use_style:
-            if style_tokens is None or self.style_module is None or self.style_gate is None:
-                raise RuntimeError("style_tokens must be provided for style-enabled patch blocks")
-            style_out = self.style_module(x, style_tokens=style_tokens, style_ref_mask=style_ref_mask)
-            x = x + self.style_gate.to(device=x.device, dtype=x.dtype) * style_out
+            if style_memory is None or self.style_cross_attn is None:
+                raise RuntimeError("style_memory must be provided for style-enabled patch blocks")
+            style_out = self.style_cross_attn(x, style_memory=style_memory)
+            x = x + style_out
         mlp_out = self.mlp(modulate(self.norm_mlp(x), beta2, gamma2))
         x = x + alpha2.unsqueeze(1) * mlp_out
         return x
@@ -254,7 +226,8 @@ class PixelDiffusionTransformerBackbone(nn.Module):
         pit_heads: int,
         pit_mlp_ratio: float,
         style_fusion_start: int,
-        use_style_tokens: bool,
+        style_fusion_end: int,
+        style_memory_k: int,
     ) -> None:
         super().__init__()
         self.image_size = int(image_size)
@@ -266,20 +239,23 @@ class PixelDiffusionTransformerBackbone(nn.Module):
         self.pixel_hidden_dim = int(pixel_hidden_dim)
         self.pit_depth = int(pit_depth)
         self.pit_heads = int(pit_heads)
+        self.style_fusion_start = int(style_fusion_start)
+        self.style_fusion_end = int(style_fusion_end)
+        self.style_memory_k = int(style_memory_k)
 
         if self.image_size % self.patch_size != 0:
             raise ValueError(
                 f"image_size must be divisible by patch_size, got {self.image_size} and {self.patch_size}"
             )
+        if not (0 <= self.style_fusion_start <= self.style_fusion_end <= self.patch_depth):
+            raise ValueError(
+                "style fusion range must satisfy "
+                f"0 <= start <= end <= {self.patch_depth}, got "
+                f"start={self.style_fusion_start} end={self.style_fusion_end}"
+            )
         self.grid_size = self.image_size // self.patch_size
         self.num_patches = self.grid_size * self.grid_size
         self.patch_area = self.patch_size * self.patch_size
-        self.style_fusion_start = int(style_fusion_start)
-        self.use_style_tokens = bool(use_style_tokens)
-        if self.style_fusion_start < 0 or self.style_fusion_start > self.patch_depth:
-            raise ValueError(
-                f"style_fusion_start must be in [0, {self.patch_depth}], got {self.style_fusion_start}"
-            )
 
         self.patch_embed = nn.Conv2d(
             self.in_channels,
@@ -296,18 +272,13 @@ class PixelDiffusionTransformerBackbone(nn.Module):
             nn.SiLU(),
             nn.Linear(self.patch_hidden_dim, self.patch_hidden_dim),
         )
-        self.global_cond_proj = nn.Sequential(
-            nn.Linear(self.patch_hidden_dim * 2, self.patch_hidden_dim),
-            nn.SiLU(),
-            nn.Linear(self.patch_hidden_dim, self.patch_hidden_dim),
-        )
         self.patch_blocks = nn.ModuleList(
             [
                 PatchConditionedBlock(
                     self.patch_hidden_dim,
                     self.patch_heads,
                     patch_mlp_ratio,
-                    use_style=(self.use_style_tokens and block_idx >= self.style_fusion_start),
+                    use_style=(self.style_fusion_start <= block_idx < self.style_fusion_end),
                 )
                 for block_idx in range(self.patch_depth)
             ]
@@ -367,9 +338,7 @@ class PixelDiffusionTransformerBackbone(nn.Module):
         timesteps: torch.Tensor,
         *,
         content_tokens: torch.Tensor,
-        style_tokens: torch.Tensor | None,
-        style_global: torch.Tensor,
-        style_ref_mask: torch.Tensor | None = None,
+        style_memory: torch.Tensor,
     ) -> torch.Tensor:
         if x_t.dim() != 4:
             raise ValueError(f"x_t must be BCHW, got {tuple(x_t.shape)}")
@@ -383,18 +352,11 @@ class PixelDiffusionTransformerBackbone(nn.Module):
                 "content_tokens shape mismatch: "
                 f"expected {(x_t.size(0), self.num_patches, self.patch_hidden_dim)}, got {tuple(content_tokens.shape)}"
             )
-        if self.use_style_tokens:
-            if style_tokens is None:
-                raise ValueError("style_tokens must be provided when use_style_tokens=True")
-            if style_tokens.shape[:3] != (x_t.size(0), style_tokens.size(1), self.num_patches):
-                raise ValueError(f"style_tokens shape mismatch: got {tuple(style_tokens.shape)}")
-            if style_tokens.size(-1) != self.patch_hidden_dim:
-                raise ValueError(
-                    f"style_tokens hidden dim mismatch: expected {self.patch_hidden_dim}, got {style_tokens.size(-1)}"
-                )
-        if style_global.shape != (x_t.size(0), self.patch_hidden_dim):
+        if style_memory.shape != (x_t.size(0), self.style_memory_k, self.patch_hidden_dim):
             raise ValueError(
-                f"style_global shape mismatch: expected {(x_t.size(0), self.patch_hidden_dim)}, got {tuple(style_global.shape)}"
+                "style_memory shape mismatch: "
+                f"expected {(x_t.size(0), self.style_memory_k, self.patch_hidden_dim)}, "
+                f"got {tuple(style_memory.shape)}"
             )
 
         patch_tokens = self.patch_embed(x_t).flatten(2).transpose(1, 2).contiguous()
@@ -403,20 +365,13 @@ class PixelDiffusionTransformerBackbone(nn.Module):
         patch_tokens = self.patch_input_proj(torch.cat([patch_tokens, content_tokens], dim=-1))
 
         t_embed = timestep_embedding(timesteps, self.patch_hidden_dim).to(dtype=patch_tokens.dtype)
-        t_embed = self.time_mlp(t_embed)
-        global_cond = self.global_cond_proj(torch.cat([t_embed, style_global.to(dtype=patch_tokens.dtype)], dim=-1))
-
-        if style_tokens is not None:
-            style_tokens = style_tokens.to(device=patch_tokens.device, dtype=patch_tokens.dtype)
-        style_ref_mask = (
-            None if style_ref_mask is None else style_ref_mask.to(device=patch_tokens.device, dtype=torch.bool)
-        )
+        time_cond = self.time_mlp(t_embed)
+        style_memory = style_memory.to(device=patch_tokens.device, dtype=patch_tokens.dtype)
         for block in self.patch_blocks:
             patch_tokens = block(
                 patch_tokens,
-                global_cond=global_cond,
-                style_tokens=style_tokens if block.use_style else None,
-                style_ref_mask=style_ref_mask,
+                time_cond=time_cond,
+                style_memory=style_memory if block.use_style else None,
             )
 
         s_cond = patch_tokens + t_embed.unsqueeze(1)

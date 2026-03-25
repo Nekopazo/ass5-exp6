@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""Top-level content + multi-style PixelDiT model."""
+"""Top-level content + unified style-memory PixelDiT model."""
 
 from __future__ import annotations
-
-from contextlib import nullcontext
-from pathlib import Path
-from typing import Optional
 
 import torch
 import torch.nn as nn
 
 from .diffusion_transformer_backbone import PixelDiffusionTransformerBackbone, build_2d_sincos_pos_embed
 from .sdpa_attention import SDPAAttention
+
+
+def _group_count(num_channels: int) -> int:
+    for groups in (32, 16, 8, 4, 2, 1):
+        if num_channels % groups == 0:
+            return groups
+    return 1
 
 
 class RMSNorm(nn.Module):
@@ -109,38 +112,84 @@ class TokenEncoderBackbone(nn.Module):
         return self.final_norm(tokens)
 
 
-class GlobalStyleEncoder(nn.Module):
-    def __init__(self, *, out_dim: int) -> None:
+class ConvNormAct(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, *, stride: int) -> None:
         super().__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(1, 16, kernel_size=3, stride=2, padding=1),
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1),
+            nn.GroupNorm(_group_count(out_channels), out_channels),
             nn.GELU(),
-            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
-            nn.GELU(),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
-            nn.GELU(),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-            nn.GELU(),
-        )
-        self.pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.proj = nn.Sequential(
-            nn.Linear(128, out_dim),
-            nn.GELU(),
-            nn.Linear(out_dim, out_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        feats = self.features(x)
-        pooled = self.pool(feats).flatten(1)
-        return self.proj(pooled)
+        return self.net(x)
+
+
+class UnifiedStyleMemoryEncoder(nn.Module):
+    def __init__(
+        self,
+        *,
+        image_size: int,
+        feature_dim: int,
+        hidden_dim: int,
+        memory_slots: int,
+    ) -> None:
+        super().__init__()
+        self.image_size = int(image_size)
+        self.feature_dim = int(feature_dim)
+        self.hidden_dim = int(hidden_dim)
+        self.memory_slots = int(memory_slots)
+        if self.image_size % 4 != 0:
+            raise ValueError(f"style image_size must be divisible by 4, got {self.image_size}")
+        self.grid_size = self.image_size // 4
+
+        stem_dim = max(32, self.feature_dim // 4)
+        mid_dim = max(stem_dim, self.feature_dim // 2)
+        self.cnn = nn.Sequential(
+            ConvNormAct(1, stem_dim, stride=1),
+            ConvNormAct(stem_dim, mid_dim, stride=2),
+            ConvNormAct(mid_dim, self.feature_dim, stride=2),
+            ConvNormAct(self.feature_dim, self.feature_dim, stride=1),
+        )
+        self.token_proj = nn.Linear(self.feature_dim, self.hidden_dim)
+        self.token_norm = RMSNorm(self.hidden_dim)
+        self.memory_score = nn.Linear(self.hidden_dim, self.memory_slots)
+        self.memory_norm = RMSNorm(self.hidden_dim)
+
+    def _encode_dense_tokens(self, x: torch.Tensor) -> torch.Tensor:
+        feats = self.cnn(x)
+        if feats.shape[-2:] != (self.grid_size, self.grid_size):
+            raise ValueError(
+                f"style feature size mismatch: expected {(self.grid_size, self.grid_size)}, got {tuple(feats.shape[-2:])}"
+            )
+        tokens = feats.flatten(2).transpose(1, 2).contiguous()
+        tokens = self.token_proj(tokens)
+        return self.token_norm(tokens)
+
+    def forward(
+        self,
+        style_img: torch.Tensor,
+    ) -> torch.Tensor:
+        if style_img.dim() != 5:
+            raise ValueError(f"style_img must be BRCHW, got {tuple(style_img.shape)}")
+        batch_size, ref_count, channels, height, width = style_img.shape
+        if channels != 1 or height != self.image_size or width != self.image_size:
+            raise ValueError(
+                "style_img shape mismatch: "
+                f"expected (*, *, 1, {self.image_size}, {self.image_size}), got {tuple(style_img.shape)}"
+            )
+
+        flat_style = style_img.view(batch_size * ref_count, channels, height, width)
+        dense_tokens = self._encode_dense_tokens(flat_style)
+        dense_tokens = dense_tokens.view(batch_size, ref_count, dense_tokens.size(1), dense_tokens.size(2))
+        dense_tokens = dense_tokens.reshape(batch_size, ref_count * dense_tokens.size(2), dense_tokens.size(3))
+        logits = self.memory_score(dense_tokens)
+        weights = torch.softmax(logits.float(), dim=1).to(dtype=dense_tokens.dtype)
+        style_memory = torch.einsum("bnk,bnd->bkd", weights, dense_tokens)
+        return self.memory_norm(style_memory)
 
 
 class SourcePartRefDiT(nn.Module):
-    GLOBAL_STYLE_STATE_PREFIXES = (
-        "global_style_encoder.",
-        "style_global_proj.",
-    )
-
     def __init__(
         self,
         *,
@@ -151,7 +200,8 @@ class SourcePartRefDiT(nn.Module):
         encoder_depth: int = 4,
         encoder_heads: int = 8,
         encoder_mlp_ratio: float = 4.0,
-        style_global_dim: int = 256,
+        style_feature_dim: int = 256,
+        style_memory_k: int = 4,
         patch_hidden_dim: int = 512,
         patch_depth: int = 12,
         patch_heads: int = 8,
@@ -160,9 +210,8 @@ class SourcePartRefDiT(nn.Module):
         pit_depth: int = 2,
         pit_heads: int = 8,
         pit_mlp_ratio: float = 4.0,
-        style_fusion_start: int = 8,
-        use_style_tokens: bool = True,
-        contrastive_proj_dim: int = 128,
+        style_fusion_start: int = 4,
+        style_fusion_end: int = 8,
     ) -> None:
         super().__init__()
         if int(in_channels) != 1:
@@ -175,7 +224,8 @@ class SourcePartRefDiT(nn.Module):
         self.encoder_depth = int(encoder_depth)
         self.encoder_heads = int(encoder_heads)
         self.encoder_mlp_ratio = float(encoder_mlp_ratio)
-        self.style_global_dim = int(style_global_dim)
+        self.style_feature_dim = int(style_feature_dim)
+        self.style_memory_k = int(style_memory_k)
         self.patch_hidden_dim = int(patch_hidden_dim)
         self.patch_depth = int(patch_depth)
         self.patch_heads = int(patch_heads)
@@ -185,8 +235,7 @@ class SourcePartRefDiT(nn.Module):
         self.pit_heads = int(pit_heads)
         self.pit_mlp_ratio = float(pit_mlp_ratio)
         self.style_fusion_start = int(style_fusion_start)
-        self.use_style_tokens = bool(use_style_tokens)
-        self.contrastive_proj_dim = int(contrastive_proj_dim)
+        self.style_fusion_end = int(style_fusion_end)
 
         self.shared_patch_embed = SharedPatchEmbed(
             image_size=self.image_size,
@@ -199,30 +248,17 @@ class SourcePartRefDiT(nn.Module):
             num_heads=self.encoder_heads,
             mlp_ratio=self.encoder_mlp_ratio,
         )
-        self.style_token_encoder = (
-            TokenEncoderBackbone(
-                hidden_dim=self.encoder_hidden_dim,
-                depth=self.encoder_depth,
-                num_heads=self.encoder_heads,
-                mlp_ratio=self.encoder_mlp_ratio,
-            )
-            if self.use_style_tokens
-            else None
+        self.style_encoder = UnifiedStyleMemoryEncoder(
+            image_size=self.image_size,
+            feature_dim=self.style_feature_dim,
+            hidden_dim=self.patch_hidden_dim,
+            memory_slots=self.style_memory_k,
         )
-        self.global_style_encoder = GlobalStyleEncoder(out_dim=self.style_global_dim)
 
         if self.encoder_hidden_dim != self.patch_hidden_dim:
             self.content_proj = nn.Linear(self.encoder_hidden_dim, self.patch_hidden_dim)
-            self.style_proj = (
-                nn.Linear(self.encoder_hidden_dim, self.patch_hidden_dim) if self.use_style_tokens else None
-            )
         else:
             self.content_proj = nn.Identity()
-            self.style_proj = nn.Identity() if self.use_style_tokens else None
-        if self.style_global_dim != self.patch_hidden_dim:
-            self.style_global_proj = nn.Linear(self.style_global_dim, self.patch_hidden_dim)
-        else:
-            self.style_global_proj = nn.Identity()
 
         self.backbone = PixelDiffusionTransformerBackbone(
             image_size=self.image_size,
@@ -237,7 +273,8 @@ class SourcePartRefDiT(nn.Module):
             pit_heads=self.pit_heads,
             pit_mlp_ratio=self.pit_mlp_ratio,
             style_fusion_start=self.style_fusion_start,
-            use_style_tokens=self.use_style_tokens,
+            style_fusion_end=self.style_fusion_end,
+            style_memory_k=self.style_memory_k,
         )
 
     def export_config(self) -> dict[str, object]:
@@ -249,7 +286,8 @@ class SourcePartRefDiT(nn.Module):
             "encoder_depth": int(self.encoder_depth),
             "encoder_heads": int(self.encoder_heads),
             "encoder_mlp_ratio": float(self.encoder_mlp_ratio),
-            "style_global_dim": int(self.style_global_dim),
+            "style_feature_dim": int(self.style_feature_dim),
+            "style_memory_k": int(self.style_memory_k),
             "patch_hidden_dim": int(self.patch_hidden_dim),
             "patch_depth": int(self.patch_depth),
             "patch_heads": int(self.patch_heads),
@@ -259,40 +297,8 @@ class SourcePartRefDiT(nn.Module):
             "pit_heads": int(self.pit_heads),
             "pit_mlp_ratio": float(self.pit_mlp_ratio),
             "style_fusion_start": int(self.style_fusion_start),
-            "use_style_tokens": bool(self.use_style_tokens),
-            "contrastive_proj_dim": int(self.contrastive_proj_dim),
+            "style_fusion_end": int(self.style_fusion_end),
         }
-
-    @classmethod
-    def _is_global_style_state_key(cls, key: str) -> bool:
-        return any(key.startswith(prefix) for prefix in cls.GLOBAL_STYLE_STATE_PREFIXES)
-
-    def global_style_state_dict(self) -> dict[str, torch.Tensor]:
-        return {
-            key: value
-            for key, value in self.state_dict().items()
-            if self._is_global_style_state_key(key)
-        }
-
-    def load_style_checkpoint(self, path: str | Path) -> None:
-        checkpoint = torch.load(str(path), map_location="cpu")
-        if not isinstance(checkpoint, dict):
-            raise RuntimeError(f"Malformed style checkpoint: {path}")
-        raw_state_dict = checkpoint.get("global_style_state")
-        if not isinstance(raw_state_dict, dict):
-            raise RuntimeError(f"Style checkpoint must contain 'global_style_state': {path}")
-        missing_keys, unexpected_keys = self.load_state_dict(raw_state_dict, strict=False)
-        unexpected_global = [key for key in unexpected_keys if self._is_global_style_state_key(key)]
-        if unexpected_global:
-            raise RuntimeError(f"Unexpected global style keys: {unexpected_global}")
-        missing_global = [key for key in missing_keys if self._is_global_style_state_key(key)]
-        if missing_global:
-            raise RuntimeError(f"Missing global style keys: {missing_global}")
-
-    def freeze_style_global(self) -> None:
-        for name, param in self.named_parameters():
-            if self._is_global_style_state_key(name):
-                param.requires_grad_(False)
 
     def _embed_patch_tokens(self, img: torch.Tensor) -> torch.Tensor:
         return self.shared_patch_embed(img)
@@ -303,61 +309,12 @@ class SourcePartRefDiT(nn.Module):
     def encode_content(self, content_img: torch.Tensor) -> torch.Tensor:
         return self.content_proj(self.encode_content_features(content_img))
 
-    def _masked_mean(self, x: torch.Tensor, valid_mask: torch.Tensor) -> torch.Tensor:
-        weights = valid_mask.to(device=x.device, dtype=x.dtype).unsqueeze(-1)
-        denom = weights.sum(dim=1).clamp_min(1.0)
-        return (x * weights).sum(dim=1) / denom
-
-    def encode_style(
-        self,
-        style_img: torch.Tensor,
-        style_ref_mask: Optional[torch.Tensor] = None,
-        *,
-        need_style_tokens: bool = True,
-        need_style_global: bool = True,
-        detach_global_style_encoder: bool = False,
-        detach_global_style: bool = False,
-    ) -> dict[str, Optional[torch.Tensor]]:
+    def encode_style(self, style_img: torch.Tensor) -> torch.Tensor:
         if style_img.dim() == 4:
             style_img = style_img.unsqueeze(1)
         if style_img.dim() != 5:
             raise ValueError(f"style_img must be BCHW or BRCHW, got {tuple(style_img.shape)}")
-
-        batch_size, ref_count, channels, height, width = style_img.shape
-        flat_style = style_img.view(batch_size * ref_count, channels, height, width)
-        if style_ref_mask is None:
-            valid_mask = torch.ones((batch_size, ref_count), device=style_img.device, dtype=torch.bool)
-        else:
-            valid_mask = style_ref_mask.to(device=style_img.device) > 0.5
-        empty_rows = ~valid_mask.any(dim=1)
-        if empty_rows.any():
-            valid_mask = valid_mask.clone()
-            valid_mask[empty_rows, 0] = True
-
-        style_tokens = None
-        if need_style_tokens and self.use_style_tokens:
-            if self.style_token_encoder is None or self.style_proj is None:
-                raise RuntimeError("style token branch is disabled or not initialized")
-            local_tokens = self.style_token_encoder(self._embed_patch_tokens(flat_style))
-            local_tokens = local_tokens.view(batch_size, ref_count, local_tokens.size(1), local_tokens.size(2))
-            style_tokens = self.style_proj(local_tokens)
-            style_tokens = style_tokens * valid_mask.unsqueeze(-1).unsqueeze(-1).to(dtype=style_tokens.dtype)
-
-        style_global = None
-        if need_style_global:
-            encoder_context = torch.no_grad() if detach_global_style_encoder else nullcontext()
-            with encoder_context:
-                global_vecs = self.global_style_encoder(flat_style).view(batch_size, ref_count, -1)
-            pool_context = torch.no_grad() if detach_global_style else nullcontext()
-            with pool_context:
-                pooled = self._masked_mean(global_vecs, valid_mask)
-                style_global = self.style_global_proj(pooled)
-
-        return {
-            "style_tokens": style_tokens,
-            "style_global": style_global,
-            "style_ref_mask": valid_mask,
-        }
+        return self.style_encoder(style_img)
 
     def predict_flow(
         self,
@@ -365,17 +322,13 @@ class SourcePartRefDiT(nn.Module):
         timesteps: torch.Tensor,
         *,
         content_tokens: torch.Tensor,
-        style_tokens: Optional[torch.Tensor],
-        style_global: torch.Tensor,
-        style_ref_mask: Optional[torch.Tensor] = None,
+        style_memory: torch.Tensor,
     ) -> torch.Tensor:
         return self.backbone(
             x_t,
             timesteps,
             content_tokens=content_tokens,
-            style_tokens=style_tokens,
-            style_global=style_global,
-            style_ref_mask=style_ref_mask,
+            style_memory=style_memory,
         )
 
     def forward(
@@ -385,19 +338,12 @@ class SourcePartRefDiT(nn.Module):
         content_img: torch.Tensor,
         *,
         style_img: torch.Tensor,
-        style_ref_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         content_tokens = self.encode_content(content_img)
-        style_pack = self.encode_style(style_img, style_ref_mask=style_ref_mask)
-        if style_pack["style_global"] is None:
-            raise RuntimeError("style encoding did not return required tensors")
-        if self.use_style_tokens and style_pack["style_tokens"] is None:
-            raise RuntimeError("style token branch is enabled but style_tokens are missing")
+        style_memory = self.encode_style(style_img)
         return self.predict_flow(
             x_t,
             timesteps,
             content_tokens=content_tokens,
-            style_tokens=style_pack["style_tokens"],
-            style_global=style_pack["style_global"],
-            style_ref_mask=style_pack["style_ref_mask"],
+            style_memory=style_memory,
         )

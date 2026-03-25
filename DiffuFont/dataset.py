@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from pathlib import Path
 import io
 import json
@@ -29,7 +29,6 @@ class FontImageDataset(Dataset):
         *,
         max_fonts: int = 0,
         style_ref_count: int = 8,
-        include_positive_style: bool = False,
         random_seed: int = 42,
         font_split: str = "all",
         font_split_seed: int = 42,
@@ -43,7 +42,6 @@ class FontImageDataset(Dataset):
         self.root = Path(project_root).resolve()
         self.max_fonts = max(0, int(max_fonts))
         self.style_ref_count = max(1, int(style_ref_count))
-        self.include_positive_style = bool(include_positive_style)
         self.font_split = str(font_split).strip().lower()
         if self.font_split not in {"train", "test", "all"}:
             raise ValueError(f"font_split must be one of train/test/all, got {font_split!r}")
@@ -87,9 +85,13 @@ class FontImageDataset(Dataset):
         self.valid_indices_by_font = {name: indices for name, indices in entries}
         self.samples: List[Tuple[str, int]] = []
         self.sample_indices_by_font: Dict[str, List[int]] = {name: [] for name in self.font_names}
+        self.sample_indices_by_char: Dict[int, List[int]] = {idx: [] for idx in range(len(self.char_list))}
+        self.sample_index_by_char_font: Dict[int, Dict[str, int]] = {idx: {} for idx in range(len(self.char_list))}
         for font_name, indices in entries:
             for char_index in indices:
                 self.sample_indices_by_font[font_name].append(len(self.samples))
+                self.sample_indices_by_char[int(char_index)].append(len(self.samples))
+                self.sample_index_by_char_font[int(char_index)][font_name] = len(self.samples)
                 self.samples.append((font_name, char_index))
 
         if not self.samples:
@@ -98,7 +100,6 @@ class FontImageDataset(Dataset):
         print(
             f"[FontImageDataset] samples={len(self.samples)} "
             f"fonts={len(self.font_names)} style_ref_count={self.style_ref_count} "
-            f"positive_pairs={self.include_positive_style} "
             f"font_split={self.font_split} font_split_seed={self.font_split_seed} "
             f"font_train_ratio={self.font_train_ratio:.2f}"
         )
@@ -227,38 +228,20 @@ class FontImageDataset(Dataset):
         self,
         font_name: str,
         target_index: int,
-        *,
-        excluded_indices: Optional[List[int]] = None,
     ) -> List[int]:
         target_index = int(target_index)
-        excluded = {target_index}
-        if excluded_indices is not None:
-            excluded.update(int(idx) for idx in excluded_indices)
-
-        all_candidates = [int(idx) for idx in self.valid_indices_by_font[font_name] if int(idx) != target_index]
-        preferred_candidates = [idx for idx in all_candidates if idx not in excluded]
-        if not all_candidates:
+        candidates = [int(idx) for idx in self.valid_indices_by_font[font_name] if int(idx) != target_index]
+        if not candidates:
             raise RuntimeError(f"Font '{font_name}' has no alternative glyph for style reference.")
-        self.rng.shuffle(preferred_candidates)
-        self.rng.shuffle(all_candidates)
+        if len(candidates) >= self.style_ref_count:
+            return self.rng.sample(candidates, k=self.style_ref_count)
+        return candidates + self.rng.choices(candidates, k=self.style_ref_count - len(candidates))
 
-        chosen = preferred_candidates[: self.style_ref_count]
-        if len(chosen) < self.style_ref_count:
-            remainder = [idx for idx in all_candidates if idx not in chosen]
-            self.rng.shuffle(remainder)
-            chosen.extend(remainder[: self.style_ref_count - len(chosen)])
-        if len(chosen) < self.style_ref_count:
-            chosen.extend(self.rng.choices(all_candidates, k=self.style_ref_count - len(chosen)))
-        return chosen
+    def _content_key(self, char_index: int) -> str:
+        return f"ContentFont@{self.char_list[int(char_index)]}"
 
-    def _sample_style_pair(self, font_name: str, target_index: int) -> Tuple[List[int], List[int]]:
-        anchor_indices = self._sample_style_indices(font_name, target_index)
-        positive_indices = self._sample_style_indices(
-            font_name,
-            target_index,
-            excluded_indices=anchor_indices,
-        )
-        return anchor_indices, positive_indices
+    def _font_char_key(self, font_name: str, char_index: int) -> str:
+        return f"{font_name}@{self.char_list[int(char_index)]}"
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -268,43 +251,22 @@ class FontImageDataset(Dataset):
         font_name, char_index = self.samples[index]
         char = self.char_list[char_index]
 
-        content_key = f"ContentFont@{char}"
-        target_key = f"{font_name}@{char}"
-        content_img = self._load_tensor(self._c_txn, content_key, style=False)
-        target_img = self._load_tensor(self._t_txn, target_key, style=False)
+        content_img = self._load_tensor(self._c_txn, self._content_key(char_index), style=False)
+        target_img = self._load_tensor(self._t_txn, self._font_char_key(font_name, char_index), style=False)
 
         style_indices = self._sample_style_indices(font_name, char_index)
-        style_chars = [self.char_list[idx] for idx in style_indices]
-        style_imgs = [
-            self._load_tensor(self._t_txn, f"{font_name}@{style_char}", style=True)
-            for style_char in style_chars
-        ]
+        style_img = torch.stack(
+            [self._load_tensor(self._t_txn, self._font_char_key(font_name, idx), style=True) for idx in style_indices],
+            dim=0,
+        )
 
-        sample = {
+        return {
             "font": font_name,
             "char": char,
             "content": content_img,
             "target": target_img,
-            "style_img": torch.stack(style_imgs, dim=0),
-            "style_ref_mask": torch.ones((len(style_imgs),), dtype=torch.float32),
-            "style_chars": style_chars,
-            "style_char": style_chars[0],
+            "style_img": style_img,
         }
-        if self.include_positive_style:
-            positive_style_indices = self._sample_style_indices(
-                font_name,
-                char_index,
-                excluded_indices=style_indices,
-            )
-            positive_style_chars = [self.char_list[idx] for idx in positive_style_indices]
-            positive_style_imgs = [
-                self._load_tensor(self._t_txn, f"{font_name}@{style_char}", style=True)
-                for style_char in positive_style_chars
-            ]
-            sample["style_img_pos"] = torch.stack(positive_style_imgs, dim=0)
-            sample["style_ref_mask_pos"] = torch.ones((len(positive_style_imgs),), dtype=torch.float32)
-            sample["style_chars_pos"] = positive_style_chars
-        return sample
 
     def close(self) -> None:
         for attr in ("_c_txn", "_t_txn"):
@@ -329,7 +291,7 @@ class FontImageDataset(Dataset):
 
 
 class UniqueFontBatchSampler(Sampler[List[int]]):
-    """Yields batches with at most one sample per font."""
+    """Yields batches with at most one sample per font while covering all samples."""
 
     def __init__(self, dataset: FontImageDataset, batch_size: int, *, seed: int = 42, drop_last: bool = False) -> None:
         self.dataset = dataset
@@ -337,28 +299,141 @@ class UniqueFontBatchSampler(Sampler[List[int]]):
         self.seed = int(seed)
         self.drop_last = bool(drop_last)
         self._epoch = 0
+        self._sample_counts = [
+            len(self.dataset.sample_indices_by_font[font_name]) for font_name in self.dataset.font_names
+        ]
+        self._batch_count = self._compute_batch_count()
+
+    def _compute_batch_count(self) -> int:
+        remaining = deque(count for count in self._sample_counts if count > 0)
+        yielded = 0
+        while remaining:
+            take_count = min(self.batch_size, len(remaining))
+            next_round: List[int] = []
+            for _ in range(take_count):
+                count = remaining.popleft() - 1
+                if count > 0:
+                    next_round.append(count)
+            if take_count == self.batch_size or (take_count > 0 and not self.drop_last):
+                yielded += 1
+            remaining.extend(next_round)
+        return yielded
 
     def __len__(self) -> int:
-        font_count = len(self.dataset.font_names)
-        if self.drop_last:
-            return font_count // self.batch_size
-        return int(math.ceil(font_count / self.batch_size))
+        return self._batch_count
 
     def __iter__(self):
         rng = random.Random(self.seed + self._epoch)
-        font_names = list(self.dataset.font_names)
-        rng.shuffle(font_names)
+        font_queues: Dict[str, deque[int]] = {}
+        active_fonts: List[str] = []
+        for font_name in self.dataset.font_names:
+            sample_indices = list(self.dataset.sample_indices_by_font[font_name])
+            if not sample_indices:
+                continue
+            rng.shuffle(sample_indices)
+            font_queues[font_name] = deque(sample_indices)
+            active_fonts.append(font_name)
+        rng.shuffle(active_fonts)
+        active_queue = deque(active_fonts)
 
-        batch: List[int] = []
-        for font_name in font_names:
-            sample_indices = self.dataset.sample_indices_by_font[font_name]
-            batch.append(sample_indices[rng.randrange(len(sample_indices))])
-            if len(batch) == self.batch_size:
+        while active_queue:
+            batch: List[int] = []
+            next_round: List[str] = []
+            take_count = min(self.batch_size, len(active_queue))
+            for _ in range(take_count):
+                font_name = active_queue.popleft()
+                sample_queue = font_queues[font_name]
+                batch.append(sample_queue.popleft())
+                if sample_queue:
+                    next_round.append(font_name)
+            if len(batch) == self.batch_size or (batch and not self.drop_last):
                 yield batch
-                batch = []
+            rng.shuffle(next_round)
+            active_queue.extend(next_round)
+        self._epoch += 1
 
-        if batch and not self.drop_last:
-            yield batch
+
+class GroupedCharFontBatchSampler(Sampler[List[int]]):
+    """Yields batches as a fixed char set x fixed font set Cartesian product."""
+
+    def __init__(
+        self,
+        dataset: FontImageDataset,
+        batch_size: int,
+        *,
+        seed: int = 42,
+        drop_last: bool = False,
+        grouped_char_count: int = 8,
+        grouped_fonts_per_char: int = 0,
+    ) -> None:
+        self.dataset = dataset
+        self.batch_size = max(1, int(batch_size))
+        self.seed = int(seed)
+        self.drop_last = bool(drop_last)
+        self.grouped_char_count = max(1, int(grouped_char_count))
+        inferred_fonts_per_char = int(grouped_fonts_per_char)
+        if inferred_fonts_per_char <= 0:
+            if self.batch_size % self.grouped_char_count != 0:
+                raise ValueError(
+                    "grouped_char_count must divide batch_size when grouped_fonts_per_char is not set: "
+                    f"batch_size={self.batch_size} grouped_char_count={self.grouped_char_count}"
+                )
+            inferred_fonts_per_char = self.batch_size // self.grouped_char_count
+        self.grouped_fonts_per_char = max(1, inferred_fonts_per_char)
+        expected_batch = self.grouped_char_count * self.grouped_fonts_per_char
+        if expected_batch != self.batch_size:
+            raise ValueError(
+                "grouped_char_count * grouped_fonts_per_char must equal batch_size: "
+                f"{self.grouped_char_count} * {self.grouped_fonts_per_char} != {self.batch_size}"
+            )
+        self._epoch = 0
+        self._char_indices = [
+            int(char_index) for char_index, indices in self.dataset.sample_indices_by_char.items() if indices
+        ]
+        self._font_names = [
+            str(font_name) for font_name in self.dataset.font_names if self.dataset.sample_indices_by_font[font_name]
+        ]
+        self._batch_count = self._compute_batch_count()
+
+    def _compute_batch_count(self) -> int:
+        char_group_count = len(self._char_indices) // self.grouped_char_count
+        font_group_count = len(self._font_names) // self.grouped_fonts_per_char
+        if not self.drop_last:
+            char_group_count = int(math.ceil(len(self._char_indices) / float(self.grouped_char_count)))
+            font_group_count = int(math.ceil(len(self._font_names) / float(self.grouped_fonts_per_char)))
+        return int(char_group_count * font_group_count)
+
+    def __len__(self) -> int:
+        return self._batch_count
+
+    @staticmethod
+    def _chunk_items(items: List[Any], chunk_size: int, *, drop_last: bool) -> List[List[Any]]:
+        chunks = [items[idx : idx + chunk_size] for idx in range(0, len(items), chunk_size)]
+        if drop_last:
+            chunks = [chunk for chunk in chunks if len(chunk) == chunk_size]
+        return chunks
+
+    def __iter__(self):
+        rng = random.Random(self.seed + self._epoch)
+        char_indices = list(self._char_indices)
+        font_names = list(self._font_names)
+        rng.shuffle(char_indices)
+        rng.shuffle(font_names)
+        char_groups = self._chunk_items(char_indices, self.grouped_char_count, drop_last=self.drop_last)
+        font_groups = self._chunk_items(font_names, self.grouped_fonts_per_char, drop_last=self.drop_last)
+        batch_pairs = [(char_group, font_group) for char_group in char_groups for font_group in font_groups]
+        rng.shuffle(batch_pairs)
+
+        for char_group, font_group in batch_pairs:
+            batch: List[int] = []
+            for char_index in char_group:
+                sample_lookup = self.dataset.sample_index_by_char_font[int(char_index)]
+                for font_name in font_group:
+                    sample_index = sample_lookup.get(font_name)
+                    if sample_index is not None:
+                        batch.append(int(sample_index))
+            if len(batch) == self.batch_size or (batch and not self.drop_last):
+                yield batch
         self._epoch += 1
 
 

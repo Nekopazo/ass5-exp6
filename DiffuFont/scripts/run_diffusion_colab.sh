@@ -11,27 +11,28 @@ LOG_FILE=""
 PID_FILE=""
 SAVE_DIR="checkpoints/flow_$(date '+%Y%m%d_%H%M%S')"
 
-RESUME_CKPT=""
-STYLE_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/style_pretrain_20260324_131925/best.pt"
-DEVICE_ARG="auto"
+RESUME_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/flow_20260325_174039/ckpt_step_10000.pt"
+DEVICE_ARG="cuda:0"
 SEED=42
 FONT_SPLIT="train"
 FONT_SPLIT_SEED=""
 FONT_TRAIN_RATIO="0.95"
 
-TARGET_STEPS=100000
+TARGET_STEPS=150000
 SAVE_EVERY=5000
 SAMPLE_EVERY=300
 LOG_EVERY=100
 VAL_EVERY=100
 VAL_MAX_BATCHES=16
-LR="2e-4"
+LR="1e-4"
 LR_WARMUP_STEPS=2000
 LR_MIN_RATIO="0.1"
 WEIGHT_DECAY="0.0"
-GRAD_CLIP_NORM="1.0"
 
 STYLE_REF_COUNT=8
+TRAIN_SAMPLING="grouped_char_font"
+GROUPED_CHAR_COUNT=8
+GROUPED_FONTS_PER_CHAR=0
 BATCH_SIZE=128
 NUM_WORKERS=8
 MAX_FONTS=0
@@ -42,7 +43,8 @@ ENCODER_HIDDEN_DIM=512
 ENCODER_DEPTH=4
 ENCODER_HEADS=8
 ENCODER_MLP_RATIO="4.0"
-STYLE_GLOBAL_DIM=256
+STYLE_FEATURE_DIM=256
+STYLE_MEMORY_K=8
 PATCH_HIDDEN_DIM=512
 PATCH_DEPTH=12
 PATCH_HEADS=8
@@ -51,34 +53,57 @@ PIXEL_HIDDEN_DIM=32
 PIT_DEPTH=2
 PIT_HEADS=8
 PIT_MLP_RATIO="4.0"
-STYLE_FUSION_START=8
-USE_STYLE_TOKENS="1"
-CONTRASTIVE_PROJ_DIM=128
+STYLE_FUSION_START=4
+STYLE_FUSION_END=8
 
-FREEZE_STYLE_GLOBAL="1"
 FLOW_LAMBDA_RF="1.0"
-FLOW_LAMBDA_IMG_L1="0.0"
-FLOW_LAMBDA_IMG_PERC="0.0"
 FLOW_SAMPLE_STEPS=20
 FLOW_SAMPLER="flow_dpm"
 TIMESTEP_SAMPLING="logit_normal"
-EMA_DECAY="0"
 
 OOM_RETRY_SLEEP=60
 MAX_OOM_RETRIES=0
 EXTRA_TRAIN_ARGS=()
 
+usage() {
+  cat <<'EOF'
+Usage: run_diffusion_colab.sh [options] [-- extra train.py args]
+
+Core options:
+  --foreground | --daemon
+  --save-dir PATH
+  --resume PATH
+  --device DEVICE
+  --seed INT
+  --target-steps INT
+  --batch INT
+  --train-sampling MODE
+  --grouped-char-count INT
+  --grouped-fonts-per-char INT
+  --style-feature-dim INT
+  --style-memory-k INT
+  --style-fusion-start INT
+  --style-fusion-end INT
+  --oom-retry-sleep SEC
+  --max-oom-retries N
+
+This wrapper launches the unified style-memory flow training path and supports:
+  1. process-tree cleanup on TERM/INT
+  2. auto GPU selection when --device auto
+  3. OOM-aware retry loops
+  4. LR schedule: fixed warmup, hold max LR, final 20% cosine decay to lr_min_ratio
+EOF
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --help|-h) usage; exit 0 ;;
     --foreground) RUN_MODE="foreground"; shift ;;
     --daemon) RUN_MODE="daemon"; shift ;;
     --log-file) LOG_FILE="${2:?}"; shift 2 ;;
     --pid-file) PID_FILE="${2:?}"; shift 2 ;;
     --save-dir) SAVE_DIR="${2:?}"; shift 2 ;;
     --resume) RESUME_CKPT="${2:?}"; shift 2 ;;
-    --style-checkpoint) STYLE_CKPT="${2:?}"; shift 2 ;;
-    --freeze-style-global) FREEZE_STYLE_GLOBAL="1"; shift ;;
-    --no-freeze-style-global) FREEZE_STYLE_GLOBAL="0"; shift ;;
     --device) DEVICE_ARG="${2:?}"; shift 2 ;;
     --seed) SEED="${2:?}"; shift 2 ;;
     --font-split) FONT_SPLIT="${2:?}"; shift 2 ;;
@@ -94,8 +119,10 @@ while [[ $# -gt 0 ]]; do
     --lr-warmup-steps) LR_WARMUP_STEPS="${2:?}"; shift 2 ;;
     --lr-min-ratio) LR_MIN_RATIO="${2:?}"; shift 2 ;;
     --weight-decay) WEIGHT_DECAY="${2:?}"; shift 2 ;;
-    --grad-clip-norm) GRAD_CLIP_NORM="${2:?}"; shift 2 ;;
     --style-ref-count) STYLE_REF_COUNT="${2:?}"; shift 2 ;;
+    --train-sampling) TRAIN_SAMPLING="${2:?}"; shift 2 ;;
+    --grouped-char-count) GROUPED_CHAR_COUNT="${2:?}"; shift 2 ;;
+    --grouped-fonts-per-char) GROUPED_FONTS_PER_CHAR="${2:?}"; shift 2 ;;
     --batch) BATCH_SIZE="${2:?}"; shift 2 ;;
     --num-workers) NUM_WORKERS="${2:?}"; shift 2 ;;
     --max-fonts) MAX_FONTS="${2:?}"; shift 2 ;;
@@ -105,7 +132,8 @@ while [[ $# -gt 0 ]]; do
     --encoder-depth) ENCODER_DEPTH="${2:?}"; shift 2 ;;
     --encoder-heads) ENCODER_HEADS="${2:?}"; shift 2 ;;
     --encoder-mlp-ratio) ENCODER_MLP_RATIO="${2:?}"; shift 2 ;;
-    --style-global-dim) STYLE_GLOBAL_DIM="${2:?}"; shift 2 ;;
+    --style-feature-dim) STYLE_FEATURE_DIM="${2:?}"; shift 2 ;;
+    --style-memory-k) STYLE_MEMORY_K="${2:?}"; shift 2 ;;
     --patch-hidden-dim) PATCH_HIDDEN_DIM="${2:?}"; shift 2 ;;
     --patch-depth) PATCH_DEPTH="${2:?}"; shift 2 ;;
     --patch-heads) PATCH_HEADS="${2:?}"; shift 2 ;;
@@ -115,16 +143,15 @@ while [[ $# -gt 0 ]]; do
     --pit-heads) PIT_HEADS="${2:?}"; shift 2 ;;
     --pit-mlp-ratio) PIT_MLP_RATIO="${2:?}"; shift 2 ;;
     --style-fusion-start) STYLE_FUSION_START="${2:?}"; shift 2 ;;
-    --use-style-tokens) USE_STYLE_TOKENS="1"; shift ;;
-    --no-use-style-tokens) USE_STYLE_TOKENS="0"; shift ;;
-    --contrastive-proj-dim) CONTRASTIVE_PROJ_DIM="${2:?}"; shift 2 ;;
+    --style-fusion-end) STYLE_FUSION_END="${2:?}"; shift 2 ;;
     --flow-lambda-rf) FLOW_LAMBDA_RF="${2:?}"; shift 2 ;;
-    --flow-lambda-img-l1) FLOW_LAMBDA_IMG_L1="${2:?}"; shift 2 ;;
-    --flow-lambda-img-perc) FLOW_LAMBDA_IMG_PERC="${2:?}"; shift 2 ;;
     --flow-sample-steps) FLOW_SAMPLE_STEPS="${2:?}"; shift 2 ;;
     --flow-sampler) FLOW_SAMPLER="${2:?}"; shift 2 ;;
     --timestep-sampling) TIMESTEP_SAMPLING="${2:?}"; shift 2 ;;
-    --ema-decay) EMA_DECAY="${2:?}"; shift 2 ;;
+    --grad-clip-norm|--flow-lambda-img-l1|--flow-lambda-img-perc|--ema-decay)
+      echo "[run_diffusion_colab] removed option: $1" >&2
+      exit 2
+      ;;
     --oom-retry-sleep) OOM_RETRY_SLEEP="${2:?}"; shift 2 ;;
     --max-oom-retries) MAX_OOM_RETRIES="${2:?}"; shift 2 ;;
     --) shift; EXTRA_TRAIN_ARGS+=("$@"); break ;;
@@ -140,14 +167,6 @@ mkdir -p logs checkpoints
 
 if [[ -n "${RESUME_CKPT}" && ! -f "${RESUME_CKPT}" ]]; then
   echo "[run_diffusion_colab] missing resume checkpoint: ${RESUME_CKPT}" >&2
-  exit 2
-fi
-if [[ -n "${STYLE_CKPT}" && ! -f "${STYLE_CKPT}" ]]; then
-  echo "[run_diffusion_colab] missing style checkpoint: ${STYLE_CKPT}" >&2
-  exit 2
-fi
-if [[ "${FREEZE_STYLE_GLOBAL}" == "1" && -z "${RESUME_CKPT}" && -z "${STYLE_CKPT}" ]]; then
-  echo "[run_diffusion_colab] --freeze-style-global requires --style-checkpoint or --resume" >&2
   exit 2
 fi
 
@@ -171,8 +190,10 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --lr-warmup-steps "${LR_WARMUP_STEPS}"
     --lr-min-ratio "${LR_MIN_RATIO}"
     --weight-decay "${WEIGHT_DECAY}"
-    --grad-clip-norm "${GRAD_CLIP_NORM}"
     --style-ref-count "${STYLE_REF_COUNT}"
+    --train-sampling "${TRAIN_SAMPLING}"
+    --grouped-char-count "${GROUPED_CHAR_COUNT}"
+    --grouped-fonts-per-char "${GROUPED_FONTS_PER_CHAR}"
     --batch "${BATCH_SIZE}"
     --num-workers "${NUM_WORKERS}"
     --max-fonts "${MAX_FONTS}"
@@ -182,7 +203,8 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --encoder-depth "${ENCODER_DEPTH}"
     --encoder-heads "${ENCODER_HEADS}"
     --encoder-mlp-ratio "${ENCODER_MLP_RATIO}"
-    --style-global-dim "${STYLE_GLOBAL_DIM}"
+    --style-feature-dim "${STYLE_FEATURE_DIM}"
+    --style-memory-k "${STYLE_MEMORY_K}"
     --patch-hidden-dim "${PATCH_HIDDEN_DIM}"
     --patch-depth "${PATCH_DEPTH}"
     --patch-heads "${PATCH_HEADS}"
@@ -192,35 +214,19 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --pit-heads "${PIT_HEADS}"
     --pit-mlp-ratio "${PIT_MLP_RATIO}"
     --style-fusion-start "${STYLE_FUSION_START}"
-    --contrastive-proj-dim "${CONTRASTIVE_PROJ_DIM}"
+    --style-fusion-end "${STYLE_FUSION_END}"
     --flow-lambda-rf "${FLOW_LAMBDA_RF}"
-    --flow-lambda-img-l1 "${FLOW_LAMBDA_IMG_L1}"
-    --flow-lambda-img-perc "${FLOW_LAMBDA_IMG_PERC}"
     --flow-sample-steps "${FLOW_SAMPLE_STEPS}"
     --flow-sampler "${FLOW_SAMPLER}"
     --timestep-sampling "${TIMESTEP_SAMPLING}"
-    --ema-decay "${EMA_DECAY}"
     --oom-retry-sleep "${OOM_RETRY_SLEEP}"
     --max-oom-retries "${MAX_OOM_RETRIES}"
   )
-  if [[ "${USE_STYLE_TOKENS}" == "1" ]]; then
-    daemon_args+=(--use-style-tokens)
-  else
-    daemon_args+=(--no-use-style-tokens)
-  fi
   if [[ -n "${FONT_SPLIT_SEED}" ]]; then
     daemon_args+=(--font-split-seed "${FONT_SPLIT_SEED}")
   fi
   if [[ -n "${RESUME_CKPT}" ]]; then
     daemon_args+=(--resume "${RESUME_CKPT}")
-  fi
-  if [[ -n "${STYLE_CKPT}" ]]; then
-    daemon_args+=(--style-checkpoint "${STYLE_CKPT}")
-  fi
-  if [[ "${FREEZE_STYLE_GLOBAL}" == "1" ]]; then
-    daemon_args+=(--freeze-style-global)
-  else
-    daemon_args+=(--no-freeze-style-global)
   fi
   if [[ "${#EXTRA_TRAIN_ARGS[@]}" -gt 0 ]]; then
     daemon_args+=(-- "${EXTRA_TRAIN_ARGS[@]}")
@@ -325,7 +331,6 @@ select_launch_device() {
   fi
 
   "${PYTHON_BIN}" - <<'PY'
-import sys
 import torch
 
 if not torch.cuda.is_available():
@@ -379,7 +384,6 @@ is_oom_failure() {
 
 cmd_common=(
   "${PYTHON_BIN}" -u train.py
-  --stage flow
   --data-root "${ROOT}"
   --save-dir "${SAVE_DIR}"
   --seed "${SEED}"
@@ -389,10 +393,12 @@ cmd_common=(
   --lr-warmup-steps "${LR_WARMUP_STEPS}"
   --lr-min-ratio "${LR_MIN_RATIO}"
   --weight-decay "${WEIGHT_DECAY}"
-  --grad-clip-norm "${GRAD_CLIP_NORM}"
   --batch "${BATCH_SIZE}"
   --num-workers "${NUM_WORKERS}"
   --style-ref-count "${STYLE_REF_COUNT}"
+  --train-sampling "${TRAIN_SAMPLING}"
+  --grouped-char-count "${GROUPED_CHAR_COUNT}"
+  --grouped-fonts-per-char "${GROUPED_FONTS_PER_CHAR}"
   --max-fonts "${MAX_FONTS}"
   --image-size "${IMAGE_SIZE}"
   --patch-size "${PATCH_SIZE}"
@@ -400,7 +406,8 @@ cmd_common=(
   --encoder-depth "${ENCODER_DEPTH}"
   --encoder-heads "${ENCODER_HEADS}"
   --encoder-mlp-ratio "${ENCODER_MLP_RATIO}"
-  --style-global-dim "${STYLE_GLOBAL_DIM}"
+  --style-feature-dim "${STYLE_FEATURE_DIM}"
+  --style-memory-k "${STYLE_MEMORY_K}"
   --patch-hidden-dim "${PATCH_HIDDEN_DIM}"
   --patch-depth "${PATCH_DEPTH}"
   --patch-heads "${PATCH_HEADS}"
@@ -410,15 +417,11 @@ cmd_common=(
   --pit-heads "${PIT_HEADS}"
   --pit-mlp-ratio "${PIT_MLP_RATIO}"
   --style-fusion-start "${STYLE_FUSION_START}"
-  --contrastive-proj-dim "${CONTRASTIVE_PROJ_DIM}"
+  --style-fusion-end "${STYLE_FUSION_END}"
   --flow-lambda-rf "${FLOW_LAMBDA_RF}"
-  --flow-lambda-img-l1 "${FLOW_LAMBDA_IMG_L1}"
-  --flow-lambda-img-perc "${FLOW_LAMBDA_IMG_PERC}"
   --flow-sample-steps "${FLOW_SAMPLE_STEPS}"
   --flow-sampler "${FLOW_SAMPLER}"
   --timestep-sampling "${TIMESTEP_SAMPLING}"
-  --ema-decay "${EMA_DECAY}"
-  --epochs 1000000
   --total-steps "${TARGET_STEPS}"
   --log-every-steps "${LOG_EVERY}"
   --val-every-steps "${VAL_EVERY}"
@@ -426,25 +429,12 @@ cmd_common=(
   --save-every-steps "${SAVE_EVERY}"
   --sample-every-steps "${SAMPLE_EVERY}"
 )
-if [[ "${USE_STYLE_TOKENS}" == "1" ]]; then
-  cmd_common+=(--use-style-tokens)
-else
-  cmd_common+=(--no-use-style-tokens)
-fi
 
 if [[ -n "${FONT_SPLIT_SEED}" ]]; then
   cmd_common+=(--font-split-seed "${FONT_SPLIT_SEED}")
 fi
 if [[ -n "${RESUME_CKPT}" ]]; then
   cmd_common+=(--resume "${RESUME_CKPT}")
-fi
-if [[ -n "${STYLE_CKPT}" ]]; then
-  cmd_common+=(--style-checkpoint "${STYLE_CKPT}")
-fi
-if [[ "${FREEZE_STYLE_GLOBAL}" == "1" ]]; then
-  cmd_common+=(--freeze-style-global)
-else
-  cmd_common+=(--no-freeze-style-global)
 fi
 if [[ "${#EXTRA_TRAIN_ARGS[@]}" -gt 0 ]]; then
   cmd_common+=("${EXTRA_TRAIN_ARGS[@]}")
@@ -455,18 +445,19 @@ echo "[run_diffusion_colab] save_dir=${SAVE_DIR}"
 echo "[run_diffusion_colab] log_file=${LOG_FILE}"
 echo "[run_diffusion_colab] requested_device=${DEVICE_ARG} seed=${SEED}"
 echo "[run_diffusion_colab] batch=${BATCH_SIZE} lr=${LR} target_steps=${TARGET_STEPS}"
+echo "[run_diffusion_colab] train_sampling=${TRAIN_SAMPLING}"
+echo "[run_diffusion_colab] grouped_char_count=${GROUPED_CHAR_COUNT} grouped_fonts_per_char=${GROUPED_FONTS_PER_CHAR}"
+echo "[run_diffusion_colab] lr_schedule=warmup_hold_then_final20pct_cosine"
 echo "[run_diffusion_colab] lr=${LR} lr_warmup_steps=${LR_WARMUP_STEPS} lr_min_ratio=${LR_MIN_RATIO} weight_decay=${WEIGHT_DECAY}"
-echo "[run_diffusion_colab] grad_clip_norm=${GRAD_CLIP_NORM}"
 echo "[run_diffusion_colab] save_every_steps=${SAVE_EVERY} sample_every_steps=${SAMPLE_EVERY}"
-echo "[run_diffusion_colab] style_checkpoint=${STYLE_CKPT:-<none>} freeze_style_global=${FREEZE_STYLE_GLOBAL}"
 echo "[run_diffusion_colab] image_size=${IMAGE_SIZE} patch_size=${PATCH_SIZE}"
 echo "[run_diffusion_colab] encoder_hidden_dim=${ENCODER_HIDDEN_DIM} encoder_depth=${ENCODER_DEPTH} encoder_heads=${ENCODER_HEADS}"
-echo "[run_diffusion_colab] style_global_dim=${STYLE_GLOBAL_DIM}"
+echo "[run_diffusion_colab] style_feature_dim=${STYLE_FEATURE_DIM} style_memory_k=${STYLE_MEMORY_K}"
 echo "[run_diffusion_colab] patch_hidden_dim=${PATCH_HIDDEN_DIM} patch_depth=${PATCH_DEPTH} patch_heads=${PATCH_HEADS}"
 echo "[run_diffusion_colab] pixel_hidden_dim=${PIXEL_HIDDEN_DIM} pit_depth=${PIT_DEPTH} pit_heads=${PIT_HEADS}"
-echo "[run_diffusion_colab] use_style_tokens=${USE_STYLE_TOKENS} style_fusion_start=${STYLE_FUSION_START}"
-echo "[run_diffusion_colab] flow_lambda_rf=${FLOW_LAMBDA_RF} flow_lambda_img_l1=${FLOW_LAMBDA_IMG_L1} flow_lambda_img_perc=${FLOW_LAMBDA_IMG_PERC} flow_sample_steps=${FLOW_SAMPLE_STEPS}"
-echo "[run_diffusion_colab] flow_sampler=${FLOW_SAMPLER} timestep_sampling=${TIMESTEP_SAMPLING} ema_decay=${EMA_DECAY}"
+echo "[run_diffusion_colab] style_fusion_start=${STYLE_FUSION_START} style_fusion_end=${STYLE_FUSION_END}"
+echo "[run_diffusion_colab] flow_lambda_rf=${FLOW_LAMBDA_RF} flow_sample_steps=${FLOW_SAMPLE_STEPS}"
+echo "[run_diffusion_colab] flow_sampler=${FLOW_SAMPLER} timestep_sampling=${TIMESTEP_SAMPLING}"
 echo "[run_diffusion_colab] oom_retry_sleep=${OOM_RETRY_SLEEP} max_oom_retries=${MAX_OOM_RETRIES}"
 
 attempt=1

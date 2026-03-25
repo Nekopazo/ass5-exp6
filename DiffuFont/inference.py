@@ -29,11 +29,9 @@ def load_trainer(checkpoint_path: Path, device: torch.device) -> FlowTrainer:
         model,
         device,
         total_steps=1,
-        freeze_style_global=False,
         flow_sample_steps=int(trainer_config.get("flow_sample_steps", 20)),
         flow_sampler=str(trainer_config.get("flow_sampler", "flow_dpm")),
         timestep_sampling=str(trainer_config.get("timestep_sampling", "logit_normal")),
-        ema_decay=float(trainer_config.get("ema_decay", 0.9999)),
     )
     trainer.load(checkpoint_path)
     return trainer
@@ -71,11 +69,9 @@ def run_inference(
             sample = dataset[find_sample_index(dataset, font_name, char)]
             content = sample["content"].unsqueeze(0)
             style = sample["style_img"].unsqueeze(0)
-            style_ref_mask = sample["style_ref_mask"].unsqueeze(0)
             generation = trainer.flow_sample(
                 content,
                 style_img=style,
-                style_ref_mask=style_ref_mask,
                 num_inference_steps=int(inference_steps),
                 sampler=str(flow_sampler),
             )

@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import copy
 from contextlib import nullcontext
 import json
 import math
@@ -15,66 +14,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torchvision.utils import save_image
-
-
-def _per_sample_mean(x: torch.Tensor) -> torch.Tensor:
-    return x.reshape(x.size(0), -1).mean(dim=1)
-
-
-def _gradient_maps(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    kernel_x = torch.tensor(
-        [[[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]]],
-        device=x.device,
-        dtype=x.dtype,
-    ).unsqueeze(0)
-    kernel_y = torch.tensor(
-        [[[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]]],
-        device=x.device,
-        dtype=x.dtype,
-    ).unsqueeze(0)
-    grad_x = F.conv2d(x, kernel_x, padding=1)
-    grad_y = F.conv2d(x, kernel_y, padding=1)
-    return grad_x, grad_y
-
-
-def glyph_perceptual_loss(
-    pred: torch.Tensor,
-    target: torch.Tensor,
-    *,
-    reduction: str = "mean",
-) -> torch.Tensor:
-    scales = (1, 2, 4)
-    losses = []
-    for scale in scales:
-        if scale == 1:
-            pred_s = pred
-            target_s = target
-        else:
-            pred_s = F.avg_pool2d(pred, kernel_size=scale, stride=scale)
-            target_s = F.avg_pool2d(target, kernel_size=scale, stride=scale)
-        gx_pred, gy_pred = _gradient_maps(pred_s)
-        gx_tgt, gy_tgt = _gradient_maps(target_s)
-        scale_loss = _per_sample_mean((pred_s - target_s).abs())
-        scale_loss = scale_loss + 0.5 * (
-            _per_sample_mean((gx_pred - gx_tgt).abs()) + _per_sample_mean((gy_pred - gy_tgt).abs())
-        )
-        losses.append(scale_loss)
-    loss = torch.stack(losses, dim=0).mean(dim=0)
-    if reduction == "none":
-        return loss
-    if reduction == "mean":
-        return loss.mean()
-    raise ValueError(f"Unsupported reduction: {reduction!r}")
-
-
-def info_nce_loss(anchor: torch.Tensor, positive: torch.Tensor, temperature: float) -> torch.Tensor:
-    anchor = F.normalize(anchor, dim=-1)
-    positive = F.normalize(positive, dim=-1)
-    logits = anchor @ positive.transpose(0, 1)
-    logits = logits / max(float(temperature), 1e-6)
-    targets = torch.arange(anchor.size(0), device=anchor.device)
-    return F.cross_entropy(logits.float(), targets)
-
 
 def sample_logit_normal_timesteps(
     batch_size: int,
@@ -97,24 +36,6 @@ def _metrics_to_floats(metrics: Dict[str, torch.Tensor | float | int]) -> Dict[s
             output[key] = float(value)
     return output
 
-
-def _style_gate_metrics(model: nn.Module) -> Dict[str, torch.Tensor]:
-    backbone = getattr(model, "backbone", None)
-    patch_blocks = getattr(backbone, "patch_blocks", None)
-    if patch_blocks is None:
-        return {}
-
-    metrics: Dict[str, torch.Tensor] = {}
-    for block_idx, block in enumerate(patch_blocks):
-        if not bool(getattr(block, "use_style", False)):
-            continue
-        gate = getattr(block, "style_gate", None)
-        if gate is None:
-            continue
-        metrics[f"style_gate_block_{block_idx}"] = gate.reshape(()).detach()
-    return metrics
-
-
 class _BaseTrainer:
     def __init__(
         self,
@@ -129,7 +50,6 @@ class _BaseTrainer:
         val_max_batches: Optional[int] = 16,
         lr_warmup_steps: int = 2000,
         lr_min_ratio: float = 0.1,
-        grad_clip_norm: Optional[float] = 1.0,
         weight_decay: float = 0.0,
         track_best_on_val: bool = False,
         extra_modules: Optional[Iterable[nn.Module]] = None,
@@ -146,7 +66,6 @@ class _BaseTrainer:
         max_warmup = max(0, self.total_steps - 1)
         self.lr_warmup_steps = max(0, min(max_warmup, int(lr_warmup_steps)))
         self.lr_min_ratio = min(1.0, max(0.0, float(lr_min_ratio)))
-        self.grad_clip_norm = None if grad_clip_norm is None else max(0.0, float(grad_clip_norm))
         self.weight_decay = max(0.0, float(weight_decay))
         self.track_best_on_val = bool(track_best_on_val)
         self.global_step = 0
@@ -170,7 +89,6 @@ class _BaseTrainer:
             params.extend(param for param in module.parameters() if param.requires_grad)
         if not params:
             raise RuntimeError("No trainable parameters found.")
-        self.trainable_params = params
         self.optimizer = torch.optim.AdamW(params, lr=float(lr), weight_decay=self.weight_decay)
         self.base_lrs = [float(group["lr"]) for group in self.optimizer.param_groups]
 
@@ -203,14 +121,13 @@ class _BaseTrainer:
             return float(step) / float(self.lr_warmup_steps)
         if self.total_steps <= self.lr_warmup_steps:
             return 1.0
-        decay_steps = max(1, self.total_steps - self.lr_warmup_steps)
-        progress = min(1.0, max(0.0, float(step - self.lr_warmup_steps) / float(decay_steps)))
+        decay_start = max(self.lr_warmup_steps, int(math.ceil(self.total_steps * 0.8)))
+        if step <= decay_start:
+            return 1.0
+        decay_steps = max(1, self.total_steps - decay_start)
+        progress = min(1.0, max(0.0, float(step - decay_start) / float(decay_steps)))
         cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
         return self.lr_min_ratio + (1.0 - self.lr_min_ratio) * cosine
-
-    def _clip_norm_for_step(self, step: int) -> Optional[float]:
-        _ = max(1, int(step))
-        return self.grad_clip_norm
 
     def _set_lr_for_step(self, step: int) -> float:
         lr_scale = self._lr_scale_for_step(step)
@@ -223,21 +140,8 @@ class _BaseTrainer:
         step = self.global_step + 1
         lr_scale = self._set_lr_for_step(step)
         loss.backward()
-        grad_norm = None
-        grad_clip_limit = self._clip_norm_for_step(step)
-        if grad_clip_limit is not None and grad_clip_limit > 0.0:
-            grad_norm = torch.nn.utils.clip_grad_norm_(self.trainable_params, grad_clip_limit)
-            if torch.is_tensor(grad_norm):
-                grad_norm = float(grad_norm.detach().item())
-            else:
-                grad_norm = float(grad_norm)
         self.optimizer.step()
-        metrics = {"lr_scale": float(lr_scale)}
-        if grad_clip_limit is not None:
-            metrics["grad_clip_limit"] = float(grad_clip_limit)
-        if grad_norm is not None:
-            metrics["grad_norm"] = float(grad_norm)
-        return metrics
+        return {"lr_scale": float(lr_scale)}
 
     def _memory_metrics(self) -> Dict[str, float]:
         if self.device.type != "cuda":
@@ -379,123 +283,6 @@ class _BaseTrainer:
         return
 
 
-class StylePretrainTrainer(_BaseTrainer):
-    def __init__(
-        self,
-        model: nn.Module,
-        device: torch.device,
-        *,
-        lr: float = 1e-4,
-        total_steps: int = 5000,
-        contrastive_temperature: float = 0.1,
-        log_every_steps: int = 100,
-        save_every_steps: Optional[int] = None,
-        val_every_steps: Optional[int] = None,
-        val_max_batches: Optional[int] = 16,
-        lr_warmup_steps: int = 2000,
-        lr_min_ratio: float = 0.1,
-        grad_clip_norm: Optional[float] = 1.0,
-        weight_decay: float = 0.0,
-    ) -> None:
-        self.contrastive_head = nn.Linear(int(model.patch_hidden_dim), int(model.contrastive_proj_dim))
-        super().__init__(
-            model,
-            device,
-            lr=lr,
-            total_steps=total_steps,
-            log_every_steps=log_every_steps,
-            save_every_steps=save_every_steps,
-            val_every_steps=val_every_steps,
-            val_max_batches=val_max_batches,
-            lr_warmup_steps=lr_warmup_steps,
-            lr_min_ratio=lr_min_ratio,
-            grad_clip_norm=grad_clip_norm,
-            weight_decay=weight_decay,
-            track_best_on_val=True,
-            extra_modules=[self.contrastive_head],
-        )
-        self.contrastive_temperature = float(contrastive_temperature)
-
-    def _encode_global(self, style_img: torch.Tensor, style_ref_mask: Optional[torch.Tensor]) -> torch.Tensor:
-        pack = self.model.encode_style(
-            style_img=style_img,
-            style_ref_mask=style_ref_mask,
-            need_style_tokens=False,
-            need_style_global=True,
-            detach_global_style_encoder=False,
-            detach_global_style=False,
-        )
-        if pack["style_global"] is None:
-            raise RuntimeError("style pretraining requires style_global features")
-        return pack["style_global"]
-
-    def _compute_losses(self, batch) -> Dict[str, torch.Tensor | float]:
-        style = batch["style_img"].to(self.device)
-        style_ref_mask = batch.get("style_ref_mask")
-        if style_ref_mask is not None:
-            style_ref_mask = style_ref_mask.to(self.device)
-        style_pos = batch["style_img_pos"].to(self.device)
-        style_ref_mask_pos = batch.get("style_ref_mask_pos")
-        if style_ref_mask_pos is not None:
-            style_ref_mask_pos = style_ref_mask_pos.to(self.device)
-
-        with self._autocast_context():
-            anchor = self._encode_global(style, style_ref_mask)
-            positive = self._encode_global(style_pos, style_ref_mask_pos)
-            anchor_proj = self.contrastive_head(anchor)
-            positive_proj = self.contrastive_head(positive)
-            loss = info_nce_loss(anchor_proj, positive_proj, self.contrastive_temperature)
-        return {
-            "loss": loss,
-            "loss_nce": loss,
-        }
-
-    def train_step(self, batch) -> Dict[str, float]:
-        self.model.train()
-        self.contrastive_head.train()
-        metrics = self._compute_losses(batch)
-        metrics.update(self._backward_and_step(metrics["loss"]))
-        return _metrics_to_floats(metrics)
-
-    def eval_step(self, batch) -> Dict[str, float]:
-        self.model.eval()
-        self.contrastive_head.eval()
-        with torch.no_grad():
-            metrics = self._compute_losses(batch)
-        return _metrics_to_floats(metrics)
-
-    def save(self, path: str | Path) -> None:
-        torch.save(
-            {
-                "stage": "style",
-                "global_style_state": self.model.global_style_state_dict(),
-                "contrastive_head_state": self.contrastive_head.state_dict(),
-                "model_config": self.model.export_config(),
-                "optimizer_state": self.optimizer.state_dict(),
-                "step": int(self.global_step),
-                "epoch": int(self.current_epoch),
-                "trainer_config": {
-                    "lr_warmup_steps": int(self.lr_warmup_steps),
-                    "lr_min_ratio": float(self.lr_min_ratio),
-                    "grad_clip_norm": 0.0 if self.grad_clip_norm is None else float(self.grad_clip_norm),
-                    "weight_decay": float(self.weight_decay),
-                },
-            },
-            Path(path),
-        )
-
-    def load(self, path: str | Path) -> None:
-        checkpoint = torch.load(path, map_location=self.device)
-        self.model.load_style_checkpoint(path)
-        if "contrastive_head_state" not in checkpoint:
-            raise RuntimeError("Style checkpoint is missing 'contrastive_head_state'.")
-        self.contrastive_head.load_state_dict(checkpoint["contrastive_head_state"], strict=True)
-        if isinstance(checkpoint, dict) and "optimizer_state" in checkpoint:
-            self.optimizer.load_state_dict(checkpoint["optimizer_state"])
-            self.global_step = int(checkpoint.get("step", 0))
-            self.current_epoch = int(checkpoint.get("epoch", 0))
-
-
 class FlowTrainer(_BaseTrainer):
     def __init__(
         self,
@@ -505,24 +292,17 @@ class FlowTrainer(_BaseTrainer):
         lr: float = 1e-4,
         total_steps: int = 100_000,
         lambda_rf: float = 1.0,
-        lambda_img_l1: float = 0.0,
-        lambda_img_perc: float = 0.0,
-        freeze_style_global: bool = True,
         flow_sample_steps: int = 20,
         flow_sampler: str = "flow_dpm",
         timestep_sampling: str = "logit_normal",
-        ema_decay: float = 0.9999,
         log_every_steps: int = 100,
         save_every_steps: Optional[int] = None,
         val_every_steps: Optional[int] = None,
         val_max_batches: Optional[int] = 16,
         lr_warmup_steps: int = 2000,
         lr_min_ratio: float = 0.1,
-        grad_clip_norm: Optional[float] = 1.0,
         weight_decay: float = 0.0,
     ) -> None:
-        if freeze_style_global:
-            model.freeze_style_global()
         super().__init__(
             model,
             device,
@@ -534,14 +314,10 @@ class FlowTrainer(_BaseTrainer):
             val_max_batches=val_max_batches,
             lr_warmup_steps=lr_warmup_steps,
             lr_min_ratio=lr_min_ratio,
-            grad_clip_norm=grad_clip_norm,
             weight_decay=weight_decay,
             track_best_on_val=True,
         )
         self.lambda_rf = float(lambda_rf)
-        self.lambda_img_l1 = max(0.0, float(lambda_img_l1))
-        self.lambda_img_perc = max(0.0, float(lambda_img_perc))
-        self.freeze_style_global = bool(freeze_style_global)
         self.flow_sample_steps = max(1, int(flow_sample_steps))
         self.flow_sampler = str(flow_sampler).strip().lower()
         if self.flow_sampler not in {"flow_dpm", "euler", "heun"}:
@@ -549,24 +325,6 @@ class FlowTrainer(_BaseTrainer):
         self.timestep_sampling = str(timestep_sampling).strip().lower()
         if self.timestep_sampling not in {"uniform", "logit_normal"}:
             raise ValueError(f"Unsupported timestep sampling: {timestep_sampling!r}")
-        self.ema_decay = max(0.0, float(ema_decay))
-        self.ema_model: Optional[nn.Module]
-        if self.ema_decay > 0.0:
-            self.ema_model = copy.deepcopy(self.model).to(self.device)
-            self.ema_model.eval()
-            for param in self.ema_model.parameters():
-                param.requires_grad_(False)
-        else:
-            self.ema_model = None
-
-    def _update_ema(self) -> None:
-        if self.ema_model is None:
-            return
-        with torch.no_grad():
-            for ema_param, param in zip(self.ema_model.parameters(), self.model.parameters()):
-                ema_param.mul_(self.ema_decay).add_(param.detach(), alpha=(1.0 - self.ema_decay))
-            for ema_buffer, buffer in zip(self.ema_model.buffers(), self.model.buffers()):
-                ema_buffer.copy_(buffer.detach())
 
     def _sample_training_timesteps(self, batch_size: int) -> torch.Tensor:
         if self.timestep_sampling == "uniform":
@@ -577,32 +335,13 @@ class FlowTrainer(_BaseTrainer):
         self,
         content: torch.Tensor,
         style: torch.Tensor,
-        style_ref_mask: Optional[torch.Tensor],
-        *,
-        model_override: Optional[nn.Module] = None,
-    ) -> tuple[torch.Tensor, dict[str, Optional[torch.Tensor]]]:
-        model_to_use = self.model if model_override is None else model_override
-        content_tokens = model_to_use.encode_content(content)
-        need_style_tokens = bool(getattr(model_to_use, "use_style_tokens", True))
-        style_pack = model_to_use.encode_style(
-            style_img=style,
-            style_ref_mask=style_ref_mask,
-            need_style_tokens=need_style_tokens,
-            need_style_global=True,
-            detach_global_style_encoder=self.freeze_style_global,
-            detach_global_style=self.freeze_style_global,
-        )
-        return content_tokens, style_pack
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.model.encode_content(content), self.model.encode_style(style)
 
-    def _compute_losses(self, batch, *, model_override: Optional[nn.Module] = None) -> Dict[str, torch.Tensor | float]:
+    def _compute_losses(self, batch) -> Dict[str, torch.Tensor | float]:
         target = batch["target"].to(self.device)
         content = batch["content"].to(self.device)
         style = batch["style_img"].to(self.device)
-        style_ref_mask = batch.get("style_ref_mask")
-        if style_ref_mask is not None:
-            style_ref_mask = style_ref_mask.to(self.device)
-
-        model_to_use = self.model if model_override is None else model_override
         with self._autocast_context():
             x1 = target
             x0 = torch.randn_like(x1)
@@ -611,61 +350,32 @@ class FlowTrainer(_BaseTrainer):
             x_t = (1.0 - t_view) * x0 + t_view * x1
             v_t = x1 - x0
 
-            content_tokens, style_pack = self._encode_conditions(
-                content,
-                style,
-                style_ref_mask,
-                model_override=model_to_use,
-            )
-            if style_pack["style_global"] is None:
-                raise RuntimeError("flow training requires style_global")
-            pred_v = model_to_use.predict_flow(
+            content_tokens, style_memory = self._encode_conditions(content, style)
+            pred_v = self.model.predict_flow(
                 x_t,
                 timesteps,
                 content_tokens=content_tokens,
-                style_tokens=style_pack["style_tokens"],
-                style_global=style_pack["style_global"],
-                style_ref_mask=style_pack["style_ref_mask"],
+                style_memory=style_memory,
             )
             loss_rf = F.mse_loss(pred_v, v_t)
-
-            x1_hat = x_t + (1.0 - t_view) * pred_v
-            loss_img_l1 = (
-                F.l1_loss(x1_hat, target)
-                if self.lambda_img_l1 > 0.0
-                else target.new_zeros(())
-            )
-            loss_img_perc = (
-                glyph_perceptual_loss(x1_hat, target)
-                if self.lambda_img_perc > 0.0
-                else target.new_zeros(())
-            )
-
             loss = self.lambda_rf * loss_rf
-            loss = loss + self.lambda_img_l1 * loss_img_l1 + self.lambda_img_perc * loss_img_perc
 
         return {
             "loss": loss,
             "loss_rf": loss_rf,
-            "loss_img_l1": loss_img_l1,
-            "loss_img_perc": loss_img_perc,
             "t_mean": timesteps.mean(),
-            "style_global_frozen": float(self.freeze_style_global),
-            **_style_gate_metrics(model_to_use),
         }
 
     def train_step(self, batch) -> Dict[str, float]:
         self.model.train()
         metrics = self._compute_losses(batch)
         metrics.update(self._backward_and_step(metrics["loss"]))
-        self._update_ema()
         return _metrics_to_floats(metrics)
 
     def eval_step(self, batch) -> Dict[str, float]:
-        model_to_use = self.ema_model if self.ema_model is not None else self.model
-        model_to_use.eval()
+        self.model.eval()
         with torch.no_grad():
-            metrics = self._compute_losses(batch, model_override=model_to_use)
+            metrics = self._compute_losses(batch)
         return _metrics_to_floats(metrics)
 
     def _flow_dpm_step(
@@ -676,18 +386,14 @@ class FlowTrainer(_BaseTrainer):
         dt: float,
         *,
         content_tokens: torch.Tensor,
-        style_tokens: torch.Tensor | None,
-        style_global: torch.Tensor,
-        style_ref_mask: Optional[torch.Tensor],
+        style_memory: torch.Tensor,
     ) -> torch.Tensor:
         dt_tensor = sample.new_tensor(float(dt))
         velocity_0 = model_to_use.predict_flow(
             sample,
             timesteps,
             content_tokens=content_tokens,
-            style_tokens=style_tokens,
-            style_global=style_global,
-            style_ref_mask=style_ref_mask,
+            style_memory=style_memory,
         )
         mid_sample = sample + 0.5 * dt_tensor * velocity_0
         mid_t = (timesteps + 0.5 * dt_tensor).clamp_(0.0, 1.0)
@@ -695,9 +401,7 @@ class FlowTrainer(_BaseTrainer):
             mid_sample,
             mid_t,
             content_tokens=content_tokens,
-            style_tokens=style_tokens,
-            style_global=style_global,
-            style_ref_mask=style_ref_mask,
+            style_memory=style_memory,
         )
         return sample + dt_tensor * velocity_mid
 
@@ -707,17 +411,12 @@ class FlowTrainer(_BaseTrainer):
         content: torch.Tensor,
         *,
         style_img: torch.Tensor,
-        style_ref_mask: Optional[torch.Tensor] = None,
         num_inference_steps: Optional[int] = None,
         sampler: Optional[str] = None,
-        use_ema: bool = True,
     ) -> torch.Tensor:
-        model_to_use = self.ema_model if use_ema and self.ema_model is not None else self.model
-        model_to_use.eval()
+        self.model.eval()
         content = content.to(self.device)
         style_img = style_img.to(self.device)
-        if style_ref_mask is not None:
-            style_ref_mask = style_ref_mask.to(self.device)
 
         step_count = self.flow_sample_steps if num_inference_steps is None else max(1, int(num_inference_steps))
         sampler_name = self.flow_sampler if sampler is None else str(sampler).strip().lower()
@@ -733,14 +432,7 @@ class FlowTrainer(_BaseTrainer):
             device=self.device,
         )
         with self._autocast_context():
-            content_tokens, style_pack = self._encode_conditions(
-                content,
-                style_img,
-                style_ref_mask,
-                model_override=model_to_use,
-            )
-            if style_pack["style_global"] is None:
-                raise RuntimeError("flow sampling requires style_global")
+            content_tokens, style_memory = self._encode_conditions(content, style_img)
             for step_idx in range(step_count):
                 t = torch.full(
                     (batch_size,),
@@ -749,23 +441,19 @@ class FlowTrainer(_BaseTrainer):
                     dtype=torch.float32,
                 )
                 if sampler_name == "euler":
-                    pred_v = model_to_use.predict_flow(
+                    pred_v = self.model.predict_flow(
                         sample,
                         t,
                         content_tokens=content_tokens,
-                        style_tokens=style_pack["style_tokens"],
-                        style_global=style_pack["style_global"],
-                        style_ref_mask=style_pack["style_ref_mask"],
+                        style_memory=style_memory,
                     )
                     sample = sample + dt * pred_v
                 elif sampler_name == "heun":
-                    pred_v = model_to_use.predict_flow(
+                    pred_v = self.model.predict_flow(
                         sample,
                         t,
                         content_tokens=content_tokens,
-                        style_tokens=style_pack["style_tokens"],
-                        style_global=style_pack["style_global"],
-                        style_ref_mask=style_pack["style_ref_mask"],
+                        style_memory=style_memory,
                     )
                     t_next = torch.full(
                         (batch_size,),
@@ -774,25 +462,21 @@ class FlowTrainer(_BaseTrainer):
                         dtype=torch.float32,
                     ).clamp_(0.0, 1.0)
                     sample_euler = sample + dt * pred_v
-                    pred_v_next = model_to_use.predict_flow(
+                    pred_v_next = self.model.predict_flow(
                         sample_euler,
                         t_next,
                         content_tokens=content_tokens,
-                        style_tokens=style_pack["style_tokens"],
-                        style_global=style_pack["style_global"],
-                        style_ref_mask=style_pack["style_ref_mask"],
+                        style_memory=style_memory,
                     )
                     sample = sample + 0.5 * dt * (pred_v + pred_v_next)
                 else:
                     sample = self._flow_dpm_step(
-                        model_to_use,
+                        self.model,
                         sample,
                         t,
                         dt,
                         content_tokens=content_tokens,
-                        style_tokens=style_pack["style_tokens"],
-                        style_global=style_pack["style_global"],
-                        style_ref_mask=style_pack["style_ref_mask"],
+                        style_memory=style_memory,
                     )
         return sample.clamp(-1.0, 1.0).float()
 
@@ -808,15 +492,11 @@ class FlowTrainer(_BaseTrainer):
                 "flow_sample_steps": int(self.flow_sample_steps),
                 "flow_sampler": str(self.flow_sampler),
                 "timestep_sampling": str(self.timestep_sampling),
-                "ema_decay": float(self.ema_decay),
                 "lr_warmup_steps": int(self.lr_warmup_steps),
                 "lr_min_ratio": float(self.lr_min_ratio),
-                "grad_clip_norm": 0.0 if self.grad_clip_norm is None else float(self.grad_clip_norm),
                 "weight_decay": float(self.weight_decay),
             },
         }
-        if self.ema_model is not None:
-            payload["ema_model_state"] = self.ema_model.state_dict()
         torch.save(payload, Path(path))
 
     def load(self, path: str | Path) -> None:
@@ -832,12 +512,6 @@ class FlowTrainer(_BaseTrainer):
                 self.flow_sampler = str(trainer_config["flow_sampler"]).strip().lower()
             if "timestep_sampling" in trainer_config:
                 self.timestep_sampling = str(trainer_config["timestep_sampling"]).strip().lower()
-        if self.ema_model is not None:
-            ema_state = checkpoint.get("ema_model_state")
-            if ema_state is not None:
-                self.ema_model.load_state_dict(ema_state, strict=True)
-            else:
-                self.ema_model.load_state_dict(self.model.state_dict(), strict=True)
         if "optimizer_state" in checkpoint:
             try:
                 self.optimizer.load_state_dict(checkpoint["optimizer_state"])
@@ -852,13 +526,9 @@ class FlowTrainer(_BaseTrainer):
         content = batch["content"][:8].to(self.device)
         target = batch["target"][:8].to(self.device)
         style = batch["style_img"][:8].to(self.device)
-        style_ref_mask = batch.get("style_ref_mask")
-        if style_ref_mask is not None:
-            style_ref_mask = style_ref_mask[:8].to(self.device)
         sample = self.flow_sample(
             content,
             style_img=style,
-            style_ref_mask=style_ref_mask,
             num_inference_steps=self.flow_sample_steps,
         )
         style_preview = style[:, 0]

@@ -1,3 +1,8 @@
+# Archived
+
+This document describes the removed dual-branch `global_style + style_tokens` architecture and is kept only for history.
+Current code follows [docs/i2i_unified_k_style_memory_compact.md](/scratch/yangximing/code/ass5-exp6/DiffuFont/docs/i2i_unified_k_style_memory_compact.md): single 32x32 style encoder, unified `K` style memory, no explicit global/local split.
+
 # DiffuFont Current Model Architecture
 
 This document describes the current code path in `/scratch/yangximing/code/ass5-exp6/DiffuFont` after the latest style-branch refactor.

@@ -37,7 +37,6 @@ def collate_fn(samples):
         "content": torch.stack([sample["content"] for sample in samples], dim=0),
         "target": torch.stack([sample["target"] for sample in samples], dim=0),
         "style_img": torch.stack([sample["style_img"] for sample in samples], dim=0),
-        "style_ref_mask": torch.stack([sample["style_ref_mask"] for sample in samples], dim=0),
     }
 
 
@@ -68,8 +67,6 @@ def stage_record(device: torch.device, name: str, fn, records: list[dict]) -> ob
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-root", type=Path, default=PROJECT_ROOT)
-    parser.add_argument("--style-checkpoint", type=Path, default=None)
-    parser.add_argument("--freeze-style-global", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--device", type=str, default="cuda:1")
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--style-ref-count", type=int, default=8)
@@ -90,7 +87,6 @@ def main() -> None:
         project_root=args.data_root,
         max_fonts=int(args.max_fonts),
         style_ref_count=int(args.style_ref_count),
-        include_positive_style=False,
         random_seed=int(args.seed),
         font_split=str(args.font_split),
         font_split_seed=font_split_seed,
@@ -114,15 +110,12 @@ def main() -> None:
     batch = next(iter(dataloader))
 
     model = SourcePartRefDiT()
-    if args.style_checkpoint is not None:
-        model.load_style_checkpoint(args.style_checkpoint)
     trainer = FlowTrainer(
         model,
         device,
         lr=1e-4,
         total_steps=1,
         lambda_rf=1.0,
-        freeze_style_global=bool(args.freeze_style_global),
         flow_sample_steps=24,
         log_every_steps=1,
         save_every_steps=None,
@@ -133,7 +126,6 @@ def main() -> None:
     target = batch["target"].to(device)
     content = batch["content"].to(device)
     style = batch["style_img"].to(device)
-    style_ref_mask = batch["style_ref_mask"].to(device)
 
     records: list[dict] = []
     torch.cuda.empty_cache()
@@ -148,21 +140,10 @@ def main() -> None:
         style_pack = stage_record(
             device,
             "style_encode",
-            lambda: trainer.model.encode_style(
-                style_img=style,
-                style_ref_mask=style_ref_mask,
-                need_style_tokens=True,
-                need_style_global=True,
-                detach_global_style_encoder=trainer.freeze_style_global,
-                detach_global_style=trainer.freeze_style_global,
-            ),
+            lambda: trainer.model.encode_style(style_img=style),
             records,
         )
-        style_tokens = style_pack["style_tokens"]
-        style_global = style_pack["style_global"]
-        style_valid_mask = style_pack["style_ref_mask"]
-        if style_tokens is None or style_global is None or style_valid_mask is None:
-            raise RuntimeError("profile_memory requires style_tokens and style_global")
+        style_memory = style_pack
         pred_v = stage_record(
             device,
             "pixeldt_backbone",
@@ -170,9 +151,7 @@ def main() -> None:
                 x_t,
                 timesteps,
                 content_tokens=content_tokens,
-                style_tokens=style_tokens,
-                style_global=style_global,
-                style_ref_mask=style_valid_mask,
+                style_memory=style_memory,
             ),
             records,
         )
@@ -188,7 +167,6 @@ def main() -> None:
             "style_ref_count": int(args.style_ref_count),
             "max_fonts": int(args.max_fonts),
             "num_workers": int(args.num_workers),
-            "freeze_style_global": bool(args.freeze_style_global),
         },
         "largest_peak_stage": max(records, key=lambda row: row["peak_delta_gb"]),
         "largest_alloc_delta_stage": max(records, key=lambda row: row["allocated_delta_gb"]),

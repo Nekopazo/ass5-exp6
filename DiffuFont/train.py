@@ -14,8 +14,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Sampler
 
-from dataset import FontImageDataset, UniqueFontBatchSampler
-from models.model import FlowTrainer, StylePretrainTrainer
+from dataset import FontImageDataset, GroupedCharFontBatchSampler, UniqueFontBatchSampler
+from models.model import FlowTrainer
 from models.sdpa_attention import describe_torch_sdpa_backends, enable_torch_sdpa_backends
 from models.source_part_ref_dit import SourcePartRefDiT
 from style_augment import build_base_glyph_transform
@@ -45,17 +45,12 @@ def resolve_device(raw_device: str) -> torch.device:
 
 
 def collate_fn(samples) -> Dict[str, torch.Tensor]:
-    batch = {
+    return {
         "font": [sample["font"] for sample in samples],
         "content": torch.stack([sample["content"] for sample in samples], dim=0),
         "target": torch.stack([sample["target"] for sample in samples], dim=0),
         "style_img": torch.stack([sample["style_img"] for sample in samples], dim=0),
-        "style_ref_mask": torch.stack([sample["style_ref_mask"] for sample in samples], dim=0),
     }
-    if "style_img_pos" in samples[0]:
-        batch["style_img_pos"] = torch.stack([sample["style_img_pos"] for sample in samples], dim=0)
-        batch["style_ref_mask_pos"] = torch.stack([sample["style_ref_mask_pos"] for sample in samples], dim=0)
-    return batch
 
 
 def build_dataloader(
@@ -65,10 +60,14 @@ def build_dataloader(
     num_workers: int,
     device: torch.device,
     seed: int,
-    use_unique_font_batches: bool,
-    shuffle: bool,
+    sampling_mode: str,
+    grouped_char_count: int = 8,
+    grouped_fonts_per_char: int = 0,
     sampler: Sampler[int] | None = None,
 ) -> DataLoader:
+    sampling_mode = str(sampling_mode).strip().lower()
+    if sampling_mode not in {"shuffle", "sequential", "unique_font", "grouped_char_font"}:
+        raise ValueError(f"Unsupported sampling_mode: {sampling_mode!r}")
     dataloader_kwargs = {
         "dataset": dataset,
         "num_workers": int(num_workers),
@@ -76,7 +75,7 @@ def build_dataloader(
         "collate_fn": collate_fn,
         "worker_init_fn": seed_worker if int(num_workers) > 0 else None,
     }
-    if use_unique_font_batches:
+    if sampling_mode == "unique_font":
         if sampler is not None:
             raise ValueError("sampler cannot be combined with unique-font batch sampling")
         batch_sampler = UniqueFontBatchSampler(
@@ -86,9 +85,21 @@ def build_dataloader(
             drop_last=False,
         )
         return DataLoader(batch_sampler=batch_sampler, **dataloader_kwargs)
+    if sampling_mode == "grouped_char_font":
+        if sampler is not None:
+            raise ValueError("sampler cannot be combined with grouped-char-font batch sampling")
+        batch_sampler = GroupedCharFontBatchSampler(
+            dataset,
+            batch_size=int(batch_size),
+            seed=int(seed),
+            drop_last=False,
+            grouped_char_count=int(grouped_char_count),
+            grouped_fonts_per_char=int(grouped_fonts_per_char),
+        )
+        return DataLoader(batch_sampler=batch_sampler, **dataloader_kwargs)
     return DataLoader(
         batch_size=int(batch_size),
-        shuffle=bool(shuffle) and sampler is None,
+        shuffle=(sampling_mode == "shuffle") and sampler is None,
         sampler=sampler,
         **dataloader_kwargs,
     )
@@ -133,8 +144,7 @@ def build_sample_batch(
         num_workers=0,
         device=device,
         seed=seed,
-        use_unique_font_batches=True,
-        shuffle=False,
+        sampling_mode="unique_font",
     )
     seen_batch = slice_batch(next(iter(seen_loader)), seen_count)
     if val_dataset is None or len(val_dataset.font_names) == 0:
@@ -147,8 +157,7 @@ def build_sample_batch(
         num_workers=0,
         device=device,
         seed=seed + 1000,
-        use_unique_font_batches=True,
-        shuffle=False,
+        sampling_mode="unique_font",
     )
     unseen_batch = slice_batch(next(iter(unseen_loader)), unseen_count)
     return concat_batches(seen_batch, unseen_batch)
@@ -163,7 +172,8 @@ def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
         encoder_depth=int(args.encoder_depth),
         encoder_heads=int(args.encoder_heads),
         encoder_mlp_ratio=float(args.encoder_mlp_ratio),
-        style_global_dim=int(args.style_global_dim),
+        style_feature_dim=int(args.style_feature_dim),
+        style_memory_k=int(args.style_memory_k),
         patch_hidden_dim=int(args.patch_hidden_dim),
         patch_depth=int(args.patch_depth),
         patch_heads=int(args.patch_heads),
@@ -173,24 +183,15 @@ def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
         pit_heads=int(args.pit_heads),
         pit_mlp_ratio=float(args.pit_mlp_ratio),
         style_fusion_start=int(args.style_fusion_start),
-        use_style_tokens=bool(args.use_style_tokens),
-        contrastive_proj_dim=int(args.contrastive_proj_dim),
+        style_fusion_end=int(args.style_fusion_end),
     )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stage", type=str, default="flow", choices=["style", "flow"])
     parser.add_argument("--data-root", type=Path, default=Path("."))
     parser.add_argument("--save-dir", type=Path, default=Path("checkpoints"))
     parser.add_argument("--resume", type=Path, default=None)
-    parser.add_argument("--style-checkpoint", type=Path, default=None)
-    parser.add_argument(
-        "--freeze-style-global",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Only used in flow stage. If true, freeze the global style encoder loaded from style pretraining.",
-    )
 
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch", type=int, default=32)
@@ -202,6 +203,14 @@ def main() -> None:
     parser.add_argument("--font-train-ratio", type=float, default=0.9)
     parser.add_argument("--max-fonts", type=int, default=0)
     parser.add_argument("--style-ref-count", type=int, default=8)
+    parser.add_argument(
+        "--train-sampling",
+        type=str,
+        default="shuffle",
+        choices=["shuffle", "unique_font", "grouped_char_font", "sequential"],
+    )
+    parser.add_argument("--grouped-char-count", type=int, default=8)
+    parser.add_argument("--grouped-fonts-per-char", type=int, default=0)
     parser.add_argument("--image-size", type=int, default=128)
 
     parser.add_argument("--patch-size", type=int, default=16)
@@ -209,7 +218,8 @@ def main() -> None:
     parser.add_argument("--encoder-depth", type=int, default=4)
     parser.add_argument("--encoder-heads", type=int, default=8)
     parser.add_argument("--encoder-mlp-ratio", type=float, default=4.0)
-    parser.add_argument("--style-global-dim", type=int, default=256)
+    parser.add_argument("--style-feature-dim", type=int, default=256)
+    parser.add_argument("--style-memory-k", type=int, default=4)
     parser.add_argument("--patch-hidden-dim", type=int, default=512)
     parser.add_argument("--patch-depth", type=int, default=12)
     parser.add_argument("--patch-heads", type=int, default=8)
@@ -218,30 +228,20 @@ def main() -> None:
     parser.add_argument("--pit-depth", type=int, default=2)
     parser.add_argument("--pit-heads", type=int, default=8)
     parser.add_argument("--pit-mlp-ratio", type=float, default=4.0)
-    parser.add_argument("--style-fusion-start", type=int, default=8)
-    parser.add_argument(
-        "--use-style-tokens",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="If false, disable the local style-token branch and keep only content + global style conditioning.",
-    )
-    parser.add_argument("--contrastive-proj-dim", type=int, default=128)
+    parser.add_argument("--style-fusion-start", type=int, default=4)
+    parser.add_argument("--style-fusion-end", type=int, default=8)
 
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--lr-warmup-steps", type=int, default=2000)
     parser.add_argument("--lr-min-ratio", type=float, default=0.1)
     parser.add_argument("--weight-decay", type=float, default=0.0)
-    parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--total-steps", type=int, default=0)
     parser.add_argument("--log-every-steps", type=int, default=100)
     parser.add_argument("--val-every-steps", type=int, default=100)
     parser.add_argument("--val-max-batches", type=int, default=16)
     parser.add_argument("--save-every-steps", type=int, default=0)
     parser.add_argument("--sample-every-steps", type=int, default=0)
-    parser.add_argument("--contrastive-temperature", type=float, default=0.1)
     parser.add_argument("--flow-lambda-rf", type=float, default=1.0)
-    parser.add_argument("--flow-lambda-img-l1", type=float, default=0.0)
-    parser.add_argument("--flow-lambda-img-perc", type=float, default=0.0)
     parser.add_argument("--flow-sample-steps", type=int, default=20)
     parser.add_argument("--flow-sampler", type=str, default="flow_dpm", choices=["flow_dpm", "euler", "heun"])
     parser.add_argument(
@@ -250,24 +250,21 @@ def main() -> None:
         default="logit_normal",
         choices=["logit_normal", "uniform"],
     )
-    parser.add_argument("--ema-decay", type=float, default=0.9999)
     args = parser.parse_args()
 
     set_global_seed(int(args.seed))
     enable_torch_sdpa_backends()
     device = resolve_device(args.device)
-    print(f"[train] stage={args.stage} device={device} seed={int(args.seed)}")
+    print(f"[train] device={device} seed={int(args.seed)}")
     print(f"[train] attention_backend={describe_torch_sdpa_backends()}")
 
     font_split_seed = int(args.seed) if args.font_split_seed is None else int(args.font_split_seed)
-    include_positive_style = args.stage == "style"
     glyph_transform = build_base_glyph_transform(image_size=int(args.image_size))
 
     dataset = FontImageDataset(
         project_root=args.data_root,
         max_fonts=int(args.max_fonts),
         style_ref_count=int(args.style_ref_count),
-        include_positive_style=include_positive_style,
         random_seed=int(args.seed),
         font_split=str(args.font_split),
         font_split_seed=font_split_seed,
@@ -281,7 +278,6 @@ def main() -> None:
             project_root=args.data_root,
             max_fonts=int(args.max_fonts),
             style_ref_count=int(args.style_ref_count),
-            include_positive_style=include_positive_style,
             random_seed=int(args.seed),
             font_split="test",
             font_split_seed=font_split_seed,
@@ -290,15 +286,15 @@ def main() -> None:
             style_transform=glyph_transform,
         )
 
-    use_unique_font_batches = args.stage == "style"
     dataloader = build_dataloader(
         dataset,
         batch_size=int(args.batch),
         num_workers=int(args.num_workers),
         device=device,
         seed=int(args.seed),
-        use_unique_font_batches=use_unique_font_batches,
-        shuffle=True,
+        sampling_mode=str(args.train_sampling),
+        grouped_char_count=int(args.grouped_char_count),
+        grouped_fonts_per_char=int(args.grouped_fonts_per_char),
     )
     val_dataloader = None
     if val_dataset is not None:
@@ -308,83 +304,49 @@ def main() -> None:
             num_workers=int(args.num_workers),
             device=device,
             seed=int(args.seed) + 1,
-            use_unique_font_batches=use_unique_font_batches,
-            shuffle=False,
+            sampling_mode="sequential",
         )
 
     total_steps = int(args.total_steps)
     if total_steps <= 0:
-        if args.stage == "style":
-            total_steps = 5000
-        else:
-            total_steps = max(1, len(dataloader) * int(args.epochs))
+        total_steps = max(1, len(dataloader) * int(args.epochs))
     resolved_epochs = max(1, int(args.epochs))
     if len(dataloader) > 0:
         resolved_epochs = max(resolved_epochs, math.ceil(total_steps / len(dataloader)))
+    resolved_lr_decay_start_step = max(int(args.lr_warmup_steps), int(math.ceil(total_steps * 0.8)))
 
     model = build_model(args)
-    if args.style_checkpoint is not None and args.resume is None and args.stage == "flow":
-        model.load_style_checkpoint(args.style_checkpoint)
-        print(f"[train] loaded style checkpoint: {args.style_checkpoint}")
-    if args.stage == "flow" and bool(args.freeze_style_global) and args.resume is None and args.style_checkpoint is None:
-        raise ValueError("Flow stage cannot freeze global style without --style-checkpoint unless resuming.")
 
     save_every_steps = int(args.save_every_steps)
     if save_every_steps <= 0:
-        save_every_steps = 1000 if args.stage == "style" else 5000
+        save_every_steps = 5000
     sample_every_steps = int(args.sample_every_steps)
     if sample_every_steps <= 0:
-        sample_every_steps = 0 if args.stage == "style" else 300
+        sample_every_steps = 300
 
-    if args.stage == "style":
-        trainer = StylePretrainTrainer(
-            model,
-            device,
-            lr=float(args.lr),
-            total_steps=total_steps,
-            contrastive_temperature=float(args.contrastive_temperature),
-            log_every_steps=int(args.log_every_steps),
-            save_every_steps=save_every_steps,
-            val_every_steps=int(args.val_every_steps),
-            val_max_batches=int(args.val_max_batches),
-            lr_warmup_steps=int(args.lr_warmup_steps),
-            lr_min_ratio=float(args.lr_min_ratio),
-            weight_decay=float(args.weight_decay),
-            grad_clip_norm=float(args.grad_clip_norm),
-        )
-    else:
-        trainer = FlowTrainer(
-            model,
-            device,
-            lr=float(args.lr),
-            total_steps=total_steps,
-            lambda_rf=float(args.flow_lambda_rf),
-            lambda_img_l1=float(args.flow_lambda_img_l1),
-            lambda_img_perc=float(args.flow_lambda_img_perc),
-            freeze_style_global=bool(args.freeze_style_global),
-            flow_sample_steps=int(args.flow_sample_steps),
-            flow_sampler=str(args.flow_sampler),
-            timestep_sampling=str(args.timestep_sampling),
-            ema_decay=float(args.ema_decay),
-            log_every_steps=int(args.log_every_steps),
-            save_every_steps=save_every_steps,
-            val_every_steps=int(args.val_every_steps),
-            val_max_batches=int(args.val_max_batches),
-            lr_warmup_steps=int(args.lr_warmup_steps),
-            lr_min_ratio=float(args.lr_min_ratio),
-            weight_decay=float(args.weight_decay),
-            grad_clip_norm=float(args.grad_clip_norm),
-        )
+    trainer = FlowTrainer(
+        model,
+        device,
+        lr=float(args.lr),
+        total_steps=total_steps,
+        lambda_rf=float(args.flow_lambda_rf),
+        flow_sample_steps=int(args.flow_sample_steps),
+        flow_sampler=str(args.flow_sampler),
+        timestep_sampling=str(args.timestep_sampling),
+        log_every_steps=int(args.log_every_steps),
+        save_every_steps=save_every_steps,
+        val_every_steps=int(args.val_every_steps),
+        val_max_batches=int(args.val_max_batches),
+        lr_warmup_steps=int(args.lr_warmup_steps),
+        lr_min_ratio=float(args.lr_min_ratio),
+        weight_decay=float(args.weight_decay),
+    )
 
     if args.resume is not None:
         trainer.load(args.resume)
         print(f"[train] resumed from {args.resume}")
 
-    trainer.sample_batch = (
-        build_sample_batch(dataset, val_dataset, device=device, seed=int(args.seed))
-        if args.stage == "flow"
-        else None
-    )
+    trainer.sample_batch = build_sample_batch(dataset, val_dataset, device=device, seed=int(args.seed))
     trainer.sample_every_steps = sample_every_steps if sample_every_steps > 0 else None
     trainer.sample_dir = args.save_dir / "samples"
 
@@ -393,6 +355,9 @@ def main() -> None:
     run_config["resolved_font_split_seed"] = int(font_split_seed)
     run_config["resolved_epochs"] = int(resolved_epochs)
     run_config["computed_total_steps"] = int(total_steps)
+    run_config["lr_schedule"] = "warmup_hold_then_final20pct_cosine"
+    run_config["lr_tail_decay_portion"] = 0.2
+    run_config["resolved_lr_decay_start_step"] = int(resolved_lr_decay_start_step)
     run_config["train_fonts"] = int(len(dataset.font_names))
     run_config["train_samples"] = int(len(dataset.samples))
     run_config["val_fonts"] = 0 if val_dataset is None else int(len(val_dataset.font_names))
@@ -404,6 +369,11 @@ def main() -> None:
     )
     print(f"[train] save_dir={args.save_dir}")
     print(f"[train] total_steps={total_steps} epochs={resolved_epochs}")
+    print(
+        "[train] lr_schedule=warmup_hold_then_final20pct_cosine "
+        f"warmup_steps={int(args.lr_warmup_steps)} decay_start_step={resolved_lr_decay_start_step} "
+        f"lr_min_ratio={float(args.lr_min_ratio)}"
+    )
 
     trainer.fit(
         dataloader,
