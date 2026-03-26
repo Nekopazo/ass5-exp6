@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pixel-space patch-level + PiT backbone for glyph generation."""
+"""Latent DiT backbone for content+style glyph flow generation."""
 
 from __future__ import annotations
 
@@ -46,21 +46,14 @@ def timestep_embedding(timesteps: torch.Tensor, dim: int, max_period: int = 10_0
     return embedding
 
 
-class RMSNorm(nn.Module):
-    def __init__(self, hidden_dim: int, *, eps: float = 1e-6) -> None:
-        super().__init__()
-        self.hidden_dim = int(hidden_dim)
-        self.eps = float(eps)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        denom = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).rsqrt()
-        return x * denom
+def modulate(hidden_states: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    return hidden_states * (1.0 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 
 class FeedForward(nn.Module):
     def __init__(self, hidden_dim: int, mlp_ratio: float) -> None:
         super().__init__()
-        inner_dim = max(hidden_dim, int(hidden_dim * mlp_ratio))
+        inner_dim = int(hidden_dim * mlp_ratio)
         self.net = nn.Sequential(
             nn.Linear(hidden_dim, inner_dim),
             nn.GELU(approximate="tanh"),
@@ -71,315 +64,235 @@ class FeedForward(nn.Module):
         return self.net(x)
 
 
-def modulate(x: torch.Tensor, beta: torch.Tensor, gamma: torch.Tensor) -> torch.Tensor:
-    return gamma.unsqueeze(1) * x + beta.unsqueeze(1)
-
-
-def zero_init_linear(linear: nn.Linear) -> None:
-    nn.init.zeros_(linear.weight)
-    if linear.bias is not None:
-        nn.init.zeros_(linear.bias)
-
-
-class StyleMemoryCrossAttention(nn.Module):
-    def __init__(self, hidden_dim: int, num_heads: int) -> None:
-        super().__init__()
-        self.query_norm = RMSNorm(hidden_dim)
-        self.memory_norm = RMSNorm(hidden_dim)
-        self.attn = SDPAAttention(hidden_dim, num_heads)
-
-    def forward(self, x: torch.Tensor, *, style_memory: torch.Tensor) -> torch.Tensor:
-        if style_memory.dim() != 3:
-            raise ValueError(f"style_memory must have shape [B, K, D], got {tuple(style_memory.shape)}")
-        if style_memory.size(0) != x.size(0) or style_memory.size(-1) != x.size(-1):
-            raise ValueError(
-                "style_memory shape mismatch: "
-                f"x={tuple(x.shape)} style_memory={tuple(style_memory.shape)}"
-            )
-        query = self.query_norm(x)
-        memory = self.memory_norm(style_memory)
-        out, _ = self.attn(query, memory, memory, need_weights=False)
-        return out
-
-
-class PatchConditionedBlock(nn.Module):
+class GlyphDiTBlock(nn.Module):
     def __init__(
         self,
         hidden_dim: int,
         num_heads: int,
         mlp_ratio: float,
         *,
-        use_style: bool,
+        use_content_cross_attn: bool = True,
+        use_style_cross_attn: bool = True,
     ) -> None:
         super().__init__()
-        self.use_style = bool(use_style)
-        self.norm_attn = RMSNorm(hidden_dim)
-        self.norm_mlp = RMSNorm(hidden_dim)
-        self.self_attn = SDPAAttention(hidden_dim, num_heads)
-        self.mlp = FeedForward(hidden_dim, mlp_ratio)
-        self.cond_proj = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim * 6),
+        self.use_content_cross_attn = bool(use_content_cross_attn)
+        self.use_style_cross_attn = bool(use_style_cross_attn)
+        self.norm_self = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
+        self.norm_content = (
+            nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
+            if self.use_content_cross_attn
+            else None
         )
-        self.style_cross_attn = StyleMemoryCrossAttention(hidden_dim, num_heads) if self.use_style else None
-        zero_init_linear(self.cond_proj[-1])
+        self.norm_style = (
+            nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
+            if self.use_style_cross_attn
+            else None
+        )
+        self.norm_mlp = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
+
+        self.self_attn = SDPAAttention(hidden_dim, num_heads)
+        self.content_attn = SDPAAttention(hidden_dim, num_heads) if self.use_content_cross_attn else None
+        self.style_attn = SDPAAttention(hidden_dim, num_heads) if self.use_style_cross_attn else None
+        self.mlp = FeedForward(hidden_dim, mlp_ratio)
+        self.style_residual_gate = (
+            nn.Parameter(torch.tensor(0.1, dtype=torch.float32))
+            if self.use_style_cross_attn
+            else None
+        )
+
+        self.modulation_chunk_count = 6
+        if self.use_content_cross_attn:
+            self.modulation_chunk_count += 3
+        if self.use_style_cross_attn:
+            self.modulation_chunk_count += 3
+
+        self.modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim * self.modulation_chunk_count),
+        )
+        nn.init.zeros_(self.modulation[-1].weight)
+        nn.init.zeros_(self.modulation[-1].bias)
 
     def forward(
         self,
-        x: torch.Tensor,
+        latent_tokens: torch.Tensor,
         *,
-        time_cond: torch.Tensor,
-        style_memory: torch.Tensor | None,
+        cond: torch.Tensor,
+        content_tokens: torch.Tensor | None,
+        style_tokens: torch.Tensor | None,
+        style_token_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        beta1, gamma1, alpha1, beta2, gamma2, alpha2 = self.cond_proj(time_cond).chunk(6, dim=-1)
-        attn_in = modulate(self.norm_attn(x), beta1, gamma1)
-        attn_out, _ = self.self_attn(attn_in, attn_in, attn_in, need_weights=False)
-        x = x + alpha1.unsqueeze(1) * attn_out
-        if self.use_style:
-            if style_memory is None or self.style_cross_attn is None:
-                raise RuntimeError("style_memory must be provided for style-enabled patch blocks")
-            style_out = self.style_cross_attn(x, style_memory=style_memory)
-            x = x + style_out
-        mlp_out = self.mlp(modulate(self.norm_mlp(x), beta2, gamma2))
-        x = x + alpha2.unsqueeze(1) * mlp_out
+        modulation_chunks = self.modulation(cond).chunk(self.modulation_chunk_count, dim=-1)
+        chunk_idx = 0
+
+        shift_self = modulation_chunks[chunk_idx]
+        scale_self = modulation_chunks[chunk_idx + 1]
+        gate_self = modulation_chunks[chunk_idx + 2]
+        chunk_idx += 3
+
+        shift_content = scale_content = gate_content = None
+        if self.use_content_cross_attn:
+            shift_content = modulation_chunks[chunk_idx]
+            scale_content = modulation_chunks[chunk_idx + 1]
+            gate_content = modulation_chunks[chunk_idx + 2]
+            chunk_idx += 3
+
+        shift_style = scale_style = gate_style = None
+        if self.use_style_cross_attn:
+            shift_style = modulation_chunks[chunk_idx]
+            scale_style = modulation_chunks[chunk_idx + 1]
+            gate_style = modulation_chunks[chunk_idx + 2]
+            chunk_idx += 3
+
+        shift_mlp = modulation_chunks[chunk_idx]
+        scale_mlp = modulation_chunks[chunk_idx + 1]
+        gate_mlp = modulation_chunks[chunk_idx + 2]
+
+        x = latent_tokens
+        q = modulate(self.norm_self(x), shift_self, scale_self)
+        self_out, _ = self.self_attn(q, q, q, need_weights=False)
+        x = x + gate_self.unsqueeze(1) * self_out
+
+        if self.use_content_cross_attn:
+            if content_tokens is None or self.norm_content is None or self.content_attn is None:
+                raise RuntimeError("content_tokens must be provided when content cross-attention is enabled")
+            q = modulate(self.norm_content(x), shift_content, scale_content)
+            content_out, _ = self.content_attn(q, content_tokens, content_tokens, need_weights=False)
+            x = x + gate_content.unsqueeze(1) * content_out
+
+        if self.use_style_cross_attn:
+            if style_tokens is None or self.norm_style is None or self.style_attn is None or self.style_residual_gate is None:
+                raise RuntimeError("style_tokens must be provided when style cross-attention is enabled")
+            q = modulate(self.norm_style(x), shift_style, scale_style)
+            key_padding_mask = None
+            if style_token_mask is not None:
+                key_padding_mask = ~style_token_mask.bool()
+            style_out, _ = self.style_attn(
+                q,
+                style_tokens,
+                style_tokens,
+                key_padding_mask=key_padding_mask,
+                need_weights=False,
+            )
+            style_gate = gate_style.unsqueeze(1) + self.style_residual_gate.to(device=x.device, dtype=x.dtype)
+            x = x + style_gate * style_out
+
+        mlp_out = self.mlp(modulate(self.norm_mlp(x), shift_mlp, scale_mlp))
+        x = x + gate_mlp.unsqueeze(1) * mlp_out
         return x
 
 
-class PixelTransformerBlock(nn.Module):
+class DiffusionTransformerBackbone(nn.Module):
     def __init__(
         self,
         *,
-        patch_area: int,
-        patch_hidden_dim: int,
-        pixel_hidden_dim: int,
-        num_heads: int,
-        mlp_ratio: float,
-        grid_size: int,
+        latent_channels: int = 4,
+        latent_size: int = 16,
+        hidden_dim: int = 512,
+        depth: int = 16,
+        num_heads: int = 8,
+        mlp_ratio: float = 4.0,
+        content_cross_attn_layers: int | None = None,
+        style_cross_attn_every_n_layers: int = 1,
     ) -> None:
         super().__init__()
-        self.patch_area = int(patch_area)
-        self.patch_hidden_dim = int(patch_hidden_dim)
-        self.pixel_hidden_dim = int(pixel_hidden_dim)
+        self.latent_channels = int(latent_channels)
+        self.latent_size = int(latent_size)
+        self.hidden_dim = int(hidden_dim)
+        self.depth = int(depth)
+        self.num_heads = int(num_heads)
+        self.num_tokens = self.latent_size * self.latent_size
+        if content_cross_attn_layers is None:
+            content_cross_attn_layers = self.depth
+        self.content_cross_attn_layers = max(0, min(self.depth, int(content_cross_attn_layers)))
+        self.style_cross_attn_every_n_layers = max(1, int(style_cross_attn_every_n_layers))
+        self.has_content_cross_attn = self.content_cross_attn_layers > 0
+        self.has_style_cross_attn = any(
+            block_idx % self.style_cross_attn_every_n_layers == 0
+            for block_idx in range(self.depth)
+        )
 
-        self.norm_attn = RMSNorm(self.pixel_hidden_dim)
-        self.norm_mlp = RMSNorm(self.pixel_hidden_dim)
-        self.global_norm = RMSNorm(self.patch_hidden_dim)
-        self.cond_proj = nn.Linear(self.patch_hidden_dim, self.patch_area * 6 * self.pixel_hidden_dim)
-        self.compact_proj = nn.Linear(self.patch_area * self.pixel_hidden_dim, self.patch_hidden_dim)
-        self.global_attn = SDPAAttention(self.patch_hidden_dim, num_heads)
-        self.expand_proj = nn.Linear(self.patch_hidden_dim, self.patch_area * self.pixel_hidden_dim)
-        self.mlp = FeedForward(self.pixel_hidden_dim, mlp_ratio)
-        zero_init_linear(self.cond_proj)
-
-        pos_embed = build_2d_sincos_pos_embed(self.patch_hidden_dim, grid_size, grid_size)
+        self.latent_proj = nn.Linear(self.latent_channels, self.hidden_dim)
+        pos_embed = build_2d_sincos_pos_embed(self.hidden_dim, self.latent_size, self.latent_size)
         self.register_buffer("pos_embed", pos_embed.unsqueeze(0), persistent=False)
 
-    def forward(self, x: torch.Tensor, *, s_cond: torch.Tensor) -> torch.Tensor:
-        if x.dim() != 4:
-            raise ValueError(f"pixel tokens must have shape [B, L, P, Dpix], got {tuple(x.shape)}")
-        if s_cond.shape[:2] != x.shape[:2]:
-            raise ValueError(f"s_cond shape mismatch: x={tuple(x.shape)} s_cond={tuple(s_cond.shape)}")
-
-        batch_size, token_count, patch_area, pixel_hidden_dim = x.shape
-        if patch_area != self.patch_area or pixel_hidden_dim != self.pixel_hidden_dim:
-            raise ValueError(
-                "pixel token inner shape mismatch: "
-                f"expected {(self.patch_area, self.pixel_hidden_dim)}, got {(patch_area, pixel_hidden_dim)}"
-            )
-
-        x_flat = x.view(batch_size * token_count, patch_area, pixel_hidden_dim)
-        cond = self.cond_proj(s_cond.reshape(batch_size * token_count, -1)).view(
-            batch_size * token_count,
-            patch_area,
-            6,
-            pixel_hidden_dim,
-        )
-        beta1, gamma1, alpha1, beta2, gamma2, alpha2 = cond.unbind(dim=2)
-
-        attn_in = gamma1 * self.norm_attn(x_flat) + beta1
-        compact = self.compact_proj(attn_in.reshape(batch_size, token_count, patch_area * pixel_hidden_dim))
-        compact = compact + self.pos_embed.to(device=compact.device, dtype=compact.dtype)
-        compact = self.global_norm(compact)
-        attn_out, _ = self.global_attn(compact, compact, compact, need_weights=False)
-        expand = self.expand_proj(attn_out).view(batch_size * token_count, patch_area, pixel_hidden_dim)
-        x_flat = x_flat + alpha1 * expand
-
-        mlp_in = gamma2 * self.norm_mlp(x_flat) + beta2
-        mlp_out = self.mlp(mlp_in)
-        x_flat = x_flat + alpha2 * mlp_out
-        return x_flat.view(batch_size, token_count, patch_area, pixel_hidden_dim)
-
-
-class PixelDiffusionTransformerBackbone(nn.Module):
-    def __init__(
-        self,
-        *,
-        image_size: int,
-        in_channels: int,
-        patch_size: int,
-        patch_hidden_dim: int,
-        patch_depth: int,
-        patch_heads: int,
-        patch_mlp_ratio: float,
-        pixel_hidden_dim: int,
-        pit_depth: int,
-        pit_heads: int,
-        pit_mlp_ratio: float,
-        style_fusion_start: int,
-        style_fusion_end: int,
-        style_memory_k: int,
-    ) -> None:
-        super().__init__()
-        self.image_size = int(image_size)
-        self.in_channels = int(in_channels)
-        self.patch_size = int(patch_size)
-        self.patch_hidden_dim = int(patch_hidden_dim)
-        self.patch_depth = int(patch_depth)
-        self.patch_heads = int(patch_heads)
-        self.pixel_hidden_dim = int(pixel_hidden_dim)
-        self.pit_depth = int(pit_depth)
-        self.pit_heads = int(pit_heads)
-        self.style_fusion_start = int(style_fusion_start)
-        self.style_fusion_end = int(style_fusion_end)
-        self.style_memory_k = int(style_memory_k)
-
-        if self.image_size % self.patch_size != 0:
-            raise ValueError(
-                f"image_size must be divisible by patch_size, got {self.image_size} and {self.patch_size}"
-            )
-        if not (0 <= self.style_fusion_start <= self.style_fusion_end <= self.patch_depth):
-            raise ValueError(
-                "style fusion range must satisfy "
-                f"0 <= start <= end <= {self.patch_depth}, got "
-                f"start={self.style_fusion_start} end={self.style_fusion_end}"
-            )
-        self.grid_size = self.image_size // self.patch_size
-        self.num_patches = self.grid_size * self.grid_size
-        self.patch_area = self.patch_size * self.patch_size
-
-        self.patch_embed = nn.Conv2d(
-            self.in_channels,
-            self.patch_hidden_dim,
-            kernel_size=self.patch_size,
-            stride=self.patch_size,
-        )
-        patch_pos_embed = build_2d_sincos_pos_embed(self.patch_hidden_dim, self.grid_size, self.grid_size)
-        self.register_buffer("patch_pos_embed", patch_pos_embed.unsqueeze(0), persistent=False)
-        self.patch_input_proj = nn.Linear(self.patch_hidden_dim * 2, self.patch_hidden_dim)
-
         self.time_mlp = nn.Sequential(
-            nn.Linear(self.patch_hidden_dim, self.patch_hidden_dim),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
             nn.SiLU(),
-            nn.Linear(self.patch_hidden_dim, self.patch_hidden_dim),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
         )
-        self.patch_blocks = nn.ModuleList(
-            [
-                PatchConditionedBlock(
-                    self.patch_hidden_dim,
-                    self.patch_heads,
-                    patch_mlp_ratio,
-                    use_style=(self.style_fusion_start <= block_idx < self.style_fusion_end),
+        self.style_cond_proj = nn.Linear(self.hidden_dim, self.hidden_dim)
+        self.blocks = nn.ModuleList()
+        for block_idx in range(self.depth):
+            self.blocks.append(
+                GlyphDiTBlock(
+                    self.hidden_dim,
+                    self.num_heads,
+                    mlp_ratio,
+                    use_content_cross_attn=(block_idx < self.content_cross_attn_layers),
+                    use_style_cross_attn=(block_idx % self.style_cross_attn_every_n_layers == 0),
                 )
-                for block_idx in range(self.patch_depth)
-            ]
-        )
-
-        self.pixel_embed = nn.Conv2d(self.in_channels, self.pixel_hidden_dim, kernel_size=1, stride=1)
-        self.pit_blocks = nn.ModuleList(
-            [
-                PixelTransformerBlock(
-                    patch_area=self.patch_area,
-                    patch_hidden_dim=self.patch_hidden_dim,
-                    pixel_hidden_dim=self.pixel_hidden_dim,
-                    num_heads=self.pit_heads,
-                    mlp_ratio=pit_mlp_ratio,
-                    grid_size=self.grid_size,
-                )
-                for _ in range(self.pit_depth)
-            ]
-        )
-        self.out_proj = nn.Conv2d(self.pixel_hidden_dim, self.in_channels, kernel_size=1, stride=1)
-
-    def _patchify_pixels(self, x: torch.Tensor) -> torch.Tensor:
-        batch_size, _, height, width = x.shape
-        if height != self.image_size or width != self.image_size:
-            raise ValueError(
-                f"input image size mismatch: expected {(self.image_size, self.image_size)}, got {(height, width)}"
             )
-        x = x.permute(0, 2, 3, 1).contiguous()
-        x = x.view(
-            batch_size,
-            self.grid_size,
-            self.patch_size,
-            self.grid_size,
-            self.patch_size,
-            self.pixel_hidden_dim,
-        )
-        x = x.permute(0, 1, 3, 2, 4, 5).contiguous()
-        return x.view(batch_size, self.num_patches, self.patch_area, self.pixel_hidden_dim)
-
-    def _unpatchify_pixels(self, x: torch.Tensor) -> torch.Tensor:
-        batch_size = x.size(0)
-        x = x.view(
-            batch_size,
-            self.grid_size,
-            self.grid_size,
-            self.patch_size,
-            self.patch_size,
-            self.pixel_hidden_dim,
-        )
-        x = x.permute(0, 1, 3, 2, 4, 5).contiguous()
-        x = x.view(batch_size, self.image_size, self.image_size, self.pixel_hidden_dim)
-        return x.permute(0, 3, 1, 2).contiguous()
+        self.final_norm = nn.LayerNorm(self.hidden_dim, eps=1e-6)
+        self.final_proj = nn.Linear(self.hidden_dim, self.latent_channels)
+        nn.init.zeros_(self.final_proj.weight)
+        nn.init.zeros_(self.final_proj.bias)
 
     def forward(
         self,
-        x_t: torch.Tensor,
+        latent: torch.Tensor,
         timesteps: torch.Tensor,
         *,
         content_tokens: torch.Tensor,
-        style_memory: torch.Tensor,
+        style_tokens: torch.Tensor,
+        style_global: torch.Tensor,
+        style_token_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if x_t.dim() != 4:
-            raise ValueError(f"x_t must be BCHW, got {tuple(x_t.shape)}")
-        if tuple(x_t.shape[1:]) != (self.in_channels, self.image_size, self.image_size):
+        if latent.dim() != 4:
+            raise ValueError(f"latent must be 4D, got {tuple(latent.shape)}")
+        if tuple(latent.shape[1:]) != (self.latent_channels, self.latent_size, self.latent_size):
             raise ValueError(
-                "x_t shape mismatch: "
-                f"expected (*, {self.in_channels}, {self.image_size}, {self.image_size}), got {tuple(x_t.shape)}"
-            )
-        if content_tokens.shape != (x_t.size(0), self.num_patches, self.patch_hidden_dim):
-            raise ValueError(
-                "content_tokens shape mismatch: "
-                f"expected {(x_t.size(0), self.num_patches, self.patch_hidden_dim)}, got {tuple(content_tokens.shape)}"
-            )
-        if style_memory.shape != (x_t.size(0), self.style_memory_k, self.patch_hidden_dim):
-            raise ValueError(
-                "style_memory shape mismatch: "
-                f"expected {(x_t.size(0), self.style_memory_k, self.patch_hidden_dim)}, "
-                f"got {tuple(style_memory.shape)}"
+                "latent shape mismatch: "
+                f"expected (*, {self.latent_channels}, {self.latent_size}, {self.latent_size}), "
+                f"got {tuple(latent.shape)}"
             )
 
-        patch_tokens = self.patch_embed(x_t).flatten(2).transpose(1, 2).contiguous()
-        patch_tokens = patch_tokens + self.patch_pos_embed.to(device=patch_tokens.device, dtype=patch_tokens.dtype)
-        content_tokens = content_tokens.to(device=patch_tokens.device, dtype=patch_tokens.dtype)
-        patch_tokens = self.patch_input_proj(torch.cat([patch_tokens, content_tokens], dim=-1))
+        x = latent.flatten(2).transpose(1, 2).contiguous()
+        x = self.latent_proj(x)
+        x = x + self.pos_embed.to(device=x.device, dtype=x.dtype)
 
-        t_embed = timestep_embedding(timesteps, self.patch_hidden_dim).to(dtype=patch_tokens.dtype)
-        time_cond = self.time_mlp(t_embed)
-        style_memory = style_memory.to(device=patch_tokens.device, dtype=patch_tokens.dtype)
-        for block in self.patch_blocks:
-            patch_tokens = block(
-                patch_tokens,
-                time_cond=time_cond,
-                style_memory=style_memory if block.use_style else None,
+        t_embed = timestep_embedding(timesteps, self.hidden_dim).to(dtype=x.dtype)
+        t_embed = self.time_mlp(t_embed)
+        cond = t_embed + self.style_cond_proj(style_global.to(dtype=x.dtype))
+
+        content_tokens = (
+            content_tokens.to(device=x.device, dtype=x.dtype)
+            if self.has_content_cross_attn
+            else None
+        )
+        style_tokens = (
+            style_tokens.to(device=x.device, dtype=x.dtype)
+            if self.has_style_cross_attn
+            else None
+        )
+        if self.has_style_cross_attn and style_token_mask is not None:
+            style_token_mask = style_token_mask.to(device=x.device, dtype=torch.bool)
+
+        for block in self.blocks:
+            x = block(
+                x,
+                cond=cond,
+                content_tokens=content_tokens if block.use_content_cross_attn else None,
+                style_tokens=style_tokens if block.use_style_cross_attn else None,
+                style_token_mask=style_token_mask if block.use_style_cross_attn else None,
             )
 
-        s_cond = patch_tokens + t_embed.unsqueeze(1)
-
-        pixel_tokens = self.pixel_embed(x_t)
-        pixel_tokens = self._patchify_pixels(pixel_tokens)
-        for block in self.pit_blocks:
-            pixel_tokens = block(pixel_tokens, s_cond=s_cond)
-
-        pixel_map = self._unpatchify_pixels(pixel_tokens)
-        return self.out_proj(pixel_map)
+        x = self.final_norm(x)
+        x = self.final_proj(x)
+        x = x.transpose(1, 2).contiguous().view(
+            latent.size(0),
+            self.latent_channels,
+            self.latent_size,
+            self.latent_size,
+        )
+        return x

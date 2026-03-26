@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PYTHON_BIN="${PYTHON_BIN:-/scratch/yangximing/miniconda3/envs/sg3/bin/python}"
+ROOT="/scratch/yangximing/code/ass5-exp6/DiffuFont"
+PYTHON_BIN="/scratch/yangximing/miniconda3/envs/sg3/bin/python"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 LOG_MAX_LINES=1500
 
@@ -11,8 +11,10 @@ LOG_FILE=""
 PID_FILE=""
 SAVE_DIR="checkpoints/flow_$(date '+%Y%m%d_%H%M%S')"
 
-RESUME_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/flow_20260325_174039/ckpt_step_10000.pt"
-DEVICE_ARG="cuda:0"
+RESUME_CKPT=""
+VAE_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/vae_pretrain_20260321_202403/best.pt"
+STYLE_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/style_pretrain_20260321_101735/best.pt"
+DEVICE_ARG="auto"
 SEED=42
 FONT_SPLIT="train"
 FONT_SPLIT_SEED=""
@@ -21,89 +23,60 @@ FONT_TRAIN_RATIO="0.95"
 TARGET_STEPS=150000
 SAVE_EVERY=5000
 SAMPLE_EVERY=300
-LOG_EVERY=100
-VAL_EVERY=100
-VAL_MAX_BATCHES=16
 LR="1e-4"
 LR_WARMUP_STEPS=2000
-LR_MIN_RATIO="0.1"
-WEIGHT_DECAY="0.0"
+LR_MIN_SCALE="0.1"
 
 STYLE_REF_COUNT=8
-TRAIN_SAMPLING="grouped_char_font"
-GROUPED_CHAR_COUNT=8
-GROUPED_FONTS_PER_CHAR=0
-BATCH_SIZE=128
+BATCH_SIZE=64
 NUM_WORKERS=8
 MAX_FONTS=0
 IMAGE_SIZE=128
 
-PATCH_SIZE=16
+LATENT_CHANNELS=10
+LATENT_SIZE=16
+ENCODER_PATCH_SIZE=8
 ENCODER_HIDDEN_DIM=512
 ENCODER_DEPTH=4
 ENCODER_HEADS=8
-ENCODER_MLP_RATIO="4.0"
-STYLE_FEATURE_DIM=256
-STYLE_MEMORY_K=8
-PATCH_HIDDEN_DIM=512
-PATCH_DEPTH=12
-PATCH_HEADS=8
-PATCH_MLP_RATIO="4.0"
-PIXEL_HIDDEN_DIM=32
-PIT_DEPTH=2
-PIT_HEADS=8
-PIT_MLP_RATIO="4.0"
-STYLE_FUSION_START=4
-STYLE_FUSION_END=8
+DIT_HIDDEN_DIM=512
+DIT_DEPTH=16
+DIT_HEADS=8
+DIT_MLP_RATIO="4.0"
 
-FLOW_LAMBDA_RF="1.0"
-FLOW_SAMPLE_STEPS=20
-FLOW_SAMPLER="flow_dpm"
-TIMESTEP_SAMPLING="logit_normal"
+STYLE_MID_TOKENS_PER_REF=12
+LOCAL_STYLE_TOKENS_PER_REF=24
+STYLE_RESIDUAL_TOKENS=8
+STYLE_RESIDUAL_GATE_INIT="0.3"
+CONTENT_CROSS_ATTN_LAYERS="8"
+STYLE_CROSS_ATTN_EVERY_N_LAYERS=1
 
-OOM_RETRY_SLEEP=60
-MAX_OOM_RETRIES=0
+TRAIN_VAE_JOINTLY="0"
+TRAIN_STYLE_JOINTLY="1"
+STYLE_LR_SCALE="1.0"
+STYLE_LR_WARMUP_STEPS=10000
+FLOW_LAMBDA_IMG_L1="0.2"
+FLOW_LAMBDA_IMG_PERC="0.02"
+FLOW_DIFFICULTY_WARMUP_STEPS=10000
+FLOW_DIFFICULTY_EMA_DECAY="0.99"
+FLOW_DIFFICULTY_ALPHA="0.5"
+FLOW_DIFFICULTY_MIN_WEIGHT="0.7"
+FLOW_DIFFICULTY_MAX_WEIGHT="1.5"
+FLOW_DIFFICULTY_REFRESH_EVERY_STEPS=1000
 EXTRA_TRAIN_ARGS=()
-
-usage() {
-  cat <<'EOF'
-Usage: run_diffusion_colab.sh [options] [-- extra train.py args]
-
-Core options:
-  --foreground | --daemon
-  --save-dir PATH
-  --resume PATH
-  --device DEVICE
-  --seed INT
-  --target-steps INT
-  --batch INT
-  --train-sampling MODE
-  --grouped-char-count INT
-  --grouped-fonts-per-char INT
-  --style-feature-dim INT
-  --style-memory-k INT
-  --style-fusion-start INT
-  --style-fusion-end INT
-  --oom-retry-sleep SEC
-  --max-oom-retries N
-
-This wrapper launches the unified style-memory flow training path and supports:
-  1. process-tree cleanup on TERM/INT
-  2. auto GPU selection when --device auto
-  3. OOM-aware retry loops
-  4. LR schedule: fixed warmup, hold max LR, final 20% cosine decay to lr_min_ratio
-EOF
-}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --help|-h) usage; exit 0 ;;
     --foreground) RUN_MODE="foreground"; shift ;;
     --daemon) RUN_MODE="daemon"; shift ;;
     --log-file) LOG_FILE="${2:?}"; shift 2 ;;
     --pid-file) PID_FILE="${2:?}"; shift 2 ;;
     --save-dir) SAVE_DIR="${2:?}"; shift 2 ;;
     --resume) RESUME_CKPT="${2:?}"; shift 2 ;;
+    --vae-checkpoint) VAE_CKPT="${2:?}"; shift 2 ;;
+    --style-checkpoint) STYLE_CKPT="${2:?}"; shift 2 ;;
+    --train-vae-jointly) TRAIN_VAE_JOINTLY="1"; shift ;;
+    --train-style-jointly) TRAIN_STYLE_JOINTLY="1"; shift ;;
     --device) DEVICE_ARG="${2:?}"; shift 2 ;;
     --seed) SEED="${2:?}"; shift 2 ;;
     --font-split) FONT_SPLIT="${2:?}"; shift 2 ;;
@@ -112,48 +85,40 @@ while [[ $# -gt 0 ]]; do
     --target-steps) TARGET_STEPS="${2:?}"; shift 2 ;;
     --save-every-steps) SAVE_EVERY="${2:?}"; shift 2 ;;
     --sample-every-steps) SAMPLE_EVERY="${2:?}"; shift 2 ;;
-    --log-every-steps) LOG_EVERY="${2:?}"; shift 2 ;;
-    --val-every-steps) VAL_EVERY="${2:?}"; shift 2 ;;
-    --val-max-batches) VAL_MAX_BATCHES="${2:?}"; shift 2 ;;
-    --lr) LR="${2:?}"; shift 2 ;;
     --lr-warmup-steps) LR_WARMUP_STEPS="${2:?}"; shift 2 ;;
-    --lr-min-ratio) LR_MIN_RATIO="${2:?}"; shift 2 ;;
-    --weight-decay) WEIGHT_DECAY="${2:?}"; shift 2 ;;
+    --lr-min-scale) LR_MIN_SCALE="${2:?}"; shift 2 ;;
+    --style-lr-scale) STYLE_LR_SCALE="${2:?}"; shift 2 ;;
+    --style-lr-warmup-steps) STYLE_LR_WARMUP_STEPS="${2:?}"; shift 2 ;;
+    --flow-lambda-img-l1) FLOW_LAMBDA_IMG_L1="${2:?}"; shift 2 ;;
+    --flow-lambda-img-perc) FLOW_LAMBDA_IMG_PERC="${2:?}"; shift 2 ;;
+    --flow-difficulty-warmup-steps) FLOW_DIFFICULTY_WARMUP_STEPS="${2:?}"; shift 2 ;;
+    --flow-difficulty-ema-decay) FLOW_DIFFICULTY_EMA_DECAY="${2:?}"; shift 2 ;;
+    --flow-difficulty-alpha) FLOW_DIFFICULTY_ALPHA="${2:?}"; shift 2 ;;
+    --flow-difficulty-min-weight) FLOW_DIFFICULTY_MIN_WEIGHT="${2:?}"; shift 2 ;;
+    --flow-difficulty-max-weight) FLOW_DIFFICULTY_MAX_WEIGHT="${2:?}"; shift 2 ;;
+    --flow-difficulty-refresh-every-steps) FLOW_DIFFICULTY_REFRESH_EVERY_STEPS="${2:?}"; shift 2 ;;
     --style-ref-count) STYLE_REF_COUNT="${2:?}"; shift 2 ;;
-    --train-sampling) TRAIN_SAMPLING="${2:?}"; shift 2 ;;
-    --grouped-char-count) GROUPED_CHAR_COUNT="${2:?}"; shift 2 ;;
-    --grouped-fonts-per-char) GROUPED_FONTS_PER_CHAR="${2:?}"; shift 2 ;;
     --batch) BATCH_SIZE="${2:?}"; shift 2 ;;
     --num-workers) NUM_WORKERS="${2:?}"; shift 2 ;;
     --max-fonts) MAX_FONTS="${2:?}"; shift 2 ;;
     --image-size) IMAGE_SIZE="${2:?}"; shift 2 ;;
-    --patch-size) PATCH_SIZE="${2:?}"; shift 2 ;;
+    --latent-channels) LATENT_CHANNELS="${2:?}"; shift 2 ;;
+    --latent-size) LATENT_SIZE="${2:?}"; shift 2 ;;
+    --encoder-patch-size) ENCODER_PATCH_SIZE="${2:?}"; shift 2 ;;
     --encoder-hidden-dim) ENCODER_HIDDEN_DIM="${2:?}"; shift 2 ;;
     --encoder-depth) ENCODER_DEPTH="${2:?}"; shift 2 ;;
     --encoder-heads) ENCODER_HEADS="${2:?}"; shift 2 ;;
-    --encoder-mlp-ratio) ENCODER_MLP_RATIO="${2:?}"; shift 2 ;;
-    --style-feature-dim) STYLE_FEATURE_DIM="${2:?}"; shift 2 ;;
-    --style-memory-k) STYLE_MEMORY_K="${2:?}"; shift 2 ;;
-    --patch-hidden-dim) PATCH_HIDDEN_DIM="${2:?}"; shift 2 ;;
-    --patch-depth) PATCH_DEPTH="${2:?}"; shift 2 ;;
-    --patch-heads) PATCH_HEADS="${2:?}"; shift 2 ;;
-    --patch-mlp-ratio) PATCH_MLP_RATIO="${2:?}"; shift 2 ;;
-    --pixel-hidden-dim) PIXEL_HIDDEN_DIM="${2:?}"; shift 2 ;;
-    --pit-depth) PIT_DEPTH="${2:?}"; shift 2 ;;
-    --pit-heads) PIT_HEADS="${2:?}"; shift 2 ;;
-    --pit-mlp-ratio) PIT_MLP_RATIO="${2:?}"; shift 2 ;;
-    --style-fusion-start) STYLE_FUSION_START="${2:?}"; shift 2 ;;
-    --style-fusion-end) STYLE_FUSION_END="${2:?}"; shift 2 ;;
-    --flow-lambda-rf) FLOW_LAMBDA_RF="${2:?}"; shift 2 ;;
-    --flow-sample-steps) FLOW_SAMPLE_STEPS="${2:?}"; shift 2 ;;
-    --flow-sampler) FLOW_SAMPLER="${2:?}"; shift 2 ;;
-    --timestep-sampling) TIMESTEP_SAMPLING="${2:?}"; shift 2 ;;
-    --grad-clip-norm|--flow-lambda-img-l1|--flow-lambda-img-perc|--ema-decay)
-      echo "[run_diffusion_colab] removed option: $1" >&2
-      exit 2
-      ;;
-    --oom-retry-sleep) OOM_RETRY_SLEEP="${2:?}"; shift 2 ;;
-    --max-oom-retries) MAX_OOM_RETRIES="${2:?}"; shift 2 ;;
+    --dit-hidden-dim) DIT_HIDDEN_DIM="${2:?}"; shift 2 ;;
+    --dit-depth) DIT_DEPTH="${2:?}"; shift 2 ;;
+    --dit-heads) DIT_HEADS="${2:?}"; shift 2 ;;
+    --dit-mlp-ratio) DIT_MLP_RATIO="${2:?}"; shift 2 ;;
+    --style-mid-tokens-per-ref) STYLE_MID_TOKENS_PER_REF="${2:?}"; shift 2 ;;
+    --local-style-tokens-per-ref) LOCAL_STYLE_TOKENS_PER_REF="${2:?}"; shift 2 ;;
+    --style-residual-tokens) STYLE_RESIDUAL_TOKENS="${2:?}"; shift 2 ;;
+    --style-residual-gate-init) STYLE_RESIDUAL_GATE_INIT="${2:?}"; shift 2 ;;
+    --content-cross-attn-layers) CONTENT_CROSS_ATTN_LAYERS="${2:?}"; shift 2 ;;
+    --style-cross-attn-every-n-layers) STYLE_CROSS_ATTN_EVERY_N_LAYERS="${2:?}"; shift 2 ;;
+    --lr) LR="${2:?}"; shift 2 ;;
     --) shift; EXTRA_TRAIN_ARGS+=("$@"); break ;;
     *) EXTRA_TRAIN_ARGS+=("$1"); shift ;;
   esac
@@ -166,7 +131,12 @@ mkdir -p logs checkpoints
 [[ -z "${PID_FILE}" ]] && PID_FILE="logs/$(basename "${SAVE_DIR}").pid"
 
 if [[ -n "${RESUME_CKPT}" && ! -f "${RESUME_CKPT}" ]]; then
-  echo "[run_diffusion_colab] missing resume checkpoint: ${RESUME_CKPT}" >&2
+  exit 2
+fi
+if [[ -n "${VAE_CKPT}" && ! -f "${VAE_CKPT}" ]]; then
+  exit 2
+fi
+if [[ -n "${STYLE_CKPT}" && ! -f "${STYLE_CKPT}" ]]; then
   exit 2
 fi
 
@@ -183,50 +153,58 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --target-steps "${TARGET_STEPS}"
     --save-every-steps "${SAVE_EVERY}"
     --sample-every-steps "${SAMPLE_EVERY}"
-    --log-every-steps "${LOG_EVERY}"
-    --val-every-steps "${VAL_EVERY}"
-    --val-max-batches "${VAL_MAX_BATCHES}"
-    --lr "${LR}"
-    --lr-warmup-steps "${LR_WARMUP_STEPS}"
-    --lr-min-ratio "${LR_MIN_RATIO}"
-    --weight-decay "${WEIGHT_DECAY}"
     --style-ref-count "${STYLE_REF_COUNT}"
-    --train-sampling "${TRAIN_SAMPLING}"
-    --grouped-char-count "${GROUPED_CHAR_COUNT}"
-    --grouped-fonts-per-char "${GROUPED_FONTS_PER_CHAR}"
     --batch "${BATCH_SIZE}"
     --num-workers "${NUM_WORKERS}"
     --max-fonts "${MAX_FONTS}"
     --image-size "${IMAGE_SIZE}"
-    --patch-size "${PATCH_SIZE}"
+    --latent-channels "${LATENT_CHANNELS}"
+    --latent-size "${LATENT_SIZE}"
+    --encoder-patch-size "${ENCODER_PATCH_SIZE}"
     --encoder-hidden-dim "${ENCODER_HIDDEN_DIM}"
     --encoder-depth "${ENCODER_DEPTH}"
     --encoder-heads "${ENCODER_HEADS}"
-    --encoder-mlp-ratio "${ENCODER_MLP_RATIO}"
-    --style-feature-dim "${STYLE_FEATURE_DIM}"
-    --style-memory-k "${STYLE_MEMORY_K}"
-    --patch-hidden-dim "${PATCH_HIDDEN_DIM}"
-    --patch-depth "${PATCH_DEPTH}"
-    --patch-heads "${PATCH_HEADS}"
-    --patch-mlp-ratio "${PATCH_MLP_RATIO}"
-    --pixel-hidden-dim "${PIXEL_HIDDEN_DIM}"
-    --pit-depth "${PIT_DEPTH}"
-    --pit-heads "${PIT_HEADS}"
-    --pit-mlp-ratio "${PIT_MLP_RATIO}"
-    --style-fusion-start "${STYLE_FUSION_START}"
-    --style-fusion-end "${STYLE_FUSION_END}"
-    --flow-lambda-rf "${FLOW_LAMBDA_RF}"
-    --flow-sample-steps "${FLOW_SAMPLE_STEPS}"
-    --flow-sampler "${FLOW_SAMPLER}"
-    --timestep-sampling "${TIMESTEP_SAMPLING}"
-    --oom-retry-sleep "${OOM_RETRY_SLEEP}"
-    --max-oom-retries "${MAX_OOM_RETRIES}"
+    --dit-hidden-dim "${DIT_HIDDEN_DIM}"
+    --dit-depth "${DIT_DEPTH}"
+    --dit-heads "${DIT_HEADS}"
+    --dit-mlp-ratio "${DIT_MLP_RATIO}"
+    --style-mid-tokens-per-ref "${STYLE_MID_TOKENS_PER_REF}"
+    --local-style-tokens-per-ref "${LOCAL_STYLE_TOKENS_PER_REF}"
+    --style-residual-tokens "${STYLE_RESIDUAL_TOKENS}"
+    --style-residual-gate-init "${STYLE_RESIDUAL_GATE_INIT}"
+    --content-cross-attn-layers "${CONTENT_CROSS_ATTN_LAYERS}"
+    --style-cross-attn-every-n-layers "${STYLE_CROSS_ATTN_EVERY_N_LAYERS}"
+    --lr "${LR}"
+    --lr-warmup-steps "${LR_WARMUP_STEPS}"
+    --lr-min-scale "${LR_MIN_SCALE}"
+    --style-lr-scale "${STYLE_LR_SCALE}"
+    --style-lr-warmup-steps "${STYLE_LR_WARMUP_STEPS}"
+    --flow-lambda-img-l1 "${FLOW_LAMBDA_IMG_L1}"
+    --flow-lambda-img-perc "${FLOW_LAMBDA_IMG_PERC}"
+    --flow-difficulty-warmup-steps "${FLOW_DIFFICULTY_WARMUP_STEPS}"
+    --flow-difficulty-ema-decay "${FLOW_DIFFICULTY_EMA_DECAY}"
+    --flow-difficulty-alpha "${FLOW_DIFFICULTY_ALPHA}"
+    --flow-difficulty-min-weight "${FLOW_DIFFICULTY_MIN_WEIGHT}"
+    --flow-difficulty-max-weight "${FLOW_DIFFICULTY_MAX_WEIGHT}"
+    --flow-difficulty-refresh-every-steps "${FLOW_DIFFICULTY_REFRESH_EVERY_STEPS}"
   )
   if [[ -n "${FONT_SPLIT_SEED}" ]]; then
     daemon_args+=(--font-split-seed "${FONT_SPLIT_SEED}")
   fi
   if [[ -n "${RESUME_CKPT}" ]]; then
     daemon_args+=(--resume "${RESUME_CKPT}")
+  fi
+  if [[ -n "${VAE_CKPT}" ]]; then
+    daemon_args+=(--vae-checkpoint "${VAE_CKPT}")
+  fi
+  if [[ -n "${STYLE_CKPT}" ]]; then
+    daemon_args+=(--style-checkpoint "${STYLE_CKPT}")
+  fi
+  if [[ "${TRAIN_VAE_JOINTLY}" == "1" ]]; then
+    daemon_args+=(--train-vae-jointly)
+  fi
+  if [[ "${TRAIN_STYLE_JOINTLY}" == "1" ]]; then
+    daemon_args+=(--train-style-jointly)
   fi
   if [[ "${#EXTRA_TRAIN_ARGS[@]}" -gt 0 ]]; then
     daemon_args+=(-- "${EXTRA_TRAIN_ARGS[@]}")
@@ -235,6 +213,13 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
   echo "$!" > "${PID_FILE}"
   echo "[run_diffusion_colab] started daemon pid=$(cat "${PID_FILE}") log=${LOG_FILE}"
   exit 0
+fi
+
+if [[ "${TRAIN_VAE_JOINTLY}" != "1" && -z "${RESUME_CKPT}" && -z "${VAE_CKPT}" ]]; then
+  exit 2
+fi
+if [[ "${TRAIN_STYLE_JOINTLY}" != "1" && -z "${RESUME_CKPT}" && -z "${STYLE_CKPT}" ]]; then
+  exit 2
 fi
 
 SCRIPT_PID="$$"
@@ -331,6 +316,7 @@ select_launch_device() {
   fi
 
   "${PYTHON_BIN}" - <<'PY'
+import sys
 import torch
 
 if not torch.cuda.is_available():
@@ -339,7 +325,7 @@ if not torch.cuda.is_available():
     raise SystemExit(0)
 
 device_count = torch.cuda.device_count()
-probe_count = min(4, device_count)
+probe_count = min(2, device_count)
 best_idx = 0
 best_free = -1
 
@@ -374,16 +360,17 @@ is_oom_failure() {
       found { print; next }
       index($0, marker) { found = 1; print }
     ' "${LOG_FILE}" | grep -Eiq \
-      'torch\.OutOfMemoryError|CUDA out of memory|out of memory|CUDACachingAllocator|cuda runtime error'
+      'torch\.OutOfMemoryError|CUDA out of memory|out of memory|NVML_SUCCESS == DriverAPI::get\(\)->nvmlInit_v2_\(\)|CUDACachingAllocator\.cpp'
     return $?
   fi
   grep -Eiq \
-    'torch\.OutOfMemoryError|CUDA out of memory|out of memory|CUDACachingAllocator|cuda runtime error' \
+    'torch\.OutOfMemoryError|CUDA out of memory|out of memory|NVML_SUCCESS == DriverAPI::get\(\)->nvmlInit_v2_\(\)|CUDACachingAllocator\.cpp' \
     "${LOG_FILE}"
 }
 
 cmd_common=(
   "${PYTHON_BIN}" -u train.py
+  --stage flow
   --data-root "${ROOT}"
   --save-dir "${SAVE_DIR}"
   --seed "${SEED}"
@@ -391,41 +378,42 @@ cmd_common=(
   --font-train-ratio "${FONT_TRAIN_RATIO}"
   --lr "${LR}"
   --lr-warmup-steps "${LR_WARMUP_STEPS}"
-  --lr-min-ratio "${LR_MIN_RATIO}"
-  --weight-decay "${WEIGHT_DECAY}"
+  --lr-min-scale "${LR_MIN_SCALE}"
   --batch "${BATCH_SIZE}"
   --num-workers "${NUM_WORKERS}"
   --style-ref-count "${STYLE_REF_COUNT}"
-  --train-sampling "${TRAIN_SAMPLING}"
-  --grouped-char-count "${GROUPED_CHAR_COUNT}"
-  --grouped-fonts-per-char "${GROUPED_FONTS_PER_CHAR}"
   --max-fonts "${MAX_FONTS}"
   --image-size "${IMAGE_SIZE}"
-  --patch-size "${PATCH_SIZE}"
+  --latent-channels "${LATENT_CHANNELS}"
+  --latent-size "${LATENT_SIZE}"
+  --encoder-patch-size "${ENCODER_PATCH_SIZE}"
   --encoder-hidden-dim "${ENCODER_HIDDEN_DIM}"
   --encoder-depth "${ENCODER_DEPTH}"
   --encoder-heads "${ENCODER_HEADS}"
-  --encoder-mlp-ratio "${ENCODER_MLP_RATIO}"
-  --style-feature-dim "${STYLE_FEATURE_DIM}"
-  --style-memory-k "${STYLE_MEMORY_K}"
-  --patch-hidden-dim "${PATCH_HIDDEN_DIM}"
-  --patch-depth "${PATCH_DEPTH}"
-  --patch-heads "${PATCH_HEADS}"
-  --patch-mlp-ratio "${PATCH_MLP_RATIO}"
-  --pixel-hidden-dim "${PIXEL_HIDDEN_DIM}"
-  --pit-depth "${PIT_DEPTH}"
-  --pit-heads "${PIT_HEADS}"
-  --pit-mlp-ratio "${PIT_MLP_RATIO}"
-  --style-fusion-start "${STYLE_FUSION_START}"
-  --style-fusion-end "${STYLE_FUSION_END}"
-  --flow-lambda-rf "${FLOW_LAMBDA_RF}"
-  --flow-sample-steps "${FLOW_SAMPLE_STEPS}"
-  --flow-sampler "${FLOW_SAMPLER}"
-  --timestep-sampling "${TIMESTEP_SAMPLING}"
+  --dit-hidden-dim "${DIT_HIDDEN_DIM}"
+  --dit-depth "${DIT_DEPTH}"
+  --dit-heads "${DIT_HEADS}"
+  --dit-mlp-ratio "${DIT_MLP_RATIO}"
+  --style-mid-tokens-per-ref "${STYLE_MID_TOKENS_PER_REF}"
+  --local-style-tokens-per-ref "${LOCAL_STYLE_TOKENS_PER_REF}"
+  --style-residual-tokens "${STYLE_RESIDUAL_TOKENS}"
+  --style-residual-gate-init "${STYLE_RESIDUAL_GATE_INIT}"
+  --content-cross-attn-layers "${CONTENT_CROSS_ATTN_LAYERS}"
+  --style-cross-attn-every-n-layers "${STYLE_CROSS_ATTN_EVERY_N_LAYERS}"
+  --style-lr-scale "${STYLE_LR_SCALE}"
+  --style-lr-warmup-steps "${STYLE_LR_WARMUP_STEPS}"
+  --flow-lambda-img-l1 "${FLOW_LAMBDA_IMG_L1}"
+  --flow-lambda-img-perc "${FLOW_LAMBDA_IMG_PERC}"
+  --flow-difficulty-warmup-steps "${FLOW_DIFFICULTY_WARMUP_STEPS}"
+  --flow-difficulty-ema-decay "${FLOW_DIFFICULTY_EMA_DECAY}"
+  --flow-difficulty-alpha "${FLOW_DIFFICULTY_ALPHA}"
+  --flow-difficulty-min-weight "${FLOW_DIFFICULTY_MIN_WEIGHT}"
+  --flow-difficulty-max-weight "${FLOW_DIFFICULTY_MAX_WEIGHT}"
+  --flow-difficulty-refresh-every-steps "${FLOW_DIFFICULTY_REFRESH_EVERY_STEPS}"
+  --epochs 1000000
   --total-steps "${TARGET_STEPS}"
-  --log-every-steps "${LOG_EVERY}"
-  --val-every-steps "${VAL_EVERY}"
-  --val-max-batches "${VAL_MAX_BATCHES}"
+  --log-every-steps 100
+  --val-every-steps 100
   --save-every-steps "${SAVE_EVERY}"
   --sample-every-steps "${SAMPLE_EVERY}"
 )
@@ -436,6 +424,18 @@ fi
 if [[ -n "${RESUME_CKPT}" ]]; then
   cmd_common+=(--resume "${RESUME_CKPT}")
 fi
+if [[ -n "${VAE_CKPT}" ]]; then
+  cmd_common+=(--vae-checkpoint "${VAE_CKPT}")
+fi
+if [[ -n "${STYLE_CKPT}" ]]; then
+  cmd_common+=(--style-checkpoint "${STYLE_CKPT}")
+fi
+if [[ "${TRAIN_VAE_JOINTLY}" == "1" ]]; then
+  cmd_common+=(--train-vae-jointly)
+fi
+if [[ "${TRAIN_STYLE_JOINTLY}" == "1" ]]; then
+  cmd_common+=(--train-style-jointly)
+fi
 if [[ "${#EXTRA_TRAIN_ARGS[@]}" -gt 0 ]]; then
   cmd_common+=("${EXTRA_TRAIN_ARGS[@]}")
 fi
@@ -444,21 +444,15 @@ echo "[run_diffusion_colab] stage=flow"
 echo "[run_diffusion_colab] save_dir=${SAVE_DIR}"
 echo "[run_diffusion_colab] log_file=${LOG_FILE}"
 echo "[run_diffusion_colab] requested_device=${DEVICE_ARG} seed=${SEED}"
-echo "[run_diffusion_colab] batch=${BATCH_SIZE} lr=${LR} target_steps=${TARGET_STEPS}"
-echo "[run_diffusion_colab] train_sampling=${TRAIN_SAMPLING}"
-echo "[run_diffusion_colab] grouped_char_count=${GROUPED_CHAR_COUNT} grouped_fonts_per_char=${GROUPED_FONTS_PER_CHAR}"
-echo "[run_diffusion_colab] lr_schedule=warmup_hold_then_final20pct_cosine"
-echo "[run_diffusion_colab] lr=${LR} lr_warmup_steps=${LR_WARMUP_STEPS} lr_min_ratio=${LR_MIN_RATIO} weight_decay=${WEIGHT_DECAY}"
-echo "[run_diffusion_colab] save_every_steps=${SAVE_EVERY} sample_every_steps=${SAMPLE_EVERY}"
-echo "[run_diffusion_colab] image_size=${IMAGE_SIZE} patch_size=${PATCH_SIZE}"
-echo "[run_diffusion_colab] encoder_hidden_dim=${ENCODER_HIDDEN_DIM} encoder_depth=${ENCODER_DEPTH} encoder_heads=${ENCODER_HEADS}"
-echo "[run_diffusion_colab] style_feature_dim=${STYLE_FEATURE_DIM} style_memory_k=${STYLE_MEMORY_K}"
-echo "[run_diffusion_colab] patch_hidden_dim=${PATCH_HIDDEN_DIM} patch_depth=${PATCH_DEPTH} patch_heads=${PATCH_HEADS}"
-echo "[run_diffusion_colab] pixel_hidden_dim=${PIXEL_HIDDEN_DIM} pit_depth=${PIT_DEPTH} pit_heads=${PIT_HEADS}"
-echo "[run_diffusion_colab] style_fusion_start=${STYLE_FUSION_START} style_fusion_end=${STYLE_FUSION_END}"
-echo "[run_diffusion_colab] flow_lambda_rf=${FLOW_LAMBDA_RF} flow_sample_steps=${FLOW_SAMPLE_STEPS}"
-echo "[run_diffusion_colab] flow_sampler=${FLOW_SAMPLER} timestep_sampling=${TIMESTEP_SAMPLING}"
-echo "[run_diffusion_colab] oom_retry_sleep=${OOM_RETRY_SLEEP} max_oom_retries=${MAX_OOM_RETRIES}"
+echo "[run_diffusion_colab] batch=${BATCH_SIZE} lr=${LR} lr_warmup_steps=${LR_WARMUP_STEPS} lr_min_scale=${LR_MIN_SCALE}"
+echo "[run_diffusion_colab] latent_channels=${LATENT_CHANNELS} latent_size=${LATENT_SIZE}"
+echo "[run_diffusion_colab] vae_checkpoint=${VAE_CKPT:-<none>}"
+echo "[run_diffusion_colab] style_checkpoint=${STYLE_CKPT:-<none>}"
+echo "[run_diffusion_colab] style_lr_scale=${STYLE_LR_SCALE} style_lr_warmup_steps=${STYLE_LR_WARMUP_STEPS}"
+echo "[run_diffusion_colab] flow_lambda_img_l1=${FLOW_LAMBDA_IMG_L1} flow_lambda_img_perc=${FLOW_LAMBDA_IMG_PERC}"
+echo "[run_diffusion_colab] flow_difficulty_warmup_steps=${FLOW_DIFFICULTY_WARMUP_STEPS} flow_difficulty_refresh_every_steps=${FLOW_DIFFICULTY_REFRESH_EVERY_STEPS} flow_difficulty_ema_decay=${FLOW_DIFFICULTY_EMA_DECAY} flow_difficulty_alpha=${FLOW_DIFFICULTY_ALPHA} flow_difficulty_weight_range=[${FLOW_DIFFICULTY_MIN_WEIGHT},${FLOW_DIFFICULTY_MAX_WEIGHT}]"
+echo "[run_diffusion_colab] style_mid_tokens_per_ref=${STYLE_MID_TOKENS_PER_REF} local_style_tokens_per_ref=${LOCAL_STYLE_TOKENS_PER_REF} style_residual_tokens=${STYLE_RESIDUAL_TOKENS} style_residual_gate_init=${STYLE_RESIDUAL_GATE_INIT}"
+echo "[run_diffusion_colab] content_cross_attn_layers=${CONTENT_CROSS_ATTN_LAYERS} style_cross_attn_every_n_layers=${STYLE_CROSS_ATTN_EVERY_N_LAYERS}"
 
 attempt=1
 while true; do
@@ -485,13 +479,9 @@ while true; do
   fi
 
   if is_oom_failure "${attempt_marker}"; then
-    if [[ "${MAX_OOM_RETRIES}" != "0" && ${attempt} -ge ${MAX_OOM_RETRIES} ]]; then
-      echo "[run_diffusion_colab] attempt=${attempt} hit max OOM retries, aborting"
-      exit "${status}"
-    fi
-    echo "[run_diffusion_colab] attempt=${attempt} failed with OOM, sleeping ${OOM_RETRY_SLEEP}s before retry"
+    echo "[run_diffusion_colab] attempt=${attempt} failed with OOM, sleeping 60s before retry"
     attempt=$((attempt + 1))
-    sleep "${OOM_RETRY_SLEEP}"
+    sleep 60
     continue
   fi
 

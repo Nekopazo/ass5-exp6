@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inference entry for the content+style pixel-space flow path."""
+"""Inference entry for the content+style latent flow path."""
 
 from __future__ import annotations
 
@@ -23,17 +23,12 @@ def load_trainer(checkpoint_path: Path, device: torch.device) -> FlowTrainer:
         raise RuntimeError(f"Checkpoint is not a flow checkpoint: {checkpoint_path}")
     if "model_config" not in checkpoint:
         raise RuntimeError("Checkpoint is missing 'model_config'.")
-    trainer_config = checkpoint.get("trainer_config", {})
     model = SourcePartRefDiT(**checkpoint["model_config"])
-    trainer = FlowTrainer(
-        model,
-        device,
-        total_steps=1,
-        flow_sample_steps=int(trainer_config.get("flow_sample_steps", 20)),
-        flow_sampler=str(trainer_config.get("flow_sampler", "flow_dpm")),
-        timestep_sampling=str(trainer_config.get("timestep_sampling", "logit_normal")),
-    )
-    trainer.load(checkpoint_path)
+    trainer = FlowTrainer(model, device, total_steps=1, freeze_vae=False)
+    if "model_state" not in checkpoint:
+        raise RuntimeError("Flow checkpoint is missing model weights.")
+    trainer.model.load_state_dict(checkpoint["model_state"], strict=True)
+    trainer.model.eval()
     return trainer
 
 
@@ -60,7 +55,6 @@ def run_inference(
     font_names: List[str],
     chars: List[str],
     inference_steps: int,
-    flow_sampler: str,
 ) -> Dict[str, Dict[str, Dict[str, torch.Tensor]]]:
     results: Dict[str, Dict[str, Dict[str, torch.Tensor]]] = {}
     for font_name in font_names:
@@ -69,11 +63,12 @@ def run_inference(
             sample = dataset[find_sample_index(dataset, font_name, char)]
             content = sample["content"].unsqueeze(0)
             style = sample["style_img"].unsqueeze(0)
+            style_ref_mask = sample["style_ref_mask"].unsqueeze(0)
             generation = trainer.flow_sample(
                 content,
                 style_img=style,
+                style_ref_mask=style_ref_mask,
                 num_inference_steps=int(inference_steps),
-                sampler=str(flow_sampler),
             )
             font_rows[char] = {
                 "content": sample["content"],
@@ -134,8 +129,7 @@ def main() -> None:
     parser.add_argument("--num-chars", type=int, default=6)
     parser.add_argument("--font-names", type=str, default="")
     parser.add_argument("--chars", type=str, default="")
-    parser.add_argument("--inference-steps", type=int, default=20)
-    parser.add_argument("--flow-sampler", type=str, default="flow_dpm", choices=["flow_dpm", "euler", "heun"])
+    parser.add_argument("--inference-steps", type=int, default=24)
     parser.add_argument("--cell-size", type=int, default=128)
     args = parser.parse_args()
 
@@ -177,7 +171,6 @@ def main() -> None:
         font_names=font_names,
         chars=chars,
         inference_steps=int(args.inference_steps),
-        flow_sampler=str(args.flow_sampler),
     )
     grid = build_grid(results, font_names=font_names, chars=chars, cell_size=int(args.cell_size))
     args.output.parent.mkdir(parents=True, exist_ok=True)
