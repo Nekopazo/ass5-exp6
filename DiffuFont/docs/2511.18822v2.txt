@@ -1,0 +1,1545 @@
+﻿DiP: Taming Diffusion Models in Pixel Space
+
+Zhennan Chen1,2* Junwei Zhu2† Xu Chen2 Jiangning Zhang2 Xiaobin Hu3
+
+Hanzhen Zhao3 Chengjie Wang2 Jian Yang1 Ying Tai1‡
+1Nanjing University 2Tencent Youtu Lab 3National University of Singapore
+
+https://github.com/NJU-PCALab/DiP
+
+Abstract 😞 Information loss , Non-end-to-end training
+
+Diffusion models face a fundamental trade-off between DiT
+generation quality and computational efficiency. Latent
+Diffusion Models (LDMs) offer an efficient solution but
+suffer from potential information loss and non-end-to-end (a) Vanilla Latent Diffusion Model 
+training. In contrast, existing pixel space models by- 😞 Longer sequences, higher complexity
+
+pass VAEs but are computationally prohibitive for high-
+resolution synthesis. To resolve this dilemma, we propose patchfy unpatchfy
+
+DiT
+DiP, an efficient pixel space diffusion framework. DiP
+decouples generation into a global and a local stage: a
+Diffusion Transformer (DiT) backbone operates on large (b) Vanilla Pixel Diffusion Model
+
+patches for efficient global structure construction, while a 😊 End-to-end training, low computational cost, high quality 
+patch detailer head
+
+co-trained lightweight Patch Detailer Head leverages con- …
+textual features to restore fine-grained local details. This coarse structural mode fine detail mode
+
+synergistic design achieves computational efficiency com-
+parable to LDMs without relying on a VAE. DiP is accom- patchfy DiT unpatchfy
+
+plished with up to 10× faster inference speeds than previous
+method while increasing the total number of parameters by
+only 0.3%, and achieves an 1.79 FID score on ImageNet (c) Ours
+256×256. Figure 1. Comparison of vanilla latent diffusion model, vanilla
+1. Introduction pixel diffusion model and our method. Vanilla LDMs utilize VAEs
+
+to balance computational efficiency and generation quality. Vanilla
+Diffusion models [19, 20, 27, 38, 41, 44, 47–49, 57, 61] pixel diffusion models use small patches to pursue detailed gener-
+have reshaped the landscape of generative visual content. ation quality. Our method achieves high-quality generation while
+With its outstanding generative capabilities of fidelity and maintaining efficient end-to-end training in pixel space.
+diversity, they have established new state-of-the-art bench-
+marks across a multitude of tasks, including image syn- high-resolution images into a compact latent space, LDMs
+thesis [3, 6–8, 11, 53, 60, 68, 70, 73, 74], video gener- significantly reduce the computational complexity of the it-
+ation [13, 36, 64], and 3D object creation [65–67], deci- erative denoising process, as shown in Figure 1(a). Never-
+sively surpassing prior paradigms like Generative Adver- theless, this approach is not without its limitations, includ-
+sarial Networks (GANs) [14, 26, 35, 40, 69, 75]. However, ing potential information loss [4, 17, 28, 59] during VAE
+this generative prowess is underpinned by immense compu- compression and a non-end-to-end training pipeline.
+tational demands. Consequently, the inherent trade-off be- The most direct solution to eliminate the shortcomings of
+tween generation quality and computational efficiency thus LDMs is to train a diffusion model in pixel space. However,
+stands as one of the most critical challenges in the field of existing pixel space diffusion models [5, 9, 22, 23, 29, 50],
+diffusion models today. particularly those based on the powerful Transformer ar-
+
+To mitigate this challenge, Latent Diffusion Models chitecture [52], face a severe scalability issue. As shown
+(LDMs) [42] have emerged as the de facto standard. By em- in Figure 1(b), to capture fine-grained details, they typi-
+ploying a pre-trained autoencoder (VAE) [30] to compress cally rely on small input patches (e.g. 2×2 or 4×4), causing
+
+*Work done during the internship at Tencent. †Project Leader. the input sequence length to grow quadratically with image
+‡Corresponding Author. resolution. This quadratic scaling renders high-resolution
+
+arXiv:2511.18822v2  [cs.CV]  27 Nov 2025
+
+VAE
+
+… …
+Project out
+
+… … …
+
+… … …
+Project in Project in
+
+VAE … …
+
+
+
+• We propose DiP, a new end-to-end pixel diffusion model
+framework that effectively alleviates the trade-off be-
+tween generation quality and computational efficiency
+through synergistic global-local modeling.
+
+• We systematically validate the impact of different archi-
+tectural designs of our framework, hoping to provide the
+community with a unified, principled framework.
+
+• On ImageNet generation benchmarks, our framework
+achieves state-of-the-art performance and lowest infer-
+ence latency with low training costs.
+
+2. Related Work
+Latent Diffusion Models. Latent Diffusion Models
+(LDMs) [2, 3, 12, 39, 42, 57, 62] have become the de-facto
+paradigm for large-scale generative modeling due to their
+computational efficiency and scalability. By performing the
+
+Figure 2. Our method achieves the best FID score with mini- diffusion process in a compressed latent space learned by a
+mal computational cost. (Note: LDM latency includes VAE. The VAE, LDMs drastically reduce memory and computational
+methods marked with dashed lines ( ) are our estimated latency costs. Architectural advancements within this paradigm,
+based on the sampling method in the corresponding paper, and such as replacing the U-Net [43] backbone with a more
+should actually be greater than the marked values. The rest meth- scalable Transformer (DiT) [38], have further pushed the
+ods are the actual test results in the same hardware environment.) boundaries of generation quality. Despite their success, this
+
+efficiency comes at a cost: the VAE acts as an informa-
+training and inference computationally intractable, creat- tion bottleneck, imposing a hard ceiling on the final im-
+ing a formidable barrier to their practical application. age fidelity and often introducing subtle reconstruction ar-
+
+In this paper, we aim to resolve this critical trade-off tifacts [46, 59]. Our work circumvents these limitations by
+in pixel diffusion models. We propose an efficient pixel proposing an equally efficient architecture that operates di-
+space diffusion framework called DiP. As shown in Fig- rectly in pixel space, thereby eliminating the VAE-induced
+ure 1(c), for efficient global structure construction, we em- quality constraints.
+ploy a DiT [38] backbone. Critically, we configure it to Pixel Diffusion Models. Recent years have seen renewed
+operate on large image patches (e.g., 16×16). This setting interest in pixel space diffusion models that aim to max-
+choice drastically reduces the input sequence length, align- imize signal fidelity while addressing computational inef-
+ing it with that of mainstream LDMs operating in latent ficiency. Early works such as ADM [9] and DDPM [20]
+space. Consequently, our model achieves computational demonstrated the power of diffusion but were constrained
+efficiency comparable to LDMs while remaining entirely by the quadratic complexity of their backbones, rendering
+VAE-free, enabling it to effectively capture the global lay- them impractical for high resolutions. Multi-scale and im-
+out and semantic content of the image. However, operat- age patch-based methods [5, 10, 22, 23, 23] further en-
+ing on large patches alone inevitably leads to blurry out- hance the generation effect by decomposing large images
+puts lacking high-frequency details. To address this, we in- into small patches. However, these methods essentially sim-
+troduce a lightweight Patch Detailer Head (only 0.3% in- ulate locality through brute-force training, which leads to
+crease in total parameters), which is not a post-processing extremely low efficiency. Concurrent work JiT [33] demon-
+module but an integral component co-trained with the DiT strates that high-dimensional data in pixel space can be ef-
+backbone. For each large patch, it receives contextual fea- fectively modeled by predicting clean images. Recent work
+tures from the DiT and leverages its strong local receptive by PixelNerd [55] leverages a Transformer to process image
+fields to synthesize the missing high-frequency information. features, which then conditions a NeRF-like coordinate net-
+This synergistic design allows the DiT backbone to focus on work to act as a renderer for finely reconstructing each im-
+the computationally demanding task of global consistency, age patch, achieving impressive performance. Nevertheless,
+while the efficient Patch Detailer Head specializes in local PixelNerd tightly couples the success of its method with this
+texture and detail restoration. As demonstrated in Figure 2, specific NeRF-like rendering mechanism, which may limit
+our approach sets a new state-of-the-art on the efficiency- the exploration of a broader design space. We argue that the
+quality frontier, achieving superior FID scores at signifi- key to achieving efficient and high-quality pixel space gen-
+cantly lower latency compared to existing methods. Our eration lies not in relying on a specific structure like NeRF,
+main contributions are summarized as follows: but rather in the design principle of decoupling global struc-
+
+
+
+ture construction from local detail refinement. Based on this
+insight, this paper aims to provide a more principled, effi-
+
+DiT-only
+cient, and general solution for pixel space diffusion models.
+
+3. Methods
+Ours
+
+3.1. Preliminaries origin image
+
+A diffusion process gradually perturbs an initial data sample Init 20k steps 60k steps 100k steps
+Overfit
+
+x0 ∼ q (x0) from the true data distribution into isotropic
+Gaussian noise: Figure 3. Overfitting the DiT-only model using a single image
+
+√ √ in pixel space leads to poor detail reconstruction. Introducing a
+x local inductive bias achieves better reconstruction and accelerates
+t = ᾱtx0 + 1− ᾱtϵ,∏ where ϵ ∼ N (0, I), (1)
+
+convergence. Please zoom in for details.
+where t
+
+αt = 1− βt and ᾱt = i=1 αi. {βt}Ti=1 is a prede-
+fined variance schedule that controls the noise level at each
+step. As t → T, ᾱt → 0, and the distribution of xT con-
+verges to a standard normal distribution p (xT ) ≈ N (0, I).
+
+This discrete formulation can be generalized to a
+continuous-time setting via a stochastic differential equa-
+tion (SDE):
+
+dx = f(x, t)dt+ g(t)dw, (2) (a) DiT-only (b) Ours
+
+where f(·, t) is the drift and g(t) is the diffusion coefficient. Figure 4. The t-SNE visualization of feature space. In the Im-
+The trajectory of this reverse process is governed by a ageNet validation set, 100 samples were randomly selected from
+
+corresponding probability flow ordinary differential equa- each of the 10 classes for feature visualization. Features are ex-
+tion (ODE): [ ] tracted using DiT-only and our method, with each class shown in
+
+a distinct color.
+dx = f(x, t)− g(t)2∇x log pt(x) dt. (3)
+
+learn the coarse-level layout and arrangement of patches
+Learning to generate data is thus equivalent to learning but struggles to model the fine-grained textures and high-
+
+the score function log pt(x) or the associated vector field frequency details within each patch, consequently limiting
+of this ODE. To train a neural network for this task, sev- the upper bound of its image generation performance.
+eral objectives have been proposed. DDPM trains a model To empirically validate this, we conduct a preliminary
+ϵθ (xt, t) to predict the noise component θ from a noisy experiment by overfitting a DiT model on a single high-
+sample xt: [ ] resolution image in the pixel space. As shown in Figure 3,
+
+the model successfully captures the global layout and color
+LDDPM = Et,x0,ϵ ∥ϵ− ϵθ (xt, t)∥2 . (4) palette but fails to render fine textures and sharp edges, re-
+
+sulting in a blurry reconstruction. This result demonstrates
+Flow Matching (FM) [12] provides a simulation-free that when a DiT architecture operates directly on images,
+
+paradigm for directly learning the vector field. It defines a it suffers from a lack of inductive bias [1, 16, 25, 58] at
+conditional probability path pt (x | x0) and a corresponding the local level, rendering it incapable of achieving precise
+target vector field ut(x). A network vθ(x, t) is then trained pixel-level reconstruction within each patch.
+to regress this field by minim[ izing the loss: ] This motivates our core design principle: to augment the
+
+global Transformer with a dedicated module that explicitly
+LFM = Et,pt(x|x0) ∥ut(x)− vθ(x, t)∥2 . (5) re-injects this missing inductive bias for local details. In this
+
+3.2. Motivation way, our model can leverage the computational efficiency
+afforded by large patch sizes while simultaneously generat-
+
+DiT models the long-range dependencies of an image by ing high-quality images with fine-grained details. As shown
+partitioning it into a sequence of patches, thereby forming a in Figure 4, our method achieves tighter intra-class clus-
+coherent global structure. However, while the self-attention ters and clearer inter-class separation, whereas vanilla DiT
+mechanism excels at modeling macroscopic relationships exhibits more mixed distributions. This means that the in-
+between patches, it compresses the rich spatial information troduction of local inductive bias can more effectively inte-
+within each patch into a single, flattened token. This design grate local textures and edge cues in pixel space and thus
+introduces an inherent limitation: the model can adeptly improves high-level semantic separability and feature con-
+
+
+
+Patch Detailer Patch Detailer Patch Detailer Patch Detailer 
+Head Head Head Head
+
+DiT DiT DiT
+
+(a) Post-hoc Refinement (b) Intermediate Injection (c) Hybrid Injection
+
+Figure 5. Patch Detailer Head with local inductive bias was placed at different locations in the model. The results in Sec. 4.3 show that all
+three methods offer gains compared to DiT-only.
+
+sistency. Such improvements are expected to yield more Down Sampling 𝒔𝒊 Up Sampling
+
+stable structural alignment and better detail during genera-
+tion process. 𝒑𝒊 𝛜𝐢
+
+3.3. Framework
+Based on the above observation, we introduce a framework Figure 6. Patch Detailer Head framework. This design introduces
+for high-quality image generation that operates directly in the local inductive bias that DiT-only lacks with a low number of
+pixel space. DiP first employs a DiT to model the global parameters, resulting in a high-quality image with rich detail.
+structure and long-range dependencies of the image. Sub-
+sequently, a lightweight Patch Detailer Head refines the out- • Standard MLP. As a simple baseline, we used MLP that
+put at the patch level, introducing a local inductive bias to takes the feature vector si and a flattened noisy patch pi
+synthesize high-frequency details. as input. While straightforward, this design lacks any in-
+Global Structure Construction (DiT Backbone). Given herent spatial bias, treating all pixels within the patch as
+a noisy image xt ∈ RH×W×3 at timestep t, we first par- an unordered set.
+tition it into a sequence of non-overlapping patches. Each • Coordinate-based MLP. To introduce spatial awareness, a
+patch has a size of P×P (we set P=16), resulting in a se- design inspired by NeRF can be adopted [55]. For each
+quence of N=(H×W )/P 2 patches. This patching strategy pixel within pi, we concatenate its normalized 2D coor-
+ensures our pixel space model maintains a computational dinates. si is used to dynamically generate the weights
+footprint comparable to latent space DiT models. Along of a small, coordinate-based MLP. This implicitly learns
+with a timestep embedding and positional embeddings, they a continuous function of the image patch, but it lacks the
+are fed into a series of DiT blocks to produce a sequence of strong priors for local texture and structure that convolu-
+context-aware output features Sglobal ∈ RN×D, where D is tions provide.
+the feature dimension. • Intra-Patch Attention. We explored using a small Trans-
+Local Detail Refinement (Patch Detailer Head). The former to operate on the pixels within each patch. Each
+Patch Detailer Head operates independently and in paral- P×P patch is treated as a sequence of P 2 pixel tokens.
+lel on each patch. For each patch i, it takes two inputs: This allows for complex, content-aware interactions be-
+the corresponding global context map si and the original tween pixels but is computationally intensive and may not
+noisy pixel patch pi ∈ R3×P×P , where si ∈ RD×1×1 is be as efficient as convolutions for learning local patterns.
+obtained by reshaping and expanding Sglobal. Its objective • Convolutional U-Net (Our Final Choice). We found that
+is to leverage the global context from Sglobal to accurately a lightweight convolutional U-Net provided the best per-
+interpret the local noisy information in pi, ultimately pre- formance. The hierarchical structure of downsampling
+dicting the corresponding noise component ϵi ∈ R3×P×P
+
+and upsampling paths, combined with skip connections,
+for that patch. After processing all N patches in parallel, is exceptionally well-suited for capturing multi-scale spa-
+the resulting sequence of predicted noise patches {ϵi}Ni=1 is tial features and ensuring local continuity. The inherent
+reassembled into a full-resolution noise prediction map. inductive biases of convolutions (locality and translation
+
+3.4. Architecture Design equivariance) are highly effective for denoising local tex-
+tures and edges. As shown in Figure 6, we instantiate
+
+Exploring Patch Detailer Head Architectures. We in- the Patch Detailer Head with a shallow U-Net, which in-
+vestigated several architectures for the Patch Detailer Head, cludes 4 downsampling and 4 upsampling blocks. Each
+each embodying a different form of inductive bias. Our goal block consists of a sequence of Convolution, SiLU acti-
+is to present a simple, effective and highly efficient design. vation and pooling layer. The global feature vector si is
+
+Conv 
+SiLU
+
+Conv 
+SiLU
+
+Conv 
+SiLU
+
+Conv 
+SiLU
+
+Conv 
+SiLU
+
+Conv 
+SiLU
+
+Conv 
+SiLU
+
+Conv 
+SiLU
+
+Conv 
+SiLU
+
+Conv
+
+…
+
+…
+
+…
+Project in
+
+…
+
+…
+Project out
+
+…
+
+…
+Project in
+
+…
+
+…
+
+…
+
+…
+Project in
+
+…
+
+
+
+Method ImageNet 256×256
+FID↓ sFID↓ IS↑ Prec.↑ Rec.↑ Latency↓ Epochs NFE Params
+
+Latent Generative Models
+LDM [42] 3.60 - 247.7 0.87 0.48 - 170 250x2 400M+86M
+DiT-XL [38] 2.27 4.60 278.2 0.83 0.57 2.09s 1400 250x2 675M+86M
+MaskDiT-G [72] 2.28 5.67 276.6 0.80 0.61 - 1600 79x2 675M+86M
+SiT-XL [34] 2.06 4.50 270.3 0.82 0.59 2.09s 1400 250x2 675M+86M
+FlowDCN-XL [54] 2.00 4.33 263.1 0.82 0.58 - 400 250x2 618M+86M
+
+Pixel Generative Models
+CDM [21] 4.88 - 158.7 - - - 2160 4100 -
+ADM [9] 3.94 6.14 215.8 0.83 0.53 15.80s 400 500 554M
+JetFormer-L [51] 6.64 - - 0.69 0.56 - 500 - 2.8B
+SiD [22] 2.77 - 211.8 - - - 800 250×2 2.0B
+VDM++ [29] 2.12 - 278.1 - - - - 250×2 2.46B
+RIN [24] 3.42 - 182.0 - - - 480 1000 410M
+Farmer/16 [71] 3.96 - 250.6 0.79 0.50 - 320 - 1.9B
+PixelFlow-XL/4 [5] 1.98 5.83 282.1 0.81 0.60 7.50s 320 120x2 677M
+
+DiP-XL/16 2.16 4.79 276.8 0.82 0.61 0.92s 160 100x2 631M
+DiP-XL/16 1.98 4.57 282.9 0.80 0.62 0.70s 320 75x2 631M
+DiP-XL/16 1.79 4.59 281.9 0.80 0.63 0.92s 600 100x2 631M
+
+Table 1. Comparison of the performance of different methods on ImageNet 256×256 with Euler solver and CFG. Performance metrics are
+annotated with ↑ (higher is better) and ↓ (lower is better). Our method achieves the best FID score. Furthermore, compared to other pixel
+diffusion models, we achieve the best performance across all metrics with the lowest latency.
+
+concatenated channel-wise with the downsampling out- DiT blocks.
+put at the bottleneck. This design allows the global se- • Hybrid Injection. Patch Detailer Head are placed both at
+mantic information to guide the local refinement process an intermediate stage and at the end of the DiT.
+effectively while keeping the parameter count minimal. Our experiments in Sec. 4.3 revealed that all three strate-
+We provide experimental evidence for this part in gies yield comparable performance gains over the base-
+
+Sec. 4.3. Furthermore, we present a preliminary theoreti- line DiT. However, the Post-hoc Refinement strategy has
+cal analysis in Appendix to model the necessity and effec- a unique advantage: by placing the Head at the end, we
+tiveness of the Patch Detailer Head, aiming to offer deeper treat the standard DiT architecture as a fixed, black-box
+insights. backbone. This approach requires no modification to the
+Placement of the Patch Detailer Head. Since the main DiT’s internal structure, greatly simplifying implementa-
+weakness of DiT backbone being trained directly in pixel tion and potentially allowing for the use of pre-trained DiT
+space is its lack of local awareness, a natural design ques- checkpoints. Given its optimal balance between high per-
+tion arises: does introducing Patch Detailer Head at differ- formance and implementation simplicity, we adopt the post-
+ent locations in the model also bring gains? As shown in refinement strategy as the final architecture.
+Figure 5, we investigated three placement strategies:
+• Post-hoc Refinement. The Patch Detailer Head is placed 4. Experiments
+
+only after the final DiT block. This creates a clean separa-
+tion of concerns: the DiT is solely responsible for global 4.1. Setup
+modeling, and Patch Detailer Head is solely responsible Implementation Details. Our experiments are conducted
+for local refinement. on the class-conditional ImageNet dataset and original im-
+
+• Intermediate Injection. The Patch Detailer Head is in- ages are center-cropped and resized to 256×256 resolution.
+serted between DiT blocks. The refined patch representa- We set global batch size to 256. We use DDT [56], a variant
+tions are then projected back and fed into the subsequent of DiT, as our model backbone and apply an Exponential
+
+
+
+Figure 7. Qualitative samples from our model trained at 256 × 256 resolution with classifier-free guidance scale of 4.0. DiP demonstrates
+fine-grained detail, and high visual quality.
+
+Moving Average (EMA) on the model weights with a decay requiring a pre-trained VAE, surpassing potentially diffu-
+factor of 0.9999. In Patch Detailer Head, the kernel size of sion models such as DiT-XL (FID 2.27) and SiT-XL (FID
+the middle layers is set to 3, the padding to 1, and the ker- 2.06), which require longer training times. DiP outper-
+nel size of the last convolutional layer is set to 1. Unless forms the previous best pixel-based model, PixelFlow-XL/4
+otherwise specified, all samples were generated using the (FID 1.98), and significantly exceeds others like ADM (FID
+Euler-100 solver. More details are included in Appendix. 3.94) and VDM++ (FID 2.12). Even with a shorter training
+Evaluation Protocol. To ensure a comprehensive and rig- schedule of 160 epochs, our model reaches a competitive
+orous assessment of our model’s generative capabilities, we FID of 2.16, outperforming established models like DiT-XL
+adhere to the evaluation protocol established by ADM [9]. that require much longer training.
+We employ a suite of standard quantitative metrics to mea- Figure 7 presents qualitative samples of DiP at 256×256
+sure performance across different dimensions. Specifically, resolution. These visualizations reveal rich detail, demon-
+we use the Fréchet Inception Distance (FID) [18] to assess strating the effectiveness of introducing local inductive bias.
+overall realism and fidelity, the Spatial FID (sFID) [37] to More visualization samples are provided in Appendix.
+evaluate spatial and structural coherence, and the Inception Computational Cost Comparison. DiP’s parameter count
+Score (IS) [45] to measure class-conditional diversity. Fur- (631M) is significantly smaller than other pixel models,
+thermore, we report Precision (Prec.)/Recall (Rec.) [31] to such as VDM++ (2.0B) and Farmer (1.9B). DiP reaches
+respectively quantify the fidelity of individual samples and its best performance with only 320 epochs, which is over
+the model’s ability to cover the true data distribution. All 4× more efficient than DiT-XL and SiT-XL (1400 epochs)
+metrics are calculated using 50,000 generated samples. and substantially faster than many other pixel-based meth-
+
+4.2. Main Result ods like CDM (2160 epochs). In single-image inference
+speed tests, DiP (0.92s) is more than 2.2× faster than DiT-
+
+Performance. Table 1 presents a comprehensive com- XL (2.09s) and more than 8× faster than the previous best
+parison against recent SOTA methods with classifier-free pixel model, PixelFlow-XL (7.50s). Furthermore, in 75-
+guidance scheduling with guidance interval [32]. After step inference, DiP (0.70s) achieved the same FID score as
+600 training epochs, DiP achieved an FID of 1.79 without PixelFlow-XL with a speed more than 10× faster.
+
+
+
+Method ImageNet 256×256
+FID↓ sFID↓ IS↑ Prec.↑ Rec.↑ Training Cost Latency Params
+
+Scaling Up DiT
+DiT-only (26 Layers, 1152 Hidden Dim) 5.28 6.56 243.8 0.74 0.55 84×8 GPU Hours 0.88s 629M
+DiT-only (32 Layers, 1152 Hidden Dim) 4.91 6.44 251.7 0.74 0.56 103×8 GPU Hours 1.05s 772M
+DiT-only (26 Layers, 1280 Hidden Dim) 4.28 6.26 249.6 0.77 0.56 103×8 GPU Hours 1.06s 776M
+DiT-only (26 Layers, 1536 Hidden Dim) 2.83 5.16 285.6 0.80 0.57 149×8 GPU Hours 1.49s 1.1B
+
+Different Patch Detailer Head
+Standard MLP 6.92 7.27 210.9 0.79 0.41 93×8 GPU Hours 0.91s 630M
+Intra-Patch Attention 2.98 5.16 275.0 0.80 0.56 96×8 GPU Hours 0.94s 630M
+Coordinate-based MLP 2.20 4.49 284.6 0.80 0.58 123×8 GPU Hours 0.95s 700M
+Convolutional U-Net 2.16 4.79 276.8 0.82 0.61 92×8 GPU Hours 0.92s 631M
+
+Table 2. Impact of different design schemes on computational overhead and performance.
+
+Method ImageNet 512×512
+FID↓ sFID↓ Prec.↑ Rec.↑ IS↑ Params
+
+Latent Generative Models
+DiT-XL [38] 3.04 5.02 0.84 0.54 240.8 675M+86M
+MaskDiT-G [72] 2.50 5.10 0.83 0.56 256.3 675M+86M
+
+FID=2.16 FID=2.24 FID=3.53 SiT-XL [34] 2.62 4.18 0.84 0.57 252.2 675M+86M
+(a) Post-hoc Refinement (b) Intermediate Injection (c) Hybrid Injection FlowDCN-XL [54] 2.44 4.53 0.84 0.54 252.8 618M+86M
+
+Figure 8. The t-SNE visualization of feature space. Features are Pixel Generative Models
+
+extracted using Post-hoc Refinement, Intermediate Injection, and ADM [9] 3.85 5.86 0.84 0.53 221.7 554M
+SiD [22] 3.02 - - - 248.7 2.00B
+
+Hybrid Injection, with each class shown in a distinct color. VDM++ [29] 2.65 - - - 278.1 2.46B
+RIN [24] 3.95 - - - 216.0 410M
+
+4.3. Analysis DiP-XL/32 2.31 4.48 0.84 0.58 291.68 631M
+
+In this section, we analyzed the trade-off between genera- Table 3. Comparison of the performance of different methods on
+tion quality and computational cost during the development ImageNet 512×512 with CFG. Performance metrics are annotated
+of DiP, and at the same time explained the rationality of the with ↑ (higher is better) and ↓ (lower is better). Our method re-
+Patch Detailer Head we designed. mains competitive at higher resolutions.
+Patch Detailer Head vs. Scaling Up DiT. A common strat-
+egy to improve generative models is to increase the model tures for the Patch Detailer Head to understand the impor-
+size. However, our findings indicate that this is a subopti- tance of inductive bias in local patch refinement. (1) The
+mal approach for pixel space diffusion models. As shown Standard MLP performs poorly (6.92 FID), even worse than
+in Table 2, increasing the DiT’s depth from 26 to 32 lay- the DiT-only baseline. This is expected, as it lacks any spa-
+ers yields only a marginal improvement (FID from 5.28 to tial inductive bias, treating patch pixels as an unordered set
+4.91) at a considerable cost in parameters and training time. and failing to capture crucial local structures. (2) The Intra-
+It also means that the effectiveness of our Patch Detailer Patch Attention shows a significant improvement over the
+Head comes from the introduction of effective local induc- MLP (FID 2.98). This indicates that content-aware relation-
+tive biases, rather than increasing network depth. ships between pixels are valuable. Its training and inference
+
+In contrast, widening the model proves more effective costs are only slightly higher than our final choice, but its
+for quality improvement. For instance, scaling the hidden actual memory overhead is about twice that of the final solu-
+dimension to 1536 reduces the FID to 2.83. This substantial tion. (3) The Coordinate-based MLP achieves 2.20 FID (we
+quality gain comes at a prohibitive cost: a 74.9% increase are based on a reproduction of [55]). By explicitly condi-
+in parameters (from 629M to 1.1B), a 77.4% rise in training tioning on pixel coordinates, it effectively introduces spatial
+cost (from 84×8 to 149×8 GPU hours), and a 69.3% (from awareness. However, it requires more parameters (700M)
+0.88s to 1.49s) increase in inference latency. This highlights and a longer training time (123×8 GPU hours) compared
+a critical challenge with monolithic scaling, where signifi- to our final choice, and its implicit continuous representa-
+cant computational resources are required for performance. tion may lack the strong, built-in priors for local patterns
+Experimental Results of Exploring Patch Detailer Head that convolutions provide. (4) The Convolutional U-Net in-
+Architectures. We further investigated different architec- creases the number of parameters by only 0.3% (from 629M
+
+
+
+(a) Different Patch Detailer Head Configuration (b) The Influence of Different Patch Size
+
+Figure 10. (a). Performance differences between different Patch
+Detailer Head configurations. Depth is defined as the number of
+down/up-sampling stages, and width corresponds to the number
+of base channels in the convolutional layers. (b). Performance and
+computational overhead ifferences of different patch sizes.
+
+Impact of Patch Detailer Head Configuration. Our find-
+Figure 9. Qualitative samples from our model trained at 512×512 ings reveal distinct trends for depth and width. As we
+resolution with classifier-free guidance scale of 4.0. DiP show- increase the depth, we observe a consistent improvement
+cases fine-grained detail and rich diversity at higher resolutions. in generation quality, although the gains exhibit diminish-
+
+ing returns and eventually saturate. This suggests that a
+to 631M) and achieves the best FID score with the lowest multi-scale feature hierarchy is crucial for the Patch De-
+computational cost among all Patch Detailer Head. Its suc- tailer Head to effectively synthesize high-frequency details
+cess can be attributed to highly relevant inductive biases of across. Conversely, blindly increasing the width will not
+convolutions. It is well-suited for capturing and preserv- lead to a sustained performance improvement. This indi-
+ing the continuity of local textures and edges, making it cates that the role of Patch Detailer Head is not to perform
+the most efficient and effective architecture for performing complex feature transformations, but rather to render spe-
+patch-level detail optimizations. cific details.
+
+In summary, our experimental results clearly demon- Impact of Patch Size. Small patch size offer superior
+strates that introducing an appropriate local inductive bias performance but also significantly increase computational
+via a Patch Detailer Head is key to performance improve- overhead. Our method can use large patch to shorten the
+ment over the scaling up DiT baseline. Among the archi- input sequence length, making our model’s computational
+tectures explored, the Convolutional U-Net strikes the op- efficiency comparable to mainstream LDMs. As shown
+timal balance between best generation quality and minimal in Figure 10(b), at the higher 512×512 resolution, DiP
+computational cost, making it our definitive choice. maintains a significant performance margin over a DiT-
+Experimental Results of Placement of the Patch Detailer only baseline using smaller patch size. This validates that
+Head. We tested the effects of introducing Patch Detailer our approach provides a robust solution for efficient, high-
+Head at different locations in the model. As shown in Fig- resolution synthesis directly in pixel space.
+ure 8, all three introduction modes showed significant im-
+provements compared to DiT-only (FID 5.28). From the 5. Conclusion
+feature visualization results, Hybrid Injection performed In this paper, we addressed the fundamental trade-off be-
+worse in clustering than the other two, which may be tween generation quality and computational efficiency in
+due to multiple local inductive biases potentially disrupting pixel diffusion models. We introduced DiP, a new end-
+the original structure, leading to performance degradation. to-end pixel space diffusion framework that resolves this
+Post-hoc Refinement achieves the best performance, a re- dilemma through a synergistic global-local modeling ap-
+sult attributed to the synergy between global build and local proach. By employing a DiT backbone on large image
+refinement, while its implementation is simple and easily patches, we achieve computational efficiency comparable
+extensible. to LDMs for modeling global structures. This is comple-
+
+4.4. Ablation Study mented by a co-trained, lightweight Patch Detailer Head
+that expertly restores high-frequency details, effectively by-
+
+Performance on ImageNet 512×512. As shown in Ta- passing the need for a VAE. Our extensive experiments on
+ble 3, on 512×512 resolution, DiP achieved the bset FID the ImageNet benchmark demonstrate that achieves supe-
+score , surpassing previous methods. Figure 9 illustrates the rior FID scores with significantly lower inference latency
+sampling results at 512×512, demonstrating that DiP can and training costs. In the future, we plan to apply the DiP
+also generate high-quality images. We present more quali- framework to text to image and text to video tasks to further
+tative results in Appendix. explore the capabilities of this solution.
+
+
+
+References Yoshua Bengio. Generative adversarial networks. Commu-
+nications of the ACM, 63(11):139–144, 2020. 1
+
+[1] Jie An, De Wang, Pengsheng Guo, Jiebo Luo, and Alex [15] Ian J Goodfellow, Jean Pouget-Abadie, Mehdi Mirza, Bing
+Schwing. On inductive biases that enable generalization in Xu, David Warde-Farley, Sherjil Ozair, Aaron Courville, and
+diffusion transformers. In The Thirty-ninth Annual Confer- Yoshua Bengio. Generative adversarial nets. Advances in
+ence on Neural Information Processing Systems, 2024. 3 neural information processing systems, 27, 2014. 7
+
+[2] BlackForest. Black forest labs; frontier ai lab, 2024. 2 [16] Anirudh Goyal and Yoshua Bengio. Inductive biases for deep
+[3] Junsong Chen, Jincheng Yu, Chongjian Ge, Lewei Yao, Enze learning of higher-level cognition. Proceedings of the Royal
+
+Xie, Yue Wu, Zhongdao Wang, James Kwok, Ping Luo, Society A, 478(2266):20210068, 2022. 3
+Huchuan Lu, et al. Pixart-α: Fast training of diffusion [17] Agrim Gupta, Lijun Yu, Kihyuk Sohn, Xiuye Gu, Meera
+transformer for photorealistic text-to-image synthesis. arXiv Hahn, Fei-Fei Li, Irfan Essa, Lu Jiang, and José Lezama.
+preprint arXiv:2310.00426, 2023. 1, 2 Photorealistic video generation with diffusion models. In
+
+[4] Junyu Chen, Han Cai, Junsong Chen, Enze Xie, Shang Yang, European Conference on Computer Vision, pages 393–411.
+Haotian Tang, Muyang Li, Yao Lu, and Song Han. Deep Springer, 2024. 1
+compression autoencoder for efficient high-resolution diffu- [18] Martin Heusel, Hubert Ramsauer, Thomas Unterthiner,
+sion models. arXiv preprint arXiv:2410.10733, 2024. 1 Bernhard Nessler, and Sepp Hochreiter. Gans trained by a
+
+[5] Shoufa Chen, Chongjian Ge, Shilong Zhang, Peize Sun, and two time-scale update rule converge to a local nash equilib-
+Ping Luo. Pixelflow: Pixel-space generative models with rium. Advances in neural information processing systems,
+flow. arXiv preprint arXiv:2504.07963, 2025. 1, 2, 5 30, 2017. 6
+
+[6] Zhennan Chen, Rongrong Gao, Tian-Zhu Xiang, and Fan [19] Jonathan Ho and Tim Salimans. Classifier-free diffusion
+Lin. Diffusion model for camouflaged object detection. In guidance. arXiv preprint arXiv:2207.12598, 2022. 1
+ECAI 2023, pages 445–452. IOS Press, 2023. 1 [20] Jonathan Ho, Ajay Jain, and Pieter Abbeel. Denoising dif-
+
+[7] Zhennan Chen, Yajie Li, Haofan Wang, Zhibo Chen, fusion probabilistic models. Advances in neural information
+Zhengkai Jiang, Jun Li, Qian Wang, Jian Yang, and Ying processing systems, 33:6840–6851, 2020. 1, 2
+Tai. Ragd: Regional-aware diffusion model for text-to-image [21] Jonathan Ho, Chitwan Saharia, William Chan, David J Fleet,
+generation. In Proceedings of the IEEE/CVF International Mohammad Norouzi, and Tim Salimans. Cascaded diffu-
+Conference on Computer Vision, pages 19331–19341, 2025. sion models for high fidelity image generation. Journal of
+
+[8] En Ci, Shanyan Guan, Yanhao Ge, Yilin Zhang, Wei Li, Machine Learning Research, 23(47):1–33, 2022. 5
+Zhenyu Zhang, Jian Yang, and Ying Tai. Describe, don’t dic- [22] Emiel Hoogeboom, Jonathan Heek, and Tim Salimans. sim-
+tate: Semantic image editing with natural language intent. In ple diffusion: End-to-end diffusion for high resolution im-
+Proceedings of the IEEE/CVF International Conference on ages. In International Conference on Machine Learning,
+Computer Vision, pages 19185–19194, 2025. 1 pages 13213–13232. PMLR, 2023. 1, 2, 5, 7
+
+[9] Prafulla Dhariwal and Alexander Nichol. Diffusion models [23] Emiel Hoogeboom, Thomas Mensink, Jonathan Heek, Kay
+beat gans on image synthesis. Advances in neural informa- Lamerigts, Ruiqi Gao, and Tim Salimans. Simpler diffusion
+tion processing systems, 34:8780–8794, 2021. 1, 2, 5, 6, 7 (sid2): 1.5 fid on imagenet512 with pixel-space diffusion.
+
+[10] Zheng Ding, Mengqi Zhang, Jiajun Wu, and Zhuowen Tu. arXiv preprint arXiv:2410.19324, 2024. 1, 2
+Patched denoising diffusion models for high-resolution im- [24] Allan Jabri, David Fleet, and Ting Chen. Scalable adap-
+age synthesis. In The twelfth international conference on tive computation for iterative generation. arXiv preprint
+learning representations, 2023. 2 arXiv:2212.11972, 2022. 5, 7
+
+[11] Nikai Du, Zhennan Chen, Shan Gao, Zhizhou Chen, Xi [25] Zahra Kadkhodaie, Florentin Guth, Eero P Simoncelli, and
+Chen, Zhengkai Jiang, Jian Yang, and Ying Tai. Textcrafter: Stéphane Mallat. Generalization in diffusion models arises
+Accurately rendering multiple texts in complex visual from geometry-adaptive harmonic representations. arXiv
+scenes. arXiv preprint arXiv:2503.23461, 2025. 1 preprint arXiv:2310.02557, 2023. 3
+
+[12] Patrick Esser, Sumith Kulal, Andreas Blattmann, Rahim [26] Tero Karras, Samuli Laine, and Timo Aila. A style-based
+Entezari, Jonas Müller, Harry Saini, Yam Levi, Dominik generator architecture for generative adversarial networks.
+Lorenz, Axel Sauer, Frederic Boesel, et al. Scaling recti- In Proceedings of the IEEE/CVF conference on computer vi-
+fied flow transformers for high-resolution image synthesis. sion and pattern recognition, pages 4401–4410, 2019. 1
+In Forty-first international conference on machine learning, [27] Tero Karras, Miika Aittala, Tuomas Kynkäänniemi, Jaakko
+2024. 2, 3 Lehtinen, Timo Aila, and Samuli Laine. Guiding a diffu-
+
+[13] Tiehan Fan, Kepan Nan, Rui Xie, Penghao Zhou, Zhenheng sion model with a bad version of itself. Advances in Neural
+Yang, Chaoyou Fu, Xiang Li, Jian Yang, and Ying Tai. In- Information Processing Systems, 37:52996–53021, 2024. 1
+stancecap: Improving text-to-video generation via instance- [28] Maciej Kilian, Varun Jampani, and Luke Zettlemoyer.
+aware structured caption. In Proceedings of the Computer Computational tradeoffs in image synthesis: Diffusion,
+Vision and Pattern Recognition Conference, pages 28974– masked-token, and next-token prediction. arXiv preprint
+28983, 2025. 1 arXiv:2405.13218, 2024. 1
+
+[14] Ian Goodfellow, Jean Pouget-Abadie, Mehdi Mirza, Bing [29] Diederik Kingma and Ruiqi Gao. Understanding diffu-
+Xu, David Warde-Farley, Sherjil Ozair, Aaron Courville, and sion objectives as the elbo with simple data augmentation.
+
+
+
+Advances in Neural Information Processing Systems, 36: [44] Chitwan Saharia, William Chan, Saurabh Saxena, Lala
+65484–65516, 2023. 1, 5, 7 Li, Jay Whang, Emily L Denton, Kamyar Ghasemipour,
+
+[30] Diederik P Kingma and Max Welling. Auto-encoding varia- Raphael Gontijo Lopes, Burcu Karagol Ayan, Tim Salimans,
+tional bayes. arXiv preprint arXiv:1312.6114, 2013. 1 et al. Photorealistic text-to-image diffusion models with deep
+
+[31] Tuomas Kynkäänniemi, Tero Karras, Samuli Laine, Jaakko language understanding. Advances in neural information
+Lehtinen, and Timo Aila. Improved precision and recall met- processing systems, 35:36479–36494, 2022. 1
+ric for assessing generative models. Advances in neural in- [45] Tim Salimans, Ian Goodfellow, Wojciech Zaremba, Vicki
+formation processing systems, 32, 2019. 6 Cheung, Alec Radford, and Xi Chen. Improved techniques
+
+[32] Tuomas Kynkäänniemi, Miika Aittala, Tero Karras, Samuli for training gans. Advances in neural information processing
+Laine, Timo Aila, and Jaakko Lehtinen. Applying guidance systems, 29, 2016. 6
+in a limited interval improves sample and distribution quality [46] Ivan Skorokhodov, Sharath Girish, Benran Hu, Willi Mena-
+in diffusion models. Advances in Neural Information Pro- pace, Yanyu Li, Rameen Abdal, Sergey Tulyakov, and Aliak-
+cessing Systems, 37:122458–122483, 2024. 6, 7 sandr Siarohin. Improving the diffusability of autoencoders.
+
+[33] Tianhong Li and Kaiming He. Back to basics: Let arXiv preprint arXiv:2502.14831, 2025. 2
+denoising generative models denoise. arXiv preprint [47] Jascha Sohl-Dickstein, Eric Weiss, Niru Maheswaranathan,
+arXiv:2511.13720, 2025. 2 and Surya Ganguli. Deep unsupervised learning using
+
+[34] Nanye Ma, Mark Goldstein, Michael S Albergo, Nicholas M nonequilibrium thermodynamics. In International confer-
+Boffi, Eric Vanden-Eijnden, and Saining Xie. Sit: Explor- ence on machine learning, pages 2256–2265. PMLR, 2015.
+ing flow and diffusion-based generative models with scalable 1
+interpolant transformers. In European Conference on Com- [48] Jiaming Song, Chenlin Meng, and Stefano Ermon.
+puter Vision, pages 23–40. Springer, 2024. 5, 7 Denoising diffusion implicit models. arXiv preprint
+
+[35] Mehdi Mirza and Simon Osindero. Conditional generative arXiv:2010.02502, 2020.
+adversarial nets. arXiv preprint arXiv:1411.1784, 2014. 1 [49] Yang Song, Jascha Sohl-Dickstein, Diederik P Kingma, Ab-
+
+[36] Kepan Nan, Rui Xie, Penghao Zhou, Tiehan Fan, Zhen- hishek Kumar, Stefano Ermon, and Ben Poole. Score-based
+heng Yang, Zhijie Chen, Xiang Li, Jian Yang, and Ying Tai. generative modeling through stochastic differential equa-
+Openvid-1m: A large-scale high-quality dataset for text-to- tions. arXiv preprint arXiv:2011.13456, 2020. 1
+video generation. arXiv preprint arXiv:2407.02371, 2024. [50] Jiayan Teng, Wendi Zheng, Ming Ding, Wenyi Hong, Jian-
+1 qiao Wangni, Zhuoyi Yang, and Jie Tang. Relay diffusion:
+
+[37] Charlie Nash, Jacob Menick, Sander Dieleman, and Peter W Unifying diffusion process across resolutions for image syn-
+Battaglia. Generating images with sparse representations. thesis. arXiv preprint arXiv:2309.03350, 2023. 1
+arXiv preprint arXiv:2103.03841, 2021. 6 [51] Michael Tschannen, André Susano Pinto, and Alexander
+
+[38] William Peebles and Saining Xie. Scalable diffusion models Kolesnikov. Jetformer: An autoregressive generative model
+with transformers. In Proceedings of the IEEE/CVF Inter- of raw images and text. arXiv preprint arXiv:2411.19722,
+national Conference on Computer Vision, pages 4195–4205, 2024. 5
+2023. 1, 2, 5, 7 [52] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszko-
+
+[39] Dustin Podell, Zion English, Kyle Lacey, Andreas reit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia
+Blattmann, Tim Dockhorn, Jonas Müller, Joe Penna, and Polosukhin. Attention is all you need. Advances in neural
+Robin Rombach. Sdxl: Improving latent diffusion mod- information processing systems, 30, 2017. 1
+els for high-resolution image synthesis. arXiv preprint [53] Qixun Wang, Xu Bai, Haofan Wang, Zekui Qin, Anthony
+arXiv:2307.01952, 2023. 2 Chen, Huaxia Li, Xu Tang, and Yao Hu. Instantid: Zero-shot
+
+[40] Alec Radford, Luke Metz, and Soumith Chintala. Un- identity-preserving generation in seconds. arXiv preprint
+supervised representation learning with deep convolu- arXiv:2401.07519, 2024. 1
+tional generative adversarial networks. arXiv preprint [54] Shuai Wang, Zexian Li, Tianhui Song, Xubin Li, Tiezheng
+arXiv:1511.06434, 2015. 1 Ge, Bo Zheng, and Limin Wang. Flowdcn: Exploring dcn-
+
+[41] Aditya Ramesh, Prafulla Dhariwal, Alex Nichol, Casey Chu, like architectures for fast image generation with arbitrary res-
+and Mark Chen. Hierarchical text-conditional image gener- olution. In Proceedings of the 38th International Conference
+ation with clip latents. arXiv preprint arXiv:2204.06125, 1 on Neural Information Processing Systems, pages 87959–
+(2):3, 2022. 1 87977, 2024. 5, 7
+
+[42] Robin Rombach, Andreas Blattmann, Dominik Lorenz, [55] Shuai Wang, Ziteng Gao, Chenhui Zhu, Weilin Huang, and
+Patrick Esser, and Björn Ommer. High-resolution image Limin Wang. Pixnerd: Pixel neural field diffusion. arXiv
+synthesis with latent diffusion models. In Proceedings of preprint arXiv:2507.23268, 2025. 2, 4, 7
+the IEEE/CVF conference on computer vision and pattern [56] Shuai Wang, Zhi Tian, Weilin Huang, and Limin Wang.
+recognition, pages 10684–10695, 2022. 1, 2, 5 Ddt: Decoupled diffusion transformer. arXiv preprint
+
+[43] Olaf Ronneberger, Philipp Fischer, and Thomas Brox. U- arXiv:2504.05741, 2025. 5, 7
+net: Convolutional networks for biomedical image segmen- [57] Enze Xie, Junsong Chen, Junyu Chen, Han Cai, Yujun Lin,
+tation. In International Conference on Medical image com- Zhekai Zhang, Muyang Li, Yao Lu, and Song Han. Sana: Ef-
+puting and computer-assisted intervention, pages 234–241. ficient high-resolution image synthesis with linear diffusion
+Springer, 2015. 2 transformers. arXiv preprint arXiv:2410.10629, 2024. 1, 2
+
+
+
+[58] Tao Yang, Cuiling Lan, Yan Lu, and Nanning Zheng. Diffu- [70] Chen Zhao, En Ci, Yunzhe Xu, Tiehan Fan, Shanyan Guan,
+sion model with cross attention as an inductive bias for dis- Yanhao Ge, Jian Yang, and Ying Tai. Ultrahr-100k: En-
+entanglement. Advances in Neural Information Processing hancing uhr image synthesis with a large-scale high-quality
+Systems, 37:82465–82492, 2024. 3 dataset. Advances in Neural Information Processing Sys-
+
+[59] Jingfeng Yao, Bin Yang, and Xinggang Wang. Reconstruc- tems, 2025. 1
+tion vs. generation: Taming optimization dilemma in latent [71] Guangting Zheng, Qinyu Zhao, Tao Yang, Fei Xiao, Zhi-
+diffusion models. In Proceedings of the Computer Vision and jie Lin, Jie Wu, Jiajun Deng, Yanyong Zhang, and Rui Zhu.
+Pattern Recognition Conference, pages 15703–15712, 2025. Farmer: Flow autoregressive transformer over pixels. arXiv
+1, 2 preprint arXiv:2510.23588, 2025. 5
+
+[60] Hu Ye, Jun Zhang, Sibo Liu, Xiao Han, and Wei Yang. Ip- [72] Hongkai Zheng, Weili Nie, Arash Vahdat, and Anima
+adapter: Text compatible image prompt adapter for text-to- Anandkumar. Fast training of diffusion models with masked
+image diffusion models. arXiv preprint arXiv:2308.06721, transformers. arXiv preprint arXiv:2306.09305, 2023. 5, 7
+2023. 1 [73] Dewei Zhou, You Li, Fan Ma, Xiaoting Zhang, and Yi Yang.
+
+[61] Jiahui Yu, Yuanzhong Xu, Jing Yu Koh, Thang Luong, Gun- Migc: Multi-instance generation controller for text-to-image
+jan Baid, Zirui Wang, Vijay Vasudevan, Alexander Ku, Yin- synthesis. In Proceedings of the IEEE/CVF Conference
+fei Yang, Burcu Karagol Ayan, et al. Scaling autoregres- on Computer Vision and Pattern Recognition, pages 6818–
+sive models for content-rich text-to-image generation. arXiv 6828, 2024. 1
+preprint arXiv:2206.10789, 2(3):5, 2022. 1 [74] Dewei Zhou, Ji Xie, Zongxin Yang, and Yi Yang. 3dis:
+
+[62] Lvmin Zhang, Anyi Rao, and Maneesh Agrawala. Adding Depth-driven decoupled instance synthesis for text-to-image
+conditional control to text-to-image diffusion models. In generation. arXiv preprint arXiv:2410.12669, 2024. 1
+Proceedings of the IEEE/CVF International Conference on [75] Jun-Yan Zhu, Taesung Park, Phillip Isola, and Alexei A
+Computer Vision, pages 3836–3847, 2023. 2 Efros. Unpaired image-to-image translation using cycle-
+
+[63] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shecht- consistent adversarial networks. In Proceedings of the IEEE
+man, and Oliver Wang. The unreasonable effectiveness of international conference on computer vision, pages 2223–
+deep features as a perceptual metric. In Proceedings of the 2232, 2017. 1
+IEEE conference on computer vision and pattern recogni-
+tion, pages 586–595, 2018. 7
+
+[64] Xuying Zhang, Xiaoshuai Sun, Yunpeng Luo, Jiayi Ji, Yiyi
+Zhou, Yongjian Wu, Feiyue Huang, and Rongrong Ji. Rstnet:
+Captioning with adaptive attention on visual and non-visual
+words. In Proceedings of the IEEE/CVF conference on com-
+puter vision and pattern recognition, pages 15465–15474,
+2021. 1
+
+[65] Xuying Zhang, Yutong Liu, Yangguang Li, Renrui Zhang,
+Yufei Liu, Kai Wang, Wanli Ouyang, Zhiwei Xiong, Peng
+Gao, Qibin Hou, et al. Tar3d: Creating high-quality 3d assets
+via next-part prediction. arXiv preprint arXiv:2412.16919,
+2024. 1
+
+[66] Xuying Zhang, Bo-Wen Yin, Yuming Chen, Zheng Lin, Yun-
+heng Li, Qibin Hou, and Ming-Ming Cheng. Temo: Towards
+text-driven 3d stylization for multi-object meshes. In Pro-
+ceedings of the ieee/cvf conference on computer vision and
+pattern recognition, pages 19531–19540, 2024.
+
+[67] Xuying Zhang, Yupeng Zhou, Kai Wang, Yikai Wang, Zhen
+Li, Shaohui Jiao, Daquan Zhou, Qibin Hou, and Ming-
+Ming Cheng. Ar-1-to-3: Single image to consistent 3d
+object generation via next-view prediction. arXiv preprint
+arXiv:2503.12929, 2025. 1
+
+[68] Chen Zhao, Weiling Cai, Chenyu Dong, and Chengwei
+Hu. Wavelet-based fourier information interaction with fre-
+quency diffusion adjustment for underwater image restora-
+tion. In Proceedings of the IEEE/CVF Conference on Com-
+puter Vision and Pattern Recognition, pages 8281–8291,
+2024. 1
+
+[69] Chen Zhao, Weiling Cai, Chengwei Hu, and Zheng Yuan.
+Cycle contrastive adversarial learning with structural consis-
+tency for unsupervised high-quality image deraining trans-
+former. Neural Networks, 178:106428, 2024. 1
+
+
+
+DiP: Taming Diffusion Models in Pixel Space
+Supplementary Material
+
+A. Why Patch Detailer Head: A Theoretical Perspective
+In this section, we try to provide a simplified theoretical analysis to further elucidate why we need local detail refinement in
+enhancing generation quality. From a general insight, we argue that DiT primarily focuses on the layout and arrangement of
+the dominant elements in the image, or in other words, the low-frequency signals of the global data. Consequently, it is less
+effective to learn local details and high-frequency signals. Through the refinement structure, we directly inject all signals from
+the global data into the learning process, which substantially improves the fine-grained processing of these high-frequency
+details.
+
+Specifically, we follow the flow matching description of the diffusion process. Given an initial data sample x0 ∼
+pdata(x0) ∈ Rd as the input, a Gaussian noise ϵ ∼ N (0, Id), and t ∈ [0, 1], let
+
+xt = (1− t)x0 + tϵ. (6)
+
+In this paper, since all inputs are partitioned into patches of equal size, we first define the patch-{level}input as follows.
+N
+
+Definition[A(.1 (P)atch-level Input)). F]or each input x d
+0 ∈ R , we define the patch-level input as (s)
+
+x0 , where (s)
+x0 ∈ Rp
+
+s=1
+⊤ ( ⊤ ⊤
+
+and (1) (N)
+x0 = x0 , · · · , x0 , Np = d.
+
+{ }
+It is natural to represent the patch-level input by a series of selection matrices P(s) N
+
+. For each s, P(s)
+
+[ ( ) ∈ Rp×d
+s=1
+
+satisfies P(s) P(s) ⊤
+= I ] s) (s)
+
+p and P( x0 = x0 . The flow-based models try to minimize a loss function defined as LFM =
+
+Et,x , t)− (ϵ− x suming that eac
+0,ϵ ∥f(xt 0)∥2 . As (h patch)is independent of one another, a patch-level predictor f(·, t) tries
+
+to estimate the patch-level objective field (s)
+v̂(s) = f xt , t for each patch-level noised input (s) (s)
+
+xt = (1 − t)x0 + tϵ(s),
+where ϵ(s) = P(s)ϵ ∼ N (0, Ip). For the given LFM, the o[ptimal predi∣ctor is]the conditional expectation
+
+(s) ∣ (s)
+v̂(s),∗ = E ϵ(s) − x0 ∣ xt .
+
+However, in true generation tasks, each patch is not independent of others, because, for natural images, the boundaries
+between adjacent patches are typically continuous and smoothly varying (e.g., there is little difference between one patch of
+sky and another). The correlation between patches only weakens when an abrupt transition occurs in the image’s elements,
+such as at the boundary between sky and grass. Moreover, DiT’s attention-based structure allows a single patch to access par-
+tial information from all other patches. Although this information may be coarse, this remains a complex, coupled{struc}ture.
+Therefore, for a DiT model, the estimate of v̂(s) is not only based on (s)
+
+xt but also some other information from (l)
+xt .
+
+l ̸=s
+Thus, we define the effective information below. { } (
+
+N { } )
+N
+
+Definition A.2 (Effective Information). For a patch-level noised input (s) (s)
+xt , we define EI(s) f ; xt to rep-
+
+s=1 s=1
+
+resent the effective information used for a generation model f to estimate the patch-level vector (field v̂(s)) for any s ∈ [N ].
+
+Assuming that each patch is(ind{epend}ent o)f one another, the patch-level estimate (s)
+v̂(s) = f xt , t only uses (s)
+
+xt for
+N { }
+
+prediction, w[ hich means∣ (s) (s)
+EI(s) f ; {xt } )]= xt . Thus the optimal predictor can be more generally formulated as
+
+s=1
+N
+
+(s) ∣ (s)
+v̂(s),∗ = E ϵ(s) − x ∣
+
+0 ∣ (
+EI(s) f ; xt . For attention-based generation models, we cannot accurately obtain the
+
+s=1
+effective information due to the complex coupling structure. However, based on some standard assumptions on the initial
+data distribution and some empirical observations, we can still give a brief formulation for the effective information.
+
+
+
+Assumption A.3 (Data Distribution). For the initial data distribution, we assume that pdata ∼ N (µ,Σ), where Σ =
+UΛU⊤, U = [u1, · · · ,ud], and Λ = diag{λ1, · · · , λd}.
+
+Assumption A.4 (Eigenvalue Decay). There exists α > 1 such that for any i ∈ [d], the eigenvalues of Σ satisfies λ −a
+i ≍ i .
+
+Assumption A.3 and A.4 characterize the data distribution as a Gaussian distribution with a covariance of a series of fast-
+decay eigenvalues. The eigenvalue decay of covariance characterizes the differences in high- and low-frequency signals of the
+image information. This is consistent with the empirical observation that DiT can effectively learn low-frequency signals but
+has difficulty capturing high-frequency signals. Given b > 0, we can decompose the input x0 into low- and high-frequency
+components as
+
+x0 = µ+ x0,low + x0,high, (7)
+where x0,low ∼ N (0,Σlow) and x0,high ∼ N (0,Σhigh). Σlow satisfies Σ ⊤ ∑r
+
+low = UrΛrUr = i=1 λiuiu
+⊤
+i where λr > b
+
+and λr+1 ≤ b, and Σhigh = Σ−Σlow. Thus we can decompose the patch-level noised input (s)
+xt as
+
+(s)
+xt = ︸(1− t︷)︷P(s)µ︸+ ︸(1− t)P︷︷(s)x0,low︸+ ︸(1− t)P︷(︷s)x0,high︸+ t︸P︷(︷s)︸ϵ (8)
+
+Mean(s) Low(s) High(s) Noise(s)
+
+We can assume that for the DiT model, the effective information is composed of the local patch itself and the low-frequency
+signals of other patches as below.
+
+Assumption A.5 (EI of DiT). Given DiT as the predictor, there exists β > 0 such that for any s ∈ [N ], the effective
+information to estimate the patch-level ve(ctor v̂(s){ satis}fies )
+
+N { } { }
+(s) (s)
+
+EI(s) DiT; xt = xt ∪ (l)
+xt,low , (9)
+
+s=1 l ̸=s
+
+where
+(l)
+
+x l) )
+t,low = Mean( + Low(l +Noise(l) (10)
+
+for all l ̸= s.
+
+Our refinement structure directly injects all signals from the initial data x0 for prediction, which means that for DiP, the
+effective information satis(fies { } ) (
+
+N { } )
+N { }N { }N
+
+EI(s)
+(s) (s) (s)
+
+DiP; xt = EI(s) DiT; xt ∪ (s)
+xt = xt . (11)
+
+[ ∣ s=(1 { } )] s=1 [ s=1 ∣ s(=1
+
+N { } )]
+N
+
+We define (s) ) ∣ (s) (s) ∣ (s)
+v̂ ∣ (s) (s)
+DiT = E ϵ(s) − (s
+
+x0 ∣ EI DiT; xt and v̂ ∣
+DiP = E ϵ(s) − x0 ∣ EI(s) DiP; xt as
+
+s=1 s=1
+the general near-optimal estimate of DiT and DiP, respectively. Then we obtain the main results below.
+
+Theorem A.6. Assume that Assumption A.3, A.4 and A.5 hold. Consider using DiT and DiP for the diffusion generation task
+as the predictor, respectively. The general near-optimal estimate (s) (s)
+
+v̂DiT and v̂DiP satisfy
+
+(s)
+v̂ s)
+DiT = P( B̂M̂ (xt − (1− t)µ)−P(s)µ, (12)
+
+and
+(s)
+
+v̂ ) (s)
+DiP = P(s AM (xt − (1− t)µ)−P µ, (13)
+
+respectively, where [ ( )⊤ ( ) ]
+⊤ −1
+
+M̂ = (1− t)2Σ )
+low + t2Id + (1− t)2 P(s)
+
+( P(s)
+
+) Σhigh P(s P(s) ,
+
+⊤
+B̂ = t[Id − (1− t)B, B] = Σ )
+
+low +Σhigh P(s P(s), (14)
+
+M = (1− t)2
+−1
+
+Σ+ t2Id ,
+A = tId − (1− t)Σ.
+
+
+
+The denoising operator P(s)B̂M̂ and P(s)AM satisfies
+
+∑r d
+(s) t− (1− t)λ ∑
+
+i ⊤ λi
+P B̂M̂ ≍ viu + v ⊤
+
+iu 5)
+(1− t)2λ + t2 i i + I1 + I2, (1
+
+t
+i=1 i i=r+1
+
+and ∑d
+(s) t− (1− t)λi
+
+P AM = v ⊤
+iu , (16)
+
+(1− t)2λ + t2 i
+i=1 i
+
+=[ ∑ [
+t)λ ( ) ]
+
+respectiv∑ely, wher∑e d ∑
+[v P(s)[u i ⊤
+
+1, · · · ,vd] 1, · · · ,ud], I] r (1− (s) ⊤ ( )
+1 = − i=r+1 j=1 (1−t)2λ t2 ui P P s uj v u⊤
+
+i and
+j+ j
+
+I − d d (1−t)λ )
+( ⊤
+
+i ⊤ ( s) (s ⊤
+2 = =r+1 j=r+1 t2 ui P P )
+
+i uj viuj .
+
+Proof. See Appendix B.
+
+Remark A.7. Theorem A.6 illustrates that our designed refinement mechanism exhibits a strong adaptive correction capabil-
+ity for high-frequency signals within the image. Specifically, (12) and (13) align with our objective to estimate the conditional
+expectation of ϵ− x0 through DiT and DiP. The first term of (12) and (13) represents the estimate of noise, while the second
+term means the estimate of original data. We focus on the first term regarded as the “denoising process”, with respective
+“denoising operator” (15) and (16) serve as a global representation characterization, performing denoising on different
+frequency-domain components derived from the original image.
+• When using only DiT for estimation, Equation (15) indicates that DiT can achieve a good adaptive fit for low-frequency
+
+signals (i ≤ r, dominant signals). However, for high-frequency components in the image, relying solely on DiT may not
+provide sufficient representational capacity for these components. Specifically,
+– The first term in (15) corresponds to the denoising process applied to the low-frequency signals. Although all these
+
+belong to the low-frequency regime, those with larger values of λi (i ≤ r) contain a stronger proportion of the original
+image content relative to noise. Consequently, as λi decreases, the denoising operator adaptively selects a larger
+correction magnitude. (It can be readily demonstrated that t−(1−t)λi
+
+(1−t)2λ xhibits a monotonic increase as λi decreases.)
+i+t2 e
+
+– The remaining three terms correspond to the denoising process applied to the high-frequency components. Among them,
+I1 represents the consistent influence exerted by the low-frequency signal on the high-frequency ones. Since the high-
+frequency components are associated with λi (i ≥ r + 1) that are significantly smaller than those of the low-frequency
+regime (Assumption A.4), this term can generally be regarded as o(1). The second term and I2—particularly the second
+term—point to the following fact: when t → 1 in the early stage of denoising, the magnitude of λi is much smaller than
+t, leading the model to apply only negligible corrections to the high-frequency components. This weakens the model’s
+ability to learn from this portion of the signal. Conversely, as t → 0 in the late stage of denoising, where the model aims
+to learn a sensitive compensatory mechanism to capture more fine-grained details from the original image, t becomes
+much smaller than λi, causing the model’s corrections to high-frequency components to lose stability. As a result, these
+corrections may introduce inconsistencies with the previously learned representations, potentially affecting fine details
+of the final output.
+
+• In contrast, when using DiP for estimation, Equation (16) demonstrates that DiP can provide a robust adaptive correction
+for all signals. This is attributed to our refinement mechanism, which, at a low computational cost, enhances the effective
+information during the denoising process. Particularly for high-frequency signals, the refinement provides a powerful
+supplement to the information that DiT struggles to capture, which aligns with both our intuition and experimental results.
+
+B. Proof of Theorem A.6 [ ∣ } ]
+N ∣
+
+Proof. Based on (11), we have (s) ∣ {
+v̂ [(s) ∣ (s] (s) [ ∣ ] [ ∣
+DiP = E ϵ − )
+
+x ∣
+0 ∣ x = E ϵ(s) ∣ (
+
+t xt − E s)
+x0 ∣ ]
+
+xt . We first obtain the
+s=1
+
+following statistics to obtain the first term E ϵ(s) ∣ xt .
+Expectations: [ ]
+
+E ϵ(s) = 0, E [xt] = (1− t)µ, (17)
+
+Covariances: ( ) ( )
+Cov ϵ(s),x )
+
+t = Cov P(s ϵ, (1− t)x s)
+0 + tϵ = tP(s)Cov(ϵ, ϵ) = tP( , (18)
+
+
+
+and
+
+Cov(x 2
+t) = Cov ((1− t)x0 + tϵ) = (1− t) Cov(x0) + t2Cov(ϵ) = (1− t)2Σ+ t2Id. (19)
+
+Then we use E[Y |X] = EY + Co[v(Y,∣X)C]ov(X,X)−1(X − EX) to o]btain that
+
+E ϵ(s)
+∣∣ [
+xt = tP(s) (1− 1
+
+t)2
+−
+
+Σ+ t2Id (xt − (1− t)µ) . (20)
+
+Similarly, for the se(cond term) of (s)
+v̂DiP(we have )
+
+Cov (s)
+x (s)
+0 ,xt = Cov P(s)x0, (1− t)x0 + tϵ = (1− t)P Cov(x0,x0) = (1− t)P(s)Σ, (21)
+
+Then we obtain [ ∣
+(s) ∣ [ 1
+
+x ∣ ] ]
+E x ( )
+
+0 t = P s µ+ (1− t)P(s) 2 −
+Σ (1− t) Σ+ t2Id (xt − (1− t)µ) . (22)
+
+Thus we have [ ∣ ] [ ∣
+(s)
+
+v̂ (s) ∣
+DiP = E ϵ ∣ ]
+
+xt − E (s)
+0 [ ∣x ∣ xt ] (23)
+
+1
+
+[ = P(s)
+
+] [tId − (1− t)Σ] (1− t)2
+−
+
+Σ+ t2I (xt − (1− t)µ)−P(s)
+d µ.
+
+1
+Letting M = (1− t)2Σ+ t2
+
+−
+Id , [v1, · · · ,vd] = P(s)[u1, · · · ,ud], A = tId − (1− t)Σ, we have
+
+∑ ( )
+d ∑d t− (1− t)λi
+
+P(s)AM =  v u⊤
+j j u ⊤
+
+− iu
+(1 t)2λ t2 i
+
+∑j=1 i=1 i +
+(24)
+
+d
+t− (1− t)λi
+
+= v ⊤
+− iu .
+
+(1 t)2λ 2 i
+i=1 i +[ t ∣ ]
+
+Similarly, based on Assumption A.5, we have (s) ) ∣(s) (s (l)
+v̂DiT = E ϵ − x ∣
+
+0 ∣ { } { }
+(s)
+
+xt ∪ { } , where (l)
+xt,low xt,low = (1 −
+
+l ̸=s { }
+t)P(l)µ + (1 − t)P(l)x0,low + tP(l)ϵ. We first use one vector to represent the condition (s) l)
+
+xt ∪ (
+xt,low . We try
+
+l ̸=s
+
+to construct an observation l)
+x̂t such that at s patch, (s) (
+
+P(s)x̂t = xt , and at l ̸= s patch P(l)x̂t = xt,low. The following x̂t
+satisfies the requirement above ( )⊤
+
+x̂t = (1− t)µ+ (1− t)x (s)
+
+]0,low + tϵ+ (1− t) P(s)
+
+[ ∣ P x0,high. (25)
+
+Now we use the same technique to obtain E ϵ(s) ∣ x̂t . The co(variance t)erms satisfy
+
+Cov(ϵ(s), x̂t) = Cov P(s)ϵ, tϵ = tP(s), (26)
+
+and ( ( ) )
+⊤
+
+Cov(x̂t) = Cov (1− t)x0,low + tϵ+ (1− t) P(s)
+
+(P
+(s)x)0,high⊤ ( )⊤
+
+= (1− t)2Cov(x (27)
+0,low) + t2Cov(ϵ)(+ (1−) t)2 P(s) P(s)Cov(x s)
+
+0,high) P(s) P(
+
+⊤ ( )⊤
+= (1− t)2Σlow + t2I 2
+
+d + (1− t) P(s) P(s)Σ s)
+high P( P(s).
+
+Thus w[e ha∣ve ] [ ( )⊤ ( ) ]
+⊤ −1
+
+E ϵ(s)
+∣∣ x̂ )
+
+t = tP(s) (1− t)2Σlow + t2Id + (1− t)2 P(s P(s)Σ )
+high P(s P(s) (x̂t − (1− t)µ) . (28)
+
+
+
+[ ∣ ]
+For E (s) ∣
+
+x0 ∣ x̂t , we have
+
+( ) ( ( ) )
+⊤
+
+Cov (s)
+x , x̂ (s)
+0 t = Cov(P x (s)
+
+0,low +P x0,high), (1− t)µ(+ (1− t)x0,l(ow + )tϵ+ (1− t) P)(s) P(s)x0,high
+
+⊤
+= Cov P(s)x[ w, (1− t)x ( ) (s)
+
+,lo 0,(low +)Cov P] s x0,high, P P(s)
+0 x0,high (29)
+
+⊤
+= (1− t)P(s) Σ s) (s)
+
+low +Σ (
+high P P .
+
+Thus we obtain
+
+[ ∣ ] [ ( ) ]
+⊤
+
+E (s) ∣
+x s) s)
+0 ∣ x̂t =P( µ+ (1− t)P( Σ (s) (s)
+
+[ low +Σhigh P P ×
+( )⊤ ( ) ] (30)
+
+⊤ −1
+
+(1− t)2Σ (s) )
+low + t2Id + (1− t)2 P P(s Σ (s) (s)
+
+high P P (xt − (1− t)µ) .
+
+Finally we have
+
+[ ∣ ] [ ∣ ]
+(s) s) ∣
+
+v̂ = E ϵ(s)
+∣
+
+DiT ∣ x̂t − E (
+x0 ∣ x̂t
+
+(31)
+= P(s) [tId − (1− t)B] M̂ (xt − (1− t)µ)−P(s)µ,
+
+( ) [ ( ) ( ) ]−1
+where B = Σ (s) ⊤
+
+low +Σhigh P P(s) and M̂ = (1− t)2Σlow + t2I 2
+d + (1− t) P(s) ⊤
+
+P(s)Σ s) ⊤
+high P( P(s) .
+
+Letting B̂ = tId − (1− t)B, we have
+
+∑  )( )−1
+P(s)B̂M̂ =  d
+
+v (
+ju
+
+⊤
+j Ĉ1 + Ĉ2 D̂+ Ê , (32)
+
+j=1
+
+where
+
+∑r
+Ĉ1 = (t− (1− t)λi)uiu
+
+⊤
+i
+
+i=∑1d ∑d ( )⊤
+Ĉ2 = t λiuiu
+
+⊤
+i − (1− t) λ s)
+
+iuiu
+⊤
+i P( P(s),
+
+∑i=r+1 i=r+∑1 (33)
+r d
+
+D̂ = ((1− t)2λ ⊤
+i + t2)uiui + t2uiu
+
+⊤
+i ,
+
+i=1 ∑ i=r+1
+
+d ( )⊤ ( )⊤
+Ê = (1− t)2 λi P(s) P(s)uiu
+
+⊤
+i P(s) P(s).
+
+i=r+1
+
+We notice that D̂ is a positive diagonal matrix and D̂−1Ê ≍ o(1) because Assumption A.4 shows that λp/λq ≍ (q/p)a ≍
+o(1) for any 1 ≤ q ≤ r and p ≥ r + 1. Thus due to first-order Taylor expansion we have
+
+( )−1 ( )−1 ( )
+D̂+ Ê = I −1 −1
+
+d + D̂ Ê D̂−1 ≈ I 1 −1
+d − D̂− Ê D̂ = D̂−1 − D̂−1ÊD̂−1 ≍ D̂ . (34)
+
+
+
+Therefore we obtain ∑ 
+d ( )
+
+P(s)B̂M̂ ≍  v u⊤ −1
+j j Ĉ1 + Ĉ2 D̂
+
+∑j=1
+
+r
+t− (1− d
+
+t)λ ∑
+i λi
+
+= v u⊤ + v ⊤
+(1− i
+
+t)2λ + t2 i iu
+
+[ (t
+i
+
+i=1 ∑ i +1
+
+d ∑ i=r
+
+r ) ]
+⊤
+
+− (1− t)λi
+u⊤ (s) (35)
+
+︸ (1− t)2λ
+i=r+1 j=1 j + t2︷︷ i P P(s)uj viu
+
+⊤
+j︸
+
+∑ ∑ I1
+
+d d [ ]
+− (1− t)λ ( )⊤
+
+i
+u⊤ P(s) P(s)u ⊤
+
+︸ t2 ︷︷i j viuj
+i=r+1 j=r+1 ︸ .
+
+I2
+
+We finish the proof.
+
+
+
+C. More Implementation Details
+
+DiT Architecture
+Input dim 256×256×3
+Num. layers 26
+Hidden dim. 1152
+Num. heads 16
+
+Patch Detailer Head Architecture
+DownSampling path 16→8→4→2→1
+UpSampling path 1→2→4→8→16
+DownSampling channel 3→64→128→256→512
+Bottleneck (512+1152)→512
+UpSampling channel 512→256→128→64→64
+Output Layer 64→3
+
+Optimization
+Optimizer AdamW
+Learning rate 0.0001
+Weight decay 0
+Batch size 256
+
+Interpolants
+Diffusion sampler Euler
+Diffusion steps 100
+Evaluation suite ADM
+
+Table 4. Hyperparameter settings.
+
+Hypermarameters. Table 4 reports the detailed hyperparameters of DiP, including the DiT Architecture, Patch Detailer
+Head Architecture, Optimization, and Interpolants.
+
+Objective. DiP follows the training objectives of DDT [56]. It is trained using flow matching as the objective function and
+regularized using representation alignment techniques. Further improvements could be made by introducing adversarial loss
+[15], perceptual loss [63].
+
+Sampler. We use Euler-Maruyama ODE sampler with 100 sampling steps by default. For DiT-only and DiP, we used the
+same inference hyperparameters.
+
+Classifier-Free Guidance. In our experiments, we employ Interval-based Classifier-Free Guidance [32] (Interval-CFG).
+Specifically, we set the guidance scale to cfg=2.9. The guidance is activated exclusively within the normalized timestep
+interval of [0.11, 0.97].
+
+D. How to Preserving High-Frequency Signal: Patch or Image
+While the theoretical analysis in Appendix A establishes the need for all-frequency raw signals to refine missing high-
+frequency details, we also focus on how can this information be injected in the most effective way. Specifically, we are
+interested in whether patch-level input is better than image-level input, or vise versa, as shown in Figure 11. Intuitively, the
+transformer structure in DiT has captured the long-distance dependencies, therefore we only need the specific high-frequency
+signals or details of the image. A toy experiment in Figure 12 verifies this intuition.
+
+In Figure 12(a), through the patch-level input, the learned manifold (black) tightly adheres to the ground truth structure
+(orange), effectively capturing intricate branching patterns and sharp boundaries. In contrast, Figure 12(b) reveals that global
+processing leads to over-smoothing. The learned distribution is more dispersed and struggles to lock onto fine structural
+details. This suggests that we only need the refinement structure to dedicate its capacity to high-frequency sensing without
+
+
+
+being distracted by long-distance dependencies. On the contrary, with image-level input the network tends to average out
+features across a broader spatial regime, resulting in a loss of sharp details in high-frequency regions.
+
+noisy_t_080.png
+
+Patch Detailer Patch Detailer 
+Head Head
+
+DiT DiT
+
+(a) Patch-level Input (b) Image-level input
+
+Figure 11. Different input formats of Patch Detailer Head.
+
+GT (a) Patch-level Input (b) Image-level input
+
+Figure 12. Toy experiment. (a) Visualization of manifold fitting with Patch-level input. The model precisely captures high-frequency
+branches. (b) Visualization of manifold fitting with Image-level input. The model exhibits over-smoothing and fails to resolve fine details.
+
+E. More Visualization Results
+
+
+
+Figure 13. 256×256 samples. Class lable = “goldfish, Carassius auratus” (1). CFG = 4.0.
+
+Figure 14. 256×256 samples. Class lable = “junco, snowbird” (13). CFG = 4.0.
+
+Figure 15. 256×256 samples. Class lable = “chickadee” (19). CFG = 4.0.
+
+
+
+Figure 16. 256×256 samples. Class lable = “tree frog, tree-frog” (30). CFG = 4.0.
+
+Figure 17. 256×256 samples. Class lable = “mud turtle” (35). CFG = 4.0.
+
+Figure 18. 256×256 samples. Class lable = “teddy, teddy bear” (859). CFG = 4.0.
+
+
+
+Figure 19. 256×256 samples. Class lable = “cauliflower” (938). CFG = 4.0.
+
+Figure 20. 256×256 samples. Class lable = “potpie” (964). CFG = 4.0.
+
+Figure 21. 256×256 samples. Class lable = “bolete” (997). CFG = 4.0.
+
+
+
+Figure 22. 512×512 samples. Class lable = “ptarmigan” (81). CFG = 4.0.
+
+Figure 23. 512×512 samples. Class lable=”jellyfish” (107). CFG=4.0.
+
+Figure 24. 512×512 samples. Class lable=”Maltese dog, Maltese terrier, Maltese” (153). CFG=4.0.
+
+
+
+Figure 25. 512×512 samples. Class lable = “lesser panda, red panda, panda, bear cat, cat bear, Ailurus fulgens” (387). CFG = 4.0.
+
+Figure 26. 512×512 samples. Class lable = “barn” (425). CFG = 4.0.
+
+Figure 27. 512×512 samples. Class lable = “beacon, lighthouse, beacon light, pharos” (437). CFG = 4.0.
+
+
+
+Figure 28. 512×512 samples. Class lable = “beer glass” (441). CFG = 4.0.
+
+Figure 29. 512×512 samples. Class lable = “wool, woolen, woollen” (911). CFG = 4.0.
+
+Figure 30. 512×512 samples. Class lable = “trifle” (927). CFG = 4.0.

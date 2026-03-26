@@ -9,28 +9,27 @@ LOG_MAX_LINES=1500
 RUN_MODE="daemon"
 LOG_FILE=""
 PID_FILE=""
-SAVE_DIR="checkpoints/flow_$(date '+%Y%m%d_%H%M%S')"
+SAVE_DIR="checkpoints/vae_pretrain_$(date '+%Y%m%d_%H%M%S')"
 
-RESUME_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/flow_20260326_170949/best.pt"
-VAE_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/vae_pretrain_20260323_212225/best.pt"
+RESUME_CKPT=""
 DEVICE_ARG="auto"
 SEED=42
 FONT_SPLIT="train"
 FONT_SPLIT_SEED=""
 FONT_TRAIN_RATIO="0.95"
 
-TARGET_STEPS=100000
-SAVE_EVERY=5000
-SAMPLE_EVERY=300
+TARGET_STEPS=80000
+SAVE_EVERY=2000
+SAMPLE_EVERY=500
 LR="2e-4"
 LR_WARMUP_STEPS=2000
 LR_MIN_SCALE="0.1"
 GRAD_CLIP_NORM="1.0"
 
-STYLE_REF_COUNT=0
-STYLE_REF_COUNT_MIN=6
+STYLE_REF_COUNT=8
+STYLE_REF_COUNT_MIN=8
 STYLE_REF_COUNT_MAX=8
-BATCH_SIZE=128
+BATCH_SIZE=64
 NUM_WORKERS=8
 MAX_FONTS=0
 IMAGE_SIZE=128
@@ -49,18 +48,22 @@ DIT_HIDDEN_DIM=512
 DIT_DEPTH=12
 DIT_HEADS=8
 DIT_MLP_RATIO="4.0"
-
 CONTENT_FUSION_START=0
 CONTENT_FUSION_END=8
 STYLE_FUSION_START=6
 STYLE_FUSION_END=12
-TRAIN_SAMPLING="cartesian_font_char"
-CARTESIAN_FONTS_PER_BATCH=16
+TRAIN_SAMPLING="shuffle"
+CARTESIAN_FONTS_PER_BATCH=8
 CARTESIAN_CHARS_PER_BATCH=8
 
-TRAIN_VAE_JOINTLY="0"
-STYLE_LR_SCALE="1.0"
-STYLE_LR_WARMUP_STEPS=0
+VAE_LAMBDA_REC="1.0"
+VAE_LAMBDA_PERC="0.18"
+VAE_LAMBDA_KL="2e-4"
+VAE_KL_WARMUP_STEPS=10000
+VAE_LATENT_MEAN_WEIGHT="0.001"
+VAE_LATENT_STD_WEIGHT="0.001"
+VAE_LATENT_CORR_WEIGHT="0.0005"
+VAE_LATENT_STD_TARGET="1.0"
 EXTRA_TRAIN_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -71,8 +74,6 @@ while [[ $# -gt 0 ]]; do
     --pid-file) PID_FILE="${2:?}"; shift 2 ;;
     --save-dir) SAVE_DIR="${2:?}"; shift 2 ;;
     --resume) RESUME_CKPT="${2:?}"; shift 2 ;;
-    --vae-checkpoint) VAE_CKPT="${2:?}"; shift 2 ;;
-    --train-vae-jointly) TRAIN_VAE_JOINTLY="1"; shift ;;
     --device) DEVICE_ARG="${2:?}"; shift 2 ;;
     --seed) SEED="${2:?}"; shift 2 ;;
     --font-split) FONT_SPLIT="${2:?}"; shift 2 ;;
@@ -85,8 +86,6 @@ while [[ $# -gt 0 ]]; do
     --lr-warmup-steps) LR_WARMUP_STEPS="${2:?}"; shift 2 ;;
     --lr-min-scale) LR_MIN_SCALE="${2:?}"; shift 2 ;;
     --grad-clip-norm) GRAD_CLIP_NORM="${2:?}"; shift 2 ;;
-    --style-lr-scale) STYLE_LR_SCALE="${2:?}"; shift 2 ;;
-    --style-lr-warmup-steps) STYLE_LR_WARMUP_STEPS="${2:?}"; shift 2 ;;
     --style-ref-count) STYLE_REF_COUNT="${2:?}"; shift 2 ;;
     --style-ref-count-min) STYLE_REF_COUNT_MIN="${2:?}"; shift 2 ;;
     --style-ref-count-max) STYLE_REF_COUNT_MAX="${2:?}"; shift 2 ;;
@@ -115,10 +114,14 @@ while [[ $# -gt 0 ]]; do
     --train-sampling) TRAIN_SAMPLING="${2:?}"; shift 2 ;;
     --cartesian-fonts-per-batch) CARTESIAN_FONTS_PER_BATCH="${2:?}"; shift 2 ;;
     --cartesian-chars-per-batch) CARTESIAN_CHARS_PER_BATCH="${2:?}"; shift 2 ;;
-    --style-checkpoint|--train-style-jointly|--flow-difficulty-warmup-steps|--flow-difficulty-ema-decay|--flow-difficulty-alpha|--flow-difficulty-min-weight|--flow-difficulty-max-weight|--flow-difficulty-refresh-every-steps)
-      echo "[run_diffusion_colab] removed option: $1" >&2
-      exit 2
-      ;;
+    --vae-lambda-rec) VAE_LAMBDA_REC="${2:?}"; shift 2 ;;
+    --vae-lambda-perc) VAE_LAMBDA_PERC="${2:?}"; shift 2 ;;
+    --vae-lambda-kl) VAE_LAMBDA_KL="${2:?}"; shift 2 ;;
+    --vae-kl-warmup-steps) VAE_KL_WARMUP_STEPS="${2:?}"; shift 2 ;;
+    --vae-latent-mean-weight) VAE_LATENT_MEAN_WEIGHT="${2:?}"; shift 2 ;;
+    --vae-latent-std-weight) VAE_LATENT_STD_WEIGHT="${2:?}"; shift 2 ;;
+    --vae-latent-corr-weight) VAE_LATENT_CORR_WEIGHT="${2:?}"; shift 2 ;;
+    --vae-latent-std-target) VAE_LATENT_STD_TARGET="${2:?}"; shift 2 ;;
     --) shift; EXTRA_TRAIN_ARGS+=("$@"); break ;;
     *) EXTRA_TRAIN_ARGS+=("$1"); shift ;;
   esac
@@ -131,9 +134,6 @@ mkdir -p logs checkpoints
 [[ -z "${PID_FILE}" ]] && PID_FILE="logs/$(basename "${SAVE_DIR}").pid"
 
 if [[ -n "${RESUME_CKPT}" && ! -f "${RESUME_CKPT}" ]]; then
-  exit 2
-fi
-if [[ -n "${VAE_CKPT}" && ! -f "${VAE_CKPT}" ]]; then
   exit 2
 fi
 
@@ -154,8 +154,6 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --lr-warmup-steps "${LR_WARMUP_STEPS}"
     --lr-min-scale "${LR_MIN_SCALE}"
     --grad-clip-norm "${GRAD_CLIP_NORM}"
-    --style-lr-scale "${STYLE_LR_SCALE}"
-    --style-lr-warmup-steps "${STYLE_LR_WARMUP_STEPS}"
     --style-ref-count "${STYLE_REF_COUNT}"
     --style-ref-count-min "${STYLE_REF_COUNT_MIN}"
     --style-ref-count-max "${STYLE_REF_COUNT_MAX}"
@@ -184,6 +182,14 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --train-sampling "${TRAIN_SAMPLING}"
     --cartesian-fonts-per-batch "${CARTESIAN_FONTS_PER_BATCH}"
     --cartesian-chars-per-batch "${CARTESIAN_CHARS_PER_BATCH}"
+    --vae-lambda-rec "${VAE_LAMBDA_REC}"
+    --vae-lambda-perc "${VAE_LAMBDA_PERC}"
+    --vae-lambda-kl "${VAE_LAMBDA_KL}"
+    --vae-kl-warmup-steps "${VAE_KL_WARMUP_STEPS}"
+    --vae-latent-mean-weight "${VAE_LATENT_MEAN_WEIGHT}"
+    --vae-latent-std-weight "${VAE_LATENT_STD_WEIGHT}"
+    --vae-latent-corr-weight "${VAE_LATENT_CORR_WEIGHT}"
+    --vae-latent-std-target "${VAE_LATENT_STD_TARGET}"
   )
   if [[ -n "${FONT_SPLIT_SEED}" ]]; then
     daemon_args+=(--font-split-seed "${FONT_SPLIT_SEED}")
@@ -191,23 +197,13 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
   if [[ -n "${RESUME_CKPT}" ]]; then
     daemon_args+=(--resume "${RESUME_CKPT}")
   fi
-  if [[ -n "${VAE_CKPT}" ]]; then
-    daemon_args+=(--vae-checkpoint "${VAE_CKPT}")
-  fi
-  if [[ "${TRAIN_VAE_JOINTLY}" == "1" ]]; then
-    daemon_args+=(--train-vae-jointly)
-  fi
   if [[ "${#EXTRA_TRAIN_ARGS[@]}" -gt 0 ]]; then
     daemon_args+=(-- "${EXTRA_TRAIN_ARGS[@]}")
   fi
   nohup bash "${SCRIPT_PATH}" "${daemon_args[@]}" > /dev/null 2>&1 < /dev/null &
   echo "$!" > "${PID_FILE}"
-  echo "[run_diffusion_colab] started daemon pid=$(cat "${PID_FILE}") log=${LOG_FILE}"
+  echo "[run_vae_pretrain_colab] started daemon pid=$(cat "${PID_FILE}") log=${LOG_FILE}"
   exit 0
-fi
-
-if [[ "${TRAIN_VAE_JOINTLY}" != "1" && -z "${RESUME_CKPT}" && -z "${VAE_CKPT}" ]]; then
-  exit 2
 fi
 
 SCRIPT_PID="$$"
@@ -246,7 +242,7 @@ handle_signal() {
     exit_code=130
   fi
   trap - TERM INT EXIT
-  echo "[run_diffusion_colab] received ${signal}, terminating process tree"
+  echo "[run_vae_pretrain_colab] received ${signal}, terminating process tree"
   kill_descendants "${SCRIPT_PID}" TERM
   sleep 1
   kill_descendants "${SCRIPT_PID}" KILL
@@ -308,7 +304,7 @@ import sys
 import torch
 
 if not torch.cuda.is_available():
-    print("[run_diffusion_colab] torch.cuda.is_available()=False, falling back to cpu", file=sys.stderr)
+    print("[run_vae_pretrain_colab] torch.cuda.is_available()=False, falling back to cpu", file=sys.stderr)
     print("cpu")
     raise SystemExit(0)
 
@@ -322,12 +318,12 @@ for idx in range(probe_count):
         with torch.cuda.device(idx):
             free_bytes, total_bytes = torch.cuda.mem_get_info()
     except Exception as exc:
-        print(f"[run_diffusion_colab] gpu_probe_failed cuda:{idx} error={exc}", file=sys.stderr)
+        print(f"[run_vae_pretrain_colab] gpu_probe_failed cuda:{idx} error={exc}", file=sys.stderr)
         continue
     free_gb = free_bytes / float(1024 ** 3)
     total_gb = total_bytes / float(1024 ** 3)
     print(
-        f"[run_diffusion_colab] gpu_probe cuda:{idx} free_gb={free_gb:.2f} total_gb={total_gb:.2f}",
+        f"[run_vae_pretrain_colab] gpu_probe cuda:{idx} free_gb={free_gb:.2f} total_gb={total_gb:.2f}",
         file=sys.stderr,
     )
     if free_bytes > best_free:
@@ -358,7 +354,7 @@ is_oom_failure() {
 
 cmd_common=(
   "${PYTHON_BIN}" -u train.py
-  --stage flow
+  --stage vae
   --data-root "${ROOT}"
   --save-dir "${SAVE_DIR}"
   --seed "${SEED}"
@@ -396,14 +392,20 @@ cmd_common=(
   --train-sampling "${TRAIN_SAMPLING}"
   --cartesian-fonts-per-batch "${CARTESIAN_FONTS_PER_BATCH}"
   --cartesian-chars-per-batch "${CARTESIAN_CHARS_PER_BATCH}"
-  --style-lr-scale "${STYLE_LR_SCALE}"
-  --style-lr-warmup-steps "${STYLE_LR_WARMUP_STEPS}"
   --epochs 1000000
   --total-steps "${TARGET_STEPS}"
   --log-every-steps 100
   --val-every-steps 100
   --save-every-steps "${SAVE_EVERY}"
   --sample-every-steps "${SAMPLE_EVERY}"
+  --vae-lambda-rec "${VAE_LAMBDA_REC}"
+  --vae-lambda-perc "${VAE_LAMBDA_PERC}"
+  --vae-lambda-kl "${VAE_LAMBDA_KL}"
+  --vae-kl-warmup-steps "${VAE_KL_WARMUP_STEPS}"
+  --vae-latent-mean-weight "${VAE_LATENT_MEAN_WEIGHT}"
+  --vae-latent-std-weight "${VAE_LATENT_STD_WEIGHT}"
+  --vae-latent-corr-weight "${VAE_LATENT_CORR_WEIGHT}"
+  --vae-latent-std-target "${VAE_LATENT_STD_TARGET}"
 )
 
 if [[ -n "${FONT_SPLIT_SEED}" ]]; then
@@ -412,39 +414,31 @@ fi
 if [[ -n "${RESUME_CKPT}" ]]; then
   cmd_common+=(--resume "${RESUME_CKPT}")
 fi
-if [[ -n "${VAE_CKPT}" ]]; then
-  cmd_common+=(--vae-checkpoint "${VAE_CKPT}")
-fi
-if [[ "${TRAIN_VAE_JOINTLY}" == "1" ]]; then
-  cmd_common+=(--train-vae-jointly)
-fi
 if [[ "${#EXTRA_TRAIN_ARGS[@]}" -gt 0 ]]; then
   cmd_common+=("${EXTRA_TRAIN_ARGS[@]}")
 fi
 
-echo "[run_diffusion_colab] stage=flow"
-echo "[run_diffusion_colab] save_dir=${SAVE_DIR}"
-echo "[run_diffusion_colab] log_file=${LOG_FILE}"
-echo "[run_diffusion_colab] requested_device=${DEVICE_ARG} seed=${SEED}"
-echo "[run_diffusion_colab] batch=${BATCH_SIZE} lr=${LR} lr_warmup_steps=${LR_WARMUP_STEPS} lr_min_scale=${LR_MIN_SCALE} grad_clip_norm=${GRAD_CLIP_NORM}"
-echo "[run_diffusion_colab] style_ref_count=${STYLE_REF_COUNT} style_ref_count_min=${STYLE_REF_COUNT_MIN} style_ref_count_max=${STYLE_REF_COUNT_MAX}"
-echo "[run_diffusion_colab] vae_checkpoint=${VAE_CKPT:-<none>}"
-echo "[run_diffusion_colab] train_vae_jointly=${TRAIN_VAE_JOINTLY}"
-echo "[run_diffusion_colab] latent_channels=${LATENT_CHANNELS} latent_size=${LATENT_SIZE}"
-echo "[run_diffusion_colab] style_lr_scale=${STYLE_LR_SCALE} style_lr_warmup_steps=${STYLE_LR_WARMUP_STEPS}"
-echo "[run_diffusion_colab] content_layers=[${CONTENT_FUSION_START},${CONTENT_FUSION_END}) style_layers=[${STYLE_FUSION_START},${STYLE_FUSION_END})"
-echo "[run_diffusion_colab] train_sampling=${TRAIN_SAMPLING} cartesian_fonts_per_batch=${CARTESIAN_FONTS_PER_BATCH} cartesian_chars_per_batch=${CARTESIAN_CHARS_PER_BATCH}"
+echo "[run_vae_pretrain_colab] stage=vae"
+echo "[run_vae_pretrain_colab] save_dir=${SAVE_DIR}"
+echo "[run_vae_pretrain_colab] log_file=${LOG_FILE}"
+echo "[run_vae_pretrain_colab] requested_device=${DEVICE_ARG} seed=${SEED}"
+echo "[run_vae_pretrain_colab] batch=${BATCH_SIZE} lr=${LR} lr_warmup_steps=${LR_WARMUP_STEPS} lr_min_scale=${LR_MIN_SCALE} grad_clip_norm=${GRAD_CLIP_NORM}"
+echo "[run_vae_pretrain_colab] style_ref_count=${STYLE_REF_COUNT} style_ref_count_min=${STYLE_REF_COUNT_MIN} style_ref_count_max=${STYLE_REF_COUNT_MAX}"
+echo "[run_vae_pretrain_colab] vae_lambda_rec=${VAE_LAMBDA_REC} vae_lambda_perc=${VAE_LAMBDA_PERC} vae_lambda_kl=${VAE_LAMBDA_KL}"
+echo "[run_vae_pretrain_colab] vae_kl_warmup_steps=${VAE_KL_WARMUP_STEPS} latent_mean_weight=${VAE_LATENT_MEAN_WEIGHT} latent_std_weight=${VAE_LATENT_STD_WEIGHT} latent_corr_weight=${VAE_LATENT_CORR_WEIGHT}"
+echo "[run_vae_pretrain_colab] content_layers=[${CONTENT_FUSION_START},${CONTENT_FUSION_END}) style_layers=[${STYLE_FUSION_START},${STYLE_FUSION_END})"
+echo "[run_vae_pretrain_colab] train_sampling=${TRAIN_SAMPLING} cartesian_fonts_per_batch=${CARTESIAN_FONTS_PER_BATCH} cartesian_chars_per_batch=${CARTESIAN_CHARS_PER_BATCH}"
 
 attempt=1
 while true; do
   launch_device="$(select_launch_device)"
-  attempt_marker="__run_diffusion_attempt_${attempt}_$(date +%s)"
+  attempt_marker="__run_vae_pretrain_attempt_${attempt}_$(date +%s)"
   cmd=("${cmd_common[@]}")
   cmd+=(--device "${launch_device}")
 
-  echo "[run_diffusion_colab] ${attempt_marker}"
-  echo "[run_diffusion_colab] attempt=${attempt} launch_device=${launch_device}"
-  printf '[run_diffusion_colab] cmd='
+  echo "[run_vae_pretrain_colab] ${attempt_marker}"
+  echo "[run_vae_pretrain_colab] attempt=${attempt} launch_device=${launch_device}"
+  printf '[run_vae_pretrain_colab] cmd='
   printf ' %q' "${cmd[@]}"
   printf '\n'
 
@@ -460,12 +454,12 @@ while true; do
   fi
 
   if is_oom_failure "${attempt_marker}"; then
-    echo "[run_diffusion_colab] attempt=${attempt} failed with OOM, sleeping 60s before retry"
+    echo "[run_vae_pretrain_colab] attempt=${attempt} failed with OOM, sleeping 60s before retry"
     attempt=$((attempt + 1))
     sleep 60
     continue
   fi
 
-  echo "[run_diffusion_colab] attempt=${attempt} failed with non-OOM status=${status}, aborting"
+  echo "[run_vae_pretrain_colab] attempt=${attempt} failed with non-OOM status=${status}, aborting"
   exit "${status}"
 done

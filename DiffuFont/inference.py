@@ -23,13 +23,29 @@ def load_trainer(checkpoint_path: Path, device: torch.device) -> FlowTrainer:
         raise RuntimeError(f"Checkpoint is not a flow checkpoint: {checkpoint_path}")
     if "model_config" not in checkpoint:
         raise RuntimeError("Checkpoint is missing 'model_config'.")
+    trainer_config = checkpoint.get("trainer_config", {})
     model = SourcePartRefDiT(**checkpoint["model_config"])
-    trainer = FlowTrainer(model, device, total_steps=1, freeze_vae=False)
-    if "model_state" not in checkpoint:
-        raise RuntimeError("Flow checkpoint is missing model weights.")
-    trainer.model.load_state_dict(checkpoint["model_state"], strict=True)
+    trainer = FlowTrainer(
+        model,
+        device,
+        total_steps=1,
+        freeze_vae=False,
+        flow_sample_steps=int(trainer_config.get("flow_sample_steps", 24)),
+    )
+    trainer.load(checkpoint_path)
     trainer.model.eval()
     return trainer
+
+
+def sample_style_refs(sample: Dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+    style_img = sample["style_img"]
+    style_ref_mask = sample["style_ref_mask"]
+    min_refs = int(sample.get("style_ref_count_min", style_img.size(0)))
+    max_refs = min(int(sample.get("style_ref_count_max", style_img.size(0))), int(style_img.size(0)))
+    if max_refs < min_refs:
+        raise RuntimeError(f"Invalid style ref bounds: min_refs={min_refs} max_refs={max_refs}")
+    ref_count = random.randint(min_refs, max_refs) if min_refs < max_refs else max_refs
+    return style_img[:ref_count], style_ref_mask[:ref_count]
 
 
 def tensor_to_pil(tensor: torch.Tensor, size: int = 128) -> Image.Image:
@@ -62,8 +78,9 @@ def run_inference(
         for char in chars:
             sample = dataset[find_sample_index(dataset, font_name, char)]
             content = sample["content"].unsqueeze(0)
-            style = sample["style_img"].unsqueeze(0)
-            style_ref_mask = sample["style_ref_mask"].unsqueeze(0)
+            style_refs, style_ref_mask = sample_style_refs(sample)
+            style = style_refs.unsqueeze(0)
+            style_ref_mask = style_ref_mask.unsqueeze(0)
             generation = trainer.flow_sample(
                 content,
                 style_img=style,
@@ -72,7 +89,7 @@ def run_inference(
             )
             font_rows[char] = {
                 "content": sample["content"],
-                "style": sample["style_img"][0],
+                "style": style_refs[0],
                 "target": sample["target"],
                 "generation": generation.squeeze(0).cpu(),
             }
@@ -124,7 +141,9 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="cuda:1")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-fonts", type=int, default=0)
-    parser.add_argument("--style-ref-count", type=int, default=8)
+    parser.add_argument("--style-ref-count", type=int, default=0)
+    parser.add_argument("--style-ref-count-min", type=int, default=6)
+    parser.add_argument("--style-ref-count-max", type=int, default=8)
     parser.add_argument("--num-fonts", type=int, default=4)
     parser.add_argument("--num-chars", type=int, default=6)
     parser.add_argument("--font-names", type=str, default="")
@@ -144,10 +163,13 @@ def main() -> None:
         device = torch.device(args.device)
 
     glyph_transform = build_base_glyph_transform(image_size=128)
+    style_ref_count = None if int(args.style_ref_count) <= 0 else int(args.style_ref_count)
     dataset = FontImageDataset(
         project_root=args.data_root,
         max_fonts=int(args.max_fonts),
-        style_ref_count=int(args.style_ref_count),
+        style_ref_count=style_ref_count,
+        style_ref_count_min=int(args.style_ref_count_min),
+        style_ref_count_max=int(args.style_ref_count_max),
         random_seed=int(args.seed),
         transform=glyph_transform,
         style_transform=glyph_transform,

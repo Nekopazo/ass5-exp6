@@ -43,26 +43,51 @@ class ResBlock(nn.Module):
 
 
 class GlyphVAE(nn.Module):
-    def __init__(self, in_channels: int = 1, latent_channels: int = 4) -> None:
+    def __init__(
+        self,
+        in_channels: int = 1,
+        latent_channels: int = 4,
+        *,
+        bottleneck_channels: int = 192,
+        encoder_16x16_blocks: int = 2,
+        decoder_16x16_blocks: int = 2,
+        decoder_tail_blocks: int = 1,
+    ) -> None:
         super().__init__()
         self.in_channels = int(in_channels)
         self.latent_channels = int(latent_channels)
+        self.bottleneck_channels = int(bottleneck_channels)
+        self.encoder_16x16_blocks = max(1, int(encoder_16x16_blocks))
+        self.decoder_16x16_blocks = max(1, int(decoder_16x16_blocks))
+        self.decoder_tail_blocks = max(0, int(decoder_tail_blocks))
 
         self.encoder = nn.Sequential(
             nn.Conv2d(self.in_channels, 32, kernel_size=3, stride=2, padding=1),
             ResBlock(32, 32),
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
             ResBlock(64, 64),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-            ResBlock(128, 128),
+            nn.Conv2d(64, self.bottleneck_channels, kernel_size=3, stride=2, padding=1),
+            ResBlock(self.bottleneck_channels, self.bottleneck_channels),
         )
-        self.to_stats = nn.Conv2d(128, self.latent_channels * 2, kernel_size=1)
+        self.enc_block16_extra = nn.Sequential(
+            *[
+                ResBlock(self.bottleneck_channels, self.bottleneck_channels)
+                for _ in range(max(0, self.encoder_16x16_blocks - 1))
+            ]
+        )
+        self.to_stats = nn.Conv2d(self.bottleneck_channels, self.latent_channels * 2, kernel_size=1)
 
-        self.decoder_in = nn.Conv2d(self.latent_channels, 128, kernel_size=3, padding=1)
-        self.dec_block16 = ResBlock(128, 128)
+        self.decoder_in = nn.Conv2d(self.latent_channels, self.bottleneck_channels, kernel_size=3, padding=1)
+        self.dec_block16 = ResBlock(self.bottleneck_channels, self.bottleneck_channels)
+        self.dec_block16_extra = nn.Sequential(
+            *[
+                ResBlock(self.bottleneck_channels, self.bottleneck_channels)
+                for _ in range(max(0, self.decoder_16x16_blocks - 1))
+            ]
+        )
         self.dec_up32 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode="nearest"),
-            nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.Conv2d(self.bottleneck_channels, 64, kernel_size=3, padding=1),
             ResBlock(64, 64),
         )
         self.dec_up64 = nn.Sequential(
@@ -73,13 +98,19 @@ class GlyphVAE(nn.Module):
         self.dec_up128 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode="nearest"),
             nn.Conv2d(32, 16, kernel_size=3, padding=1),
-            nn.GroupNorm(_group_count(16), 16),
-            nn.SiLU(),
         )
+        if self.decoder_tail_blocks == 0:
+            self.dec_block128 = nn.Identity()
+        elif self.decoder_tail_blocks == 1:
+            self.dec_block128 = ResBlock(16, 16)
+        else:
+            self.dec_block128 = nn.Sequential(*[ResBlock(16, 16) for _ in range(self.decoder_tail_blocks)])
+        self.dec_norm128 = nn.GroupNorm(_group_count(16), 16)
         self.decoder_out = nn.Conv2d(16, self.in_channels, kernel_size=3, padding=1)
 
     def encode_stats(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         h = self.encoder(x)
+        h = self.enc_block16_extra(h)
         mu, logvar = self.to_stats(h).chunk(2, dim=1)
         return mu, logvar.clamp(-30.0, 20.0)
 
@@ -95,9 +126,12 @@ class GlyphVAE(nn.Module):
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         x = self.decoder_in(z)
         x = self.dec_block16(x)
+        x = self.dec_block16_extra(x)
         x = self.dec_up32(x)
         x = self.dec_up64(x)
         x = self.dec_up128(x)
+        x = self.dec_block128(x)
+        x = F.silu(self.dec_norm128(x))
         return torch.tanh(self.decoder_out(x))
 
     def forward(self, x: torch.Tensor, *, sample_posterior: bool = True) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -185,69 +219,66 @@ class GlyphTokenEncoder(nn.Module):
         return tokens, None
 
 
-class AttentionTokenPool(nn.Module):
-    def __init__(self, hidden_dim: int, num_heads: int, output_tokens: int) -> None:
+class StyleEncoder(nn.Module):
+    def __init__(self, in_channels: int = 1, hidden_dim: int = 512) -> None:
         super().__init__()
-        self.output_tokens = int(output_tokens)
-        self.query = nn.Parameter(torch.randn(1, self.output_tokens, hidden_dim) * 0.02)
-        self.token_norm = nn.LayerNorm(hidden_dim)
-        self.attn = SDPAAttention(hidden_dim, num_heads)
-        self.out_norm = nn.LayerNorm(hidden_dim)
-
-    def forward(
-        self,
-        tokens: torch.Tensor,
-        *,
-        valid_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        queries = self.query.expand(tokens.size(0), -1, -1)
-        key_padding_mask = None
-        if valid_mask is not None:
-            key_padding_mask = ~valid_mask.bool()
-        pooled, _ = self.attn(
-            queries,
-            self.token_norm(tokens),
-            self.token_norm(tokens),
-            key_padding_mask=key_padding_mask,
-            need_weights=False,
+        self.hidden_dim = int(hidden_dim)
+        self.net = nn.Sequential(
+            nn.Conv2d(int(in_channels), 64, kernel_size=3, stride=2, padding=1),
+            ResBlock(64, 64),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            ResBlock(128, 128),
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
+            ResBlock(256, 256),
+            nn.Conv2d(256, 384, kernel_size=3, stride=2, padding=1),
+            ResBlock(384, 384),
+            nn.Conv2d(384, self.hidden_dim, kernel_size=3, stride=2, padding=1),
+            ResBlock(self.hidden_dim, self.hidden_dim),
         )
-        return self.out_norm(pooled)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() != 4:
+            raise ValueError(f"expected BCHW tensor, got {tuple(x.shape)}")
+        return self.net(x)
 
 
 class SourcePartRefDiT(nn.Module):
     STYLE_STATE_PREFIXES = (
         "style_encoder.",
-        "global_style_pool.",
-        "per_ref_style_pool.",
-        "local_style_pool.",
-        "residual_style_pool.",
         "style_proj.",
         "style_global_proj.",
         "style_contrastive_head.",
-        "style_residual_gate",
     )
     def __init__(
         self,
         *,
         in_channels: int = 1,
         image_size: int = 128,
-        latent_channels: int = 4,
+        latent_channels: int = 6,
         latent_size: int = 16,
+        vae_bottleneck_channels: int = 192,
+        vae_encoder_16x16_blocks: int = 2,
+        vae_decoder_16x16_blocks: int = 2,
+        vae_decoder_tail_blocks: int = 1,
+        latent_normalize_for_dit: bool = False,
         encoder_patch_size: int = 8,
         encoder_hidden_dim: int = 512,
         encoder_depth: int = 4,
         encoder_heads: int = 8,
         dit_hidden_dim: int = 512,
-        dit_depth: int = 16,
+        dit_depth: int = 12,
         dit_heads: int = 8,
         dit_mlp_ratio: float = 4.0,
+        content_fusion_start: int | None = None,
+        content_fusion_end: int | None = None,
+        style_fusion_start: int | None = None,
+        style_fusion_end: int | None = None,
+        content_cross_attn_layers: int | None = None,
+        style_cross_attn_every_n_layers: int | None = None,
+        contrastive_proj_dim: int = 128,
         style_mid_tokens_per_ref: int = 12,
         local_style_tokens_per_ref: int = 16,
         style_residual_tokens: int = 8,
-        style_residual_gate_init: float = 0.3,
-        content_cross_attn_layers: int = 8,
-        style_cross_attn_every_n_layers: int = 1,
-        contrastive_proj_dim: int = 128,
     ) -> None:
         super().__init__()
         if int(in_channels) != 1:
@@ -256,6 +287,11 @@ class SourcePartRefDiT(nn.Module):
         self.image_size = int(image_size)
         self.latent_channels = int(latent_channels)
         self.latent_size = int(latent_size)
+        self.vae_bottleneck_channels = int(vae_bottleneck_channels)
+        self.vae_encoder_16x16_blocks = max(1, int(vae_encoder_16x16_blocks))
+        self.vae_decoder_16x16_blocks = max(1, int(vae_decoder_16x16_blocks))
+        self.vae_decoder_tail_blocks = max(0, int(vae_decoder_tail_blocks))
+        self.latent_normalize_for_dit = bool(latent_normalize_for_dit)
         self.encoder_patch_size = int(encoder_patch_size)
         self.encoder_hidden_dim = int(encoder_hidden_dim)
         self.encoder_depth = int(encoder_depth)
@@ -264,15 +300,48 @@ class SourcePartRefDiT(nn.Module):
         self.dit_depth = int(dit_depth)
         self.dit_heads = int(dit_heads)
         self.dit_mlp_ratio = float(dit_mlp_ratio)
-        self.style_mid_tokens_per_ref = max(1, int(style_mid_tokens_per_ref))
-        self.local_style_tokens_per_ref = max(1, int(local_style_tokens_per_ref))
-        self.style_residual_tokens = max(0, int(style_residual_tokens))
-        self.style_residual_gate_init = float(style_residual_gate_init)
-        self.content_cross_attn_layers = max(0, min(self.dit_depth, int(content_cross_attn_layers)))
-        self.style_cross_attn_every_n_layers = max(1, int(style_cross_attn_every_n_layers))
+        if content_fusion_start is None and content_fusion_end is None:
+            if content_cross_attn_layers is None:
+                self.content_fusion_start = 0
+                self.content_fusion_end = min(self.dit_depth, 8)
+            else:
+                self.content_fusion_start = 0
+                self.content_fusion_end = max(0, min(self.dit_depth, int(content_cross_attn_layers)))
+        else:
+            self.content_fusion_start = max(0, min(self.dit_depth, 0 if content_fusion_start is None else int(content_fusion_start)))
+            self.content_fusion_end = max(
+                self.content_fusion_start,
+                min(self.dit_depth, self.dit_depth if content_fusion_end is None else int(content_fusion_end)),
+            )
+
+        if style_fusion_start is None and style_fusion_end is None:
+            if style_cross_attn_every_n_layers is None:
+                self.style_fusion_start = max(0, self.dit_depth - 6)
+                self.style_fusion_end = self.dit_depth
+            else:
+                self.style_fusion_start = 0
+                self.style_fusion_end = self.dit_depth
+        else:
+            self.style_fusion_start = max(0, min(self.dit_depth, 0 if style_fusion_start is None else int(style_fusion_start)))
+            self.style_fusion_end = max(
+                self.style_fusion_start,
+                min(self.dit_depth, self.dit_depth if style_fusion_end is None else int(style_fusion_end)),
+            )
+        self.content_cross_attn_layers = self.content_fusion_end - self.content_fusion_start
+        self.style_cross_attn_every_n_layers = None if style_cross_attn_every_n_layers is None else max(1, int(style_cross_attn_every_n_layers))
         self.contrastive_proj_dim = int(contrastive_proj_dim)
 
-        self.vae = GlyphVAE(in_channels=self.in_channels, latent_channels=self.latent_channels)
+        self.vae = GlyphVAE(
+            in_channels=self.in_channels,
+            latent_channels=self.latent_channels,
+            bottleneck_channels=self.vae_bottleneck_channels,
+            encoder_16x16_blocks=self.vae_encoder_16x16_blocks,
+            decoder_16x16_blocks=self.vae_decoder_16x16_blocks,
+            decoder_tail_blocks=self.vae_decoder_tail_blocks,
+        )
+        self.register_buffer("latent_norm_mean", torch.zeros(1, self.latent_channels, 1, 1), persistent=True)
+        self.register_buffer("latent_norm_std", torch.ones(1, self.latent_channels, 1, 1), persistent=True)
+        self.register_buffer("latent_norm_initialized", torch.tensor(False), persistent=True)
         self.content_encoder = GlyphTokenEncoder(
             image_size=self.image_size,
             patch_size=self.encoder_patch_size,
@@ -281,36 +350,9 @@ class SourcePartRefDiT(nn.Module):
             num_heads=self.encoder_heads,
             add_cls_token=False,
         )
-        self.style_encoder = GlyphTokenEncoder(
-            image_size=self.image_size,
-            patch_size=self.encoder_patch_size,
+        self.style_encoder = StyleEncoder(
+            in_channels=self.in_channels,
             hidden_dim=self.encoder_hidden_dim,
-            depth=self.encoder_depth,
-            num_heads=self.encoder_heads,
-            add_cls_token=True,
-        )
-        self.global_style_pool = AttentionTokenPool(
-            hidden_dim=self.encoder_hidden_dim,
-            num_heads=self.encoder_heads,
-            output_tokens=1,
-        )
-        self.per_ref_style_pool = AttentionTokenPool(
-            hidden_dim=self.encoder_hidden_dim,
-            output_tokens=self.style_mid_tokens_per_ref,
-            num_heads=self.encoder_heads,
-        )
-        self.local_style_pool = AttentionTokenPool(
-            hidden_dim=self.encoder_hidden_dim,
-            output_tokens=self.local_style_tokens_per_ref,
-            num_heads=self.encoder_heads,
-        )
-        self.residual_style_pool = AttentionTokenPool(
-            hidden_dim=self.encoder_hidden_dim,
-            output_tokens=self.style_residual_tokens,
-            num_heads=self.encoder_heads,
-        )
-        self.style_residual_gate = nn.Parameter(
-            torch.tensor(self.style_residual_gate_init, dtype=torch.float32)
         )
         self.backbone = DiffusionTransformerBackbone(
             latent_channels=self.latent_channels,
@@ -319,6 +361,10 @@ class SourcePartRefDiT(nn.Module):
             depth=self.dit_depth,
             num_heads=self.dit_heads,
             mlp_ratio=self.dit_mlp_ratio,
+            content_fusion_start=self.content_fusion_start,
+            content_fusion_end=self.content_fusion_end,
+            style_fusion_start=self.style_fusion_start,
+            style_fusion_end=self.style_fusion_end,
             content_cross_attn_layers=self.content_cross_attn_layers,
             style_cross_attn_every_n_layers=self.style_cross_attn_every_n_layers,
         )
@@ -343,6 +389,11 @@ class SourcePartRefDiT(nn.Module):
             "image_size": int(self.image_size),
             "latent_channels": int(self.latent_channels),
             "latent_size": int(self.latent_size),
+            "vae_bottleneck_channels": int(self.vae_bottleneck_channels),
+            "vae_encoder_16x16_blocks": int(self.vae_encoder_16x16_blocks),
+            "vae_decoder_16x16_blocks": int(self.vae_decoder_16x16_blocks),
+            "vae_decoder_tail_blocks": int(self.vae_decoder_tail_blocks),
+            "latent_normalize_for_dit": int(self.latent_normalize_for_dit),
             "encoder_patch_size": int(self.encoder_patch_size),
             "encoder_hidden_dim": int(self.encoder_hidden_dim),
             "encoder_depth": int(self.encoder_depth),
@@ -351,12 +402,10 @@ class SourcePartRefDiT(nn.Module):
             "dit_depth": int(self.dit_depth),
             "dit_heads": int(self.dit_heads),
             "dit_mlp_ratio": float(self.dit_mlp_ratio),
-            "style_mid_tokens_per_ref": int(self.style_mid_tokens_per_ref),
-            "local_style_tokens_per_ref": int(self.local_style_tokens_per_ref),
-            "style_residual_tokens": int(self.style_residual_tokens),
-            "style_residual_gate_init": float(self.style_residual_gate_init),
-            "content_cross_attn_layers": int(self.content_cross_attn_layers),
-            "style_cross_attn_every_n_layers": int(self.style_cross_attn_every_n_layers),
+            "content_fusion_start": int(self.content_fusion_start),
+            "content_fusion_end": int(self.content_fusion_end),
+            "style_fusion_start": int(self.style_fusion_start),
+            "style_fusion_end": int(self.style_fusion_end),
             "contrastive_proj_dim": int(self.contrastive_proj_dim),
         }
 
@@ -368,11 +417,17 @@ class SourcePartRefDiT(nn.Module):
         return_stats: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         z, mu, logvar = self.vae.encode(x, sample_posterior=sample_posterior)
+        if self.latent_normalize_for_dit and bool(self.latent_norm_initialized.item()):
+            z = self._normalize_latent(z)
+            mu = self._normalize_latent(mu)
+            logvar = logvar - 2.0 * torch.log(self.latent_norm_std.to(device=logvar.device, dtype=logvar.dtype))
         if return_stats:
             return z, mu, logvar
         return z
 
     def decode_from_latent(self, z: torch.Tensor) -> torch.Tensor:
+        if self.latent_normalize_for_dit and bool(self.latent_norm_initialized.item()):
+            z = self._denormalize_latent(z)
         return self.vae.decode(z)
 
     def vae_forward(
@@ -389,6 +444,37 @@ class SourcePartRefDiT(nn.Module):
             raise RuntimeError(f"VAE checkpoint must contain 'vae_state': {path}")
         state_dict = checkpoint["vae_state"]
         self.vae.load_state_dict(state_dict, strict=True)
+        latent_norm_state = checkpoint.get("latent_norm_state")
+        if isinstance(latent_norm_state, dict):
+            mean = latent_norm_state.get("mean")
+            std = latent_norm_state.get("std")
+            initialized = bool(latent_norm_state.get("initialized", False))
+            if mean is not None and std is not None:
+                mean_tensor = torch.as_tensor(mean, dtype=self.latent_norm_mean.dtype)
+                std_tensor = torch.as_tensor(std, dtype=self.latent_norm_std.dtype)
+                if tuple(mean_tensor.shape) != tuple(self.latent_norm_mean.shape):
+                    raise RuntimeError(
+                        "latent_norm_state mean shape mismatch: "
+                        f"checkpoint={tuple(mean_tensor.shape)} model={tuple(self.latent_norm_mean.shape)}"
+                    )
+                if tuple(std_tensor.shape) != tuple(self.latent_norm_std.shape):
+                    raise RuntimeError(
+                        "latent_norm_state std shape mismatch: "
+                        f"checkpoint={tuple(std_tensor.shape)} model={tuple(self.latent_norm_std.shape)}"
+                    )
+                self.latent_norm_mean.copy_(mean_tensor)
+                self.latent_norm_std.copy_(std_tensor.clamp_min(1e-6))
+                self.latent_norm_initialized.fill_(initialized)
+
+    def _normalize_latent(self, z: torch.Tensor) -> torch.Tensor:
+        mean = self.latent_norm_mean.to(device=z.device, dtype=z.dtype)
+        std = self.latent_norm_std.to(device=z.device, dtype=z.dtype).clamp_min(1e-6)
+        return (z - mean) / std
+
+    def _denormalize_latent(self, z: torch.Tensor) -> torch.Tensor:
+        mean = self.latent_norm_mean.to(device=z.device, dtype=z.dtype)
+        std = self.latent_norm_std.to(device=z.device, dtype=z.dtype)
+        return z * std + mean
 
     @classmethod
     def _is_style_state_key(cls, key: str) -> bool:
@@ -469,41 +555,20 @@ class SourcePartRefDiT(nn.Module):
 
         style_context = torch.no_grad() if detach_style_encoder else nullcontext()
         with style_context:
-            local_tokens, global_tokens = self.style_encoder(flat_style)
-            local_tokens = local_tokens.view(batch, refs, local_tokens.size(1), local_tokens.size(2))
-            global_tokens = global_tokens.view(batch, refs, global_tokens.size(-1))
-            global_style = self.global_style_pool(global_tokens, valid_mask=ref_valid_mask).squeeze(1)
-            style_global = self.style_global_proj(global_style)
-            per_ref_mid = self.per_ref_style_pool(
-                local_tokens.reshape(batch * refs, local_tokens.size(2), local_tokens.size(3))
-            )
-            per_ref_mid = per_ref_mid.view(batch, refs, self.style_mid_tokens_per_ref, self.encoder_hidden_dim)
-            per_ref_mid = per_ref_mid * ref_valid_mask.unsqueeze(-1).unsqueeze(-1).to(dtype=per_ref_mid.dtype)
-            mid_tokens = per_ref_mid.reshape(batch, refs * self.style_mid_tokens_per_ref, self.encoder_hidden_dim)
-            mid_token_mask = ref_valid_mask.unsqueeze(-1).expand(batch, refs, self.style_mid_tokens_per_ref).reshape(batch, -1)
-
-            prototype_tokens = self.style_proj(
-                self.local_style_pool(mid_tokens, valid_mask=mid_token_mask)
-            )
-            residual_tokens = self.style_proj(
-                self.residual_style_pool(mid_tokens, valid_mask=mid_token_mask)
-            )
-            residual_scale = self.style_residual_gate.to(
-                device=residual_tokens.device,
-                dtype=residual_tokens.dtype,
-            )
-            residual_tokens = residual_scale * residual_tokens
-            style_tokens = torch.cat([prototype_tokens, residual_tokens], dim=1)
-            style_token_mask = torch.ones(
-                (batch, self.local_style_tokens_per_ref + self.style_residual_tokens),
-                device=style_tokens.device,
-                dtype=torch.bool,
-            )
+            style_features = self.style_encoder(flat_style)
+            style_vectors = F.adaptive_avg_pool2d(style_features, output_size=1).flatten(1)
+            style_vectors = F.normalize(style_vectors, dim=-1, eps=1e-6)
+            style_vectors = style_vectors.view(batch, refs, style_vectors.size(-1))
+            ref_weights = ref_valid_mask.to(device=style_vectors.device, dtype=style_vectors.dtype)
+            ref_weight_sum = ref_weights.sum(dim=1, keepdim=True).clamp_min(1.0)
+            pooled_style = (style_vectors * ref_weights.unsqueeze(-1)).sum(dim=1) / ref_weight_sum
+            style_tokens = self.style_proj(pooled_style).unsqueeze(1)
+            style_global = self.style_global_proj(pooled_style)
+            style_token_mask = torch.ones((batch, 1), device=style_tokens.device, dtype=torch.bool)
 
         contrastive_style = None
         if return_contrastive:
-            prototype_summary = prototype_tokens.mean(dim=1)
-            contrastive_style = F.normalize(self.style_contrastive_head(prototype_summary), dim=-1)
+            contrastive_style = F.normalize(self.style_contrastive_head(style_global), dim=-1)
         return {
             "style_tokens": style_tokens,
             "style_global": style_global,

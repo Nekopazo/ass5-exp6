@@ -94,17 +94,12 @@ class GlyphDiTBlock(nn.Module):
         self.content_attn = SDPAAttention(hidden_dim, num_heads) if self.use_content_cross_attn else None
         self.style_attn = SDPAAttention(hidden_dim, num_heads) if self.use_style_cross_attn else None
         self.mlp = FeedForward(hidden_dim, mlp_ratio)
-        self.style_residual_gate = (
-            nn.Parameter(torch.tensor(0.1, dtype=torch.float32))
-            if self.use_style_cross_attn
-            else None
-        )
 
         self.modulation_chunk_count = 6
         if self.use_content_cross_attn:
-            self.modulation_chunk_count += 3
+            self.modulation_chunk_count += 2
         if self.use_style_cross_attn:
-            self.modulation_chunk_count += 3
+            self.modulation_chunk_count += 2
 
         self.modulation = nn.Sequential(
             nn.SiLU(),
@@ -130,19 +125,17 @@ class GlyphDiTBlock(nn.Module):
         gate_self = modulation_chunks[chunk_idx + 2]
         chunk_idx += 3
 
-        shift_content = scale_content = gate_content = None
+        shift_content = scale_content = None
         if self.use_content_cross_attn:
             shift_content = modulation_chunks[chunk_idx]
             scale_content = modulation_chunks[chunk_idx + 1]
-            gate_content = modulation_chunks[chunk_idx + 2]
-            chunk_idx += 3
+            chunk_idx += 2
 
-        shift_style = scale_style = gate_style = None
+        shift_style = scale_style = None
         if self.use_style_cross_attn:
             shift_style = modulation_chunks[chunk_idx]
             scale_style = modulation_chunks[chunk_idx + 1]
-            gate_style = modulation_chunks[chunk_idx + 2]
-            chunk_idx += 3
+            chunk_idx += 2
 
         shift_mlp = modulation_chunks[chunk_idx]
         scale_mlp = modulation_chunks[chunk_idx + 1]
@@ -158,10 +151,10 @@ class GlyphDiTBlock(nn.Module):
                 raise RuntimeError("content_tokens must be provided when content cross-attention is enabled")
             q = modulate(self.norm_content(x), shift_content, scale_content)
             content_out, _ = self.content_attn(q, content_tokens, content_tokens, need_weights=False)
-            x = x + gate_content.unsqueeze(1) * content_out
+            x = x + content_out
 
         if self.use_style_cross_attn:
-            if style_tokens is None or self.norm_style is None or self.style_attn is None or self.style_residual_gate is None:
+            if style_tokens is None or self.norm_style is None or self.style_attn is None:
                 raise RuntimeError("style_tokens must be provided when style cross-attention is enabled")
             q = modulate(self.norm_style(x), shift_style, scale_style)
             key_padding_mask = None
@@ -174,8 +167,7 @@ class GlyphDiTBlock(nn.Module):
                 key_padding_mask=key_padding_mask,
                 need_weights=False,
             )
-            style_gate = gate_style.unsqueeze(1) + self.style_residual_gate.to(device=x.device, dtype=x.dtype)
-            x = x + style_gate * style_out
+            x = x + style_out
 
         mlp_out = self.mlp(modulate(self.norm_mlp(x), shift_mlp, scale_mlp))
         x = x + gate_mlp.unsqueeze(1) * mlp_out
@@ -192,8 +184,12 @@ class DiffusionTransformerBackbone(nn.Module):
         depth: int = 16,
         num_heads: int = 8,
         mlp_ratio: float = 4.0,
+        content_fusion_start: int | None = None,
+        content_fusion_end: int | None = None,
+        style_fusion_start: int | None = None,
+        style_fusion_end: int | None = None,
         content_cross_attn_layers: int | None = None,
-        style_cross_attn_every_n_layers: int = 1,
+        style_cross_attn_every_n_layers: int | None = None,
     ) -> None:
         super().__init__()
         self.latent_channels = int(latent_channels)
@@ -202,15 +198,52 @@ class DiffusionTransformerBackbone(nn.Module):
         self.depth = int(depth)
         self.num_heads = int(num_heads)
         self.num_tokens = self.latent_size * self.latent_size
-        if content_cross_attn_layers is None:
-            content_cross_attn_layers = self.depth
-        self.content_cross_attn_layers = max(0, min(self.depth, int(content_cross_attn_layers)))
-        self.style_cross_attn_every_n_layers = max(1, int(style_cross_attn_every_n_layers))
-        self.has_content_cross_attn = self.content_cross_attn_layers > 0
-        self.has_style_cross_attn = any(
-            block_idx % self.style_cross_attn_every_n_layers == 0
+        if content_fusion_start is None and content_fusion_end is None:
+            if content_cross_attn_layers is None:
+                self.content_fusion_start = 0
+                self.content_fusion_end = min(self.depth, 8)
+            else:
+                self.content_fusion_start = 0
+                self.content_fusion_end = max(0, min(self.depth, int(content_cross_attn_layers)))
+        else:
+            self.content_fusion_start = max(0, min(self.depth, 0 if content_fusion_start is None else int(content_fusion_start)))
+            self.content_fusion_end = max(
+                self.content_fusion_start,
+                min(self.depth, self.depth if content_fusion_end is None else int(content_fusion_end)),
+            )
+        self.content_cross_attn_layers = self.content_fusion_end - self.content_fusion_start
+
+        self.style_cross_attn_every_n_layers = None if style_cross_attn_every_n_layers is None else max(1, int(style_cross_attn_every_n_layers))
+        if style_fusion_start is None and style_fusion_end is None:
+            if self.style_cross_attn_every_n_layers is None:
+                self.style_fusion_start = max(0, self.depth - 6)
+                self.style_fusion_end = self.depth
+            else:
+                self.style_fusion_start = 0
+                self.style_fusion_end = self.depth
+        else:
+            self.style_fusion_start = max(0, min(self.depth, 0 if style_fusion_start is None else int(style_fusion_start)))
+            self.style_fusion_end = max(
+                self.style_fusion_start,
+                min(self.depth, self.depth if style_fusion_end is None else int(style_fusion_end)),
+            )
+
+        self.content_layer_mask = [
+            self.content_fusion_start <= block_idx < self.content_fusion_end
             for block_idx in range(self.depth)
-        )
+        ]
+        if self.style_cross_attn_every_n_layers is None:
+            self.style_layer_mask = [
+                self.style_fusion_start <= block_idx < self.style_fusion_end
+                for block_idx in range(self.depth)
+            ]
+        else:
+            self.style_layer_mask = [
+                block_idx % self.style_cross_attn_every_n_layers == 0
+                for block_idx in range(self.depth)
+            ]
+        self.has_content_cross_attn = any(self.content_layer_mask)
+        self.has_style_cross_attn = any(self.style_layer_mask)
 
         self.latent_proj = nn.Linear(self.latent_channels, self.hidden_dim)
         pos_embed = build_2d_sincos_pos_embed(self.hidden_dim, self.latent_size, self.latent_size)
@@ -229,8 +262,8 @@ class DiffusionTransformerBackbone(nn.Module):
                     self.hidden_dim,
                     self.num_heads,
                     mlp_ratio,
-                    use_content_cross_attn=(block_idx < self.content_cross_attn_layers),
-                    use_style_cross_attn=(block_idx % self.style_cross_attn_every_n_layers == 0),
+                    use_content_cross_attn=self.content_layer_mask[block_idx],
+                    use_style_cross_attn=self.style_layer_mask[block_idx],
                 )
             )
         self.final_norm = nn.LayerNorm(self.hidden_dim, eps=1e-6)
@@ -261,9 +294,9 @@ class DiffusionTransformerBackbone(nn.Module):
         x = self.latent_proj(x)
         x = x + self.pos_embed.to(device=x.device, dtype=x.dtype)
 
-        t_embed = timestep_embedding(timesteps, self.hidden_dim).to(dtype=x.dtype)
-        t_embed = self.time_mlp(t_embed)
-        cond = t_embed + self.style_cond_proj(style_global.to(dtype=x.dtype))
+        time_cond = timestep_embedding(timesteps, self.hidden_dim).to(dtype=x.dtype)
+        time_cond = self.time_mlp(time_cond)
+        style_cond = self.style_cond_proj(style_global.to(device=x.device, dtype=x.dtype))
 
         content_tokens = (
             content_tokens.to(device=x.device, dtype=x.dtype)
@@ -279,9 +312,12 @@ class DiffusionTransformerBackbone(nn.Module):
             style_token_mask = style_token_mask.to(device=x.device, dtype=torch.bool)
 
         for block in self.blocks:
+            block_cond = time_cond
+            if block.use_style_cross_attn:
+                block_cond = block_cond + style_cond
             x = block(
                 x,
-                cond=cond,
+                cond=block_cond,
                 content_tokens=content_tokens if block.use_content_cross_attn else None,
                 style_tokens=style_tokens if block.use_style_cross_attn else None,
                 style_token_mask=style_token_mask if block.use_style_cross_attn else None,

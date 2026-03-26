@@ -70,15 +70,6 @@ def glyph_perceptual_loss(
     raise ValueError(f"Unsupported reduction: {reduction!r}")
 
 
-def info_nce_loss(anchor: torch.Tensor, positive: torch.Tensor, temperature: float) -> torch.Tensor:
-    anchor = F.normalize(anchor, dim=-1)
-    positive = F.normalize(positive, dim=-1)
-    logits = anchor @ positive.transpose(0, 1)
-    logits = logits / max(float(temperature), 1e-6)
-    targets = torch.arange(anchor.size(0), device=anchor.device)
-    return F.cross_entropy(logits.float(), targets)
-
-
 def _metrics_to_floats(metrics: Dict[str, torch.Tensor | float | int]) -> Dict[str, float]:
     output: Dict[str, float] = {}
     for key, value in metrics.items():
@@ -87,6 +78,51 @@ def _metrics_to_floats(metrics: Dict[str, torch.Tensor | float | int]) -> Dict[s
         else:
             output[key] = float(value)
     return output
+
+
+def _hold_then_cosine_lr_scale(
+    *,
+    step: int,
+    total_steps: int,
+    warmup_steps: int,
+    min_scale: float,
+    decay_fraction: float = 0.2,
+) -> float:
+    step = max(0, int(step))
+    total_steps = max(1, int(total_steps))
+    warmup_steps = max(0, int(warmup_steps))
+    min_scale = float(min(max(0.0, float(min_scale)), 1.0))
+    decay_fraction = min(max(float(decay_fraction), 0.0), 1.0)
+
+    if warmup_steps > 0 and step < warmup_steps:
+        return float(step + 1) / float(warmup_steps)
+
+    decay_start = int(total_steps * (1.0 - decay_fraction))
+    decay_start = max(warmup_steps, min(total_steps, decay_start))
+    if step < decay_start:
+        return 1.0
+
+    decay_steps = max(1, total_steps - decay_start)
+    progress = min(max(float(step - decay_start) / float(decay_steps), 0.0), 1.0)
+    cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return min_scale + (1.0 - min_scale) * cosine
+
+
+def _flatten_channelwise(x: torch.Tensor) -> torch.Tensor:
+    if x.dim() != 4:
+        raise ValueError(f"expected BCHW tensor, got {tuple(x.shape)}")
+    return x.float().permute(1, 0, 2, 3).reshape(x.size(1), -1)
+
+
+def _offdiag_mean_square(x: torch.Tensor) -> torch.Tensor:
+    if x.dim() != 2 or x.size(0) != x.size(1):
+        raise ValueError(f"expected square matrix, got {tuple(x.shape)}")
+    if x.size(0) <= 1:
+        return x.new_zeros(())
+    eye = torch.eye(x.size(0), device=x.device, dtype=x.dtype)
+    offdiag = x * (1.0 - eye)
+    denom = max(x.numel() - x.size(0), 1)
+    return offdiag.pow(2).sum() / float(denom)
 
 
 class _BaseTrainer:
@@ -101,6 +137,7 @@ class _BaseTrainer:
         save_every_steps: Optional[int],
         val_every_steps: Optional[int] = None,
         val_max_batches: Optional[int] = 16,
+        grad_clip_norm: Optional[float] = 1.0,
         track_best_on_val: bool = False,
     ) -> None:
         self.model = model.to(device)
@@ -112,6 +149,7 @@ class _BaseTrainer:
             self.log_every_steps if val_every_steps is None else max(1, int(val_every_steps))
         )
         self.val_max_batches = None if val_max_batches is None else max(1, int(val_max_batches))
+        self.grad_clip_norm = None if grad_clip_norm is None or float(grad_clip_norm) <= 0.0 else float(grad_clip_norm)
         self.track_best_on_val = bool(track_best_on_val)
         self.global_step = 0
         self.current_epoch = 0
@@ -126,7 +164,18 @@ class _BaseTrainer:
         params = [param for param in self.model.parameters() if param.requires_grad]
         if not params:
             raise RuntimeError("No trainable parameters found.")
+        self.trainable_params = params
         self.optimizer = torch.optim.AdamW(params, lr=float(lr), weight_decay=0.05)
+
+    def _apply_grad_clip(self) -> Dict[str, float]:
+        if self.grad_clip_norm is None:
+            return {}
+        grad_norm = torch.nn.utils.clip_grad_norm_(self.trainable_params, self.grad_clip_norm)
+        if torch.is_tensor(grad_norm):
+            grad_norm = float(grad_norm.detach().item())
+        else:
+            grad_norm = float(grad_norm)
+        return {"grad_norm": grad_norm}
 
     def _autocast_context(self):
         if self.device.type == "cuda":
@@ -325,17 +374,19 @@ class VAETrainer(_BaseTrainer):
         total_steps: int = 100_000,
         lambda_rec: float = 1.0,
         lambda_perc: float = 0.1,
-        lambda_kl: float = 1e-4,
-        difficulty_sampler=None,
-        difficulty_warmup_steps: int = 2000,
-        difficulty_ema_decay: float = 0.95,
-        difficulty_alpha: float = 1.0,
-        difficulty_min_weight: float = 0.5,
-        difficulty_max_weight: float = 3.0,
+        lambda_kl: float = 2e-4,
+        kl_warmup_steps: int = 10_000,
+        latent_mean_weight: float = 0.0,
+        latent_std_weight: float = 0.0,
+        latent_corr_weight: float = 0.0,
+        latent_std_target: float = 1.0,
+        lr_warmup_steps: int = 0,
+        lr_min_scale: float = 0.1,
         log_every_steps: int = 100,
         save_every_steps: Optional[int] = None,
         val_every_steps: Optional[int] = None,
         val_max_batches: Optional[int] = 16,
+        grad_clip_norm: Optional[float] = 1.0,
     ) -> None:
         super().__init__(
             model,
@@ -346,19 +397,45 @@ class VAETrainer(_BaseTrainer):
             save_every_steps=save_every_steps,
             val_every_steps=val_every_steps,
             val_max_batches=val_max_batches,
+            grad_clip_norm=grad_clip_norm,
             track_best_on_val=True,
         )
+        self.base_lr = float(lr)
         self.lambda_rec = float(lambda_rec)
         self.lambda_perc = float(lambda_perc)
         self.lambda_kl = float(lambda_kl)
-        self.difficulty_sampler = difficulty_sampler
-        self.difficulty_warmup_steps = max(0, int(difficulty_warmup_steps))
-        self.difficulty_ema_decay = float(difficulty_ema_decay)
-        self.difficulty_alpha = max(0.0, float(difficulty_alpha))
-        self.difficulty_min_weight = max(0.0, float(difficulty_min_weight))
-        self.difficulty_max_weight = max(self.difficulty_min_weight, float(difficulty_max_weight))
-        self.font_difficulty_ema: Dict[str, float] = {}
-        self.font_observation_count: Dict[str, int] = {}
+        self.kl_warmup_steps = max(0, int(kl_warmup_steps))
+        self.latent_mean_weight = max(0.0, float(latent_mean_weight))
+        self.latent_std_weight = max(0.0, float(latent_std_weight))
+        self.latent_corr_weight = max(0.0, float(latent_corr_weight))
+        self.latent_std_target = float(latent_std_target)
+        self.lr_warmup_steps = max(0, int(lr_warmup_steps))
+        self.lr_min_scale = float(min(max(0.0, float(lr_min_scale)), 1.0))
+        self.group_base_lrs = [float(group["lr"]) for group in self.optimizer.param_groups]
+        latent_channels = int(getattr(self.model, "latent_channels", 0))
+        self.latent_norm_count = 0
+        self.latent_norm_sum = torch.zeros(1, latent_channels, 1, 1, dtype=torch.float32)
+        self.latent_norm_sq_sum = torch.zeros(1, latent_channels, 1, 1, dtype=torch.float32)
+        self._set_learning_rate_for_step(0)
+
+    def _lr_scale_for_step(self, step: int) -> float:
+        return _hold_then_cosine_lr_scale(
+            step=step,
+            total_steps=self.total_steps,
+            warmup_steps=self.lr_warmup_steps,
+            min_scale=self.lr_min_scale,
+            decay_fraction=0.2,
+        )
+
+    def _set_learning_rate_for_step(self, step: int) -> None:
+        lr_scale = self._lr_scale_for_step(step)
+        for group, base_lr in zip(self.optimizer.param_groups, self.group_base_lrs):
+            group["lr"] = float(base_lr) * lr_scale
+
+    def _kl_scale_for_step(self, step: int) -> float:
+        if self.kl_warmup_steps <= 0:
+            return 1.0
+        return min(float(step + 1) / float(self.kl_warmup_steps), 1.0)
 
     def _compute_losses(
         self,
@@ -377,30 +454,55 @@ class VAETrainer(_BaseTrainer):
             else:
                 loss_perc_per_sample = target.new_zeros((target.size(0),))
                 loss_perc = target.new_zeros(())
+            mu_flat = _flatten_channelwise(mu)
+            mu_mean = mu_flat.mean(dim=1)
+            mu_centered = mu_flat - mu_mean.unsqueeze(1)
+            mu_std = mu_centered.pow(2).mean(dim=1).add(1e-6).sqrt()
+            loss_latent_mean = mu_mean.pow(2).mean()
+            loss_latent_std = (mu_std - self.latent_std_target).pow(2).mean()
+            if mu_flat.size(0) > 1 and mu_flat.size(1) > 1:
+                mu_norm = mu_centered / mu_std.clamp_min(1e-6).unsqueeze(1)
+                corr = (mu_norm @ mu_norm.transpose(0, 1)) / float(mu_norm.size(1))
+                loss_latent_corr = _offdiag_mean_square(corr)
+            else:
+                loss_latent_corr = target.new_zeros(())
             loss_kl = kl_divergence_loss(mu, logvar)
-            loss = self.lambda_rec * loss_rec + self.lambda_perc * loss_perc + self.lambda_kl * loss_kl
+            lambda_kl_eff = self.lambda_kl * self._kl_scale_for_step(self.global_step)
+            loss = (
+                self.lambda_rec * loss_rec
+                + self.lambda_perc * loss_perc
+                + lambda_kl_eff * loss_kl
+                + self.latent_mean_weight * loss_latent_mean
+                + self.latent_std_weight * loss_latent_std
+                + self.latent_corr_weight * loss_latent_corr
+            )
         metrics = {
             "loss": loss,
             "loss_rec": loss_rec,
             "loss_perc": loss_perc,
             "loss_kl": loss_kl,
+            "lambda_kl_eff": loss.new_tensor(lambda_kl_eff),
+            "loss_latent_mean": loss_latent_mean,
+            "loss_latent_std": loss_latent_std,
+            "loss_latent_corr": loss_latent_corr,
+            "latent_norm_mean_abs": mu_mean.abs().mean(),
+            "latent_norm_std_mean": mu_std.mean(),
         }
         if return_aux:
-            metrics["difficulty_per_sample"] = (
-                self.lambda_rec * loss_rec_per_sample.detach() + self.lambda_perc * loss_perc_per_sample.detach()
-            )
+            metrics["latent_mu_detached"] = mu.detach()
         return metrics
 
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
         metrics = self._compute_losses(batch, return_aux=True)
-        difficulty_per_sample = metrics.pop("difficulty_per_sample", None)
+        latent_mu_detached = metrics.pop("latent_mu_detached", None)
         metrics["loss"].backward()
+        metrics.update(self._apply_grad_clip())
         self.optimizer.step()
-        if difficulty_per_sample is not None:
-            self._update_font_difficulty_ema(batch["font"], difficulty_per_sample)
-            metrics["difficulty_mean"] = difficulty_per_sample.mean()
+        self._set_learning_rate_for_step(self.global_step + 1)
+        if latent_mu_detached is not None:
+            self._update_latent_norm_stats(latent_mu_detached)
         return _metrics_to_floats(metrics)
 
     def eval_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
@@ -413,8 +515,16 @@ class VAETrainer(_BaseTrainer):
             {
                 "stage": "vae",
                 "vae_state": self.model.vae.state_dict(),
+                "latent_norm_state": self._export_latent_norm_state(),
+                "latent_norm_accum_state": self._export_latent_norm_accum_state(),
                 "model_config": self.model.export_config(),
                 "optimizer_state": self.optimizer.state_dict(),
+                "trainer_config": {
+                    "lr_warmup_steps": int(self.lr_warmup_steps),
+                    "lr_min_scale": float(self.lr_min_scale),
+                    "grad_clip_norm": None if self.grad_clip_norm is None else float(self.grad_clip_norm),
+                    "kl_warmup_steps": int(self.kl_warmup_steps),
+                },
                 "step": int(self.global_step),
                 "epoch": int(self.current_epoch),
             },
@@ -424,10 +534,13 @@ class VAETrainer(_BaseTrainer):
     def load(self, path: str | Path) -> None:
         checkpoint = torch.load(path, map_location=self.device)
         self.model.load_vae_checkpoint(path)
+        if isinstance(checkpoint, dict):
+            self._load_latent_norm_accum_state(checkpoint.get("latent_norm_accum_state"))
         if isinstance(checkpoint, dict) and "optimizer_state" in checkpoint:
             self.optimizer.load_state_dict(checkpoint["optimizer_state"])
             self.global_step = int(checkpoint.get("step", 0))
             self.current_epoch = int(checkpoint.get("epoch", 0))
+        self._set_learning_rate_for_step(self.global_step)
 
     @torch.no_grad()
     def sample_and_save(self, batch: Dict[str, torch.Tensor], out_dir: Path) -> None:
@@ -438,187 +551,58 @@ class VAETrainer(_BaseTrainer):
         vis = torch.cat([(target + 1.0) * 0.5, (recon + 1.0) * 0.5], dim=0)
         save_image(vis, out_dir / f"vae_step_{self.global_step}.png", nrow=target.size(0))
 
-    def _update_font_difficulty_ema(self, fonts, difficulty_per_sample: torch.Tensor) -> None:
-        difficulty_values = difficulty_per_sample.detach().float().cpu().tolist()
-        batch_sums: Dict[str, float] = {}
-        batch_counts: Dict[str, int] = {}
-        for font_name, score in zip(fonts, difficulty_values):
-            batch_sums[font_name] = batch_sums.get(font_name, 0.0) + float(score)
-            batch_counts[font_name] = batch_counts.get(font_name, 0) + 1
-        ema_keep = self.difficulty_ema_decay
-        ema_add = 1.0 - ema_keep
-        for font_name, score_sum in batch_sums.items():
-            batch_mean = score_sum / float(batch_counts[font_name])
-            prev = self.font_difficulty_ema.get(font_name)
-            self.font_difficulty_ema[font_name] = batch_mean if prev is None else ema_keep * prev + ema_add * batch_mean
-            self.font_observation_count[font_name] = self.font_observation_count.get(font_name, 0) + batch_counts[font_name]
-
-    def on_epoch_end(self) -> None:
-        sampler_summary = self._refresh_difficulty_sampler()
-        if sampler_summary is None:
+    def _update_latent_norm_stats(self, mu: torch.Tensor) -> None:
+        if not bool(getattr(self.model, "latent_normalize_for_dit", False)):
             return
-        top_fonts = ", ".join(
-            f"{item['font']}:{float(item['weight']):.2f}"
-            for item in sampler_summary["top_fonts"]
-        )
-        bottom_fonts = ", ".join(
-            f"{item['font']}:{float(item['weight']):.2f}"
-            for item in sampler_summary["bottom_fonts"]
-        )
-        print(
-            "[train] refreshed VAE difficulty sampler "
-            f"step={self.global_step} epoch={self.current_epoch} "
-            f"observed_fonts={int(sampler_summary['observed_font_count'])} "
-            f"baseline_difficulty={float(sampler_summary['baseline_difficulty']):.4f} "
-            f"weight_range=[{float(sampler_summary['font_weight_min']):.2f},"
-            f"{float(sampler_summary['font_weight_max']):.2f}] "
-            f"weight_bins(["
-            f"{float(sampler_summary['font_weight_bucket_min']):.2f},"
-            f"{float(sampler_summary['font_weight_bucket_edge_1']):.2f})="
-            f"{int(sampler_summary['font_weight_bucket_count_low'])},"
-            f"[{float(sampler_summary['font_weight_bucket_edge_1']):.2f},"
-            f"{float(sampler_summary['font_weight_bucket_edge_2']):.2f})="
-            f"{int(sampler_summary['font_weight_bucket_count_mid'])},"
-            f"[{float(sampler_summary['font_weight_bucket_edge_2']):.2f},"
-            f"{float(sampler_summary['font_weight_bucket_max']):.2f}]="
-            f"{int(sampler_summary['font_weight_bucket_count_high'])}) "
-            f"top={top_fonts} bottom={bottom_fonts}",
-            flush=True,
-        )
-
-    def _refresh_difficulty_sampler(self) -> Optional[Dict[str, object]]:
-        if self.difficulty_sampler is None:
-            return None
-        if self.global_step < self.difficulty_warmup_steps:
-            return None
-        if not self.font_difficulty_ema:
-            return None
-
-        observed_values = list(self.font_difficulty_ema.values())
-        baseline = sum(observed_values) / float(len(observed_values))
-        baseline = max(baseline, 1e-8)
-        font_weights: Dict[str, float] = {}
-        for font_name in self.difficulty_sampler.dataset.font_names:
-            difficulty = self.font_difficulty_ema.get(font_name, baseline)
-            normalized = max(difficulty / baseline, 1e-8)
-            weight = normalized ** self.difficulty_alpha
-            weight = min(self.difficulty_max_weight, max(self.difficulty_min_weight, weight))
-            font_weights[font_name] = float(weight)
-
-        sampler_summary = self.difficulty_sampler.set_font_weights(font_weights)
-        sampler_summary["observed_font_count"] = int(len(self.font_difficulty_ema))
-        sampler_summary["baseline_difficulty"] = float(baseline)
-        sampler_summary["warmup_steps"] = int(self.difficulty_warmup_steps)
-        sampler_summary["ema_decay"] = float(self.difficulty_ema_decay)
-        sampler_summary["alpha"] = float(self.difficulty_alpha)
-        sampler_summary["min_weight"] = float(self.difficulty_min_weight)
-        sampler_summary["max_weight"] = float(self.difficulty_max_weight)
-        return sampler_summary
-
-
-class StylePretrainTrainer(_BaseTrainer):
-    def __init__(
-        self,
-        model: nn.Module,
-        device: torch.device,
-        *,
-        lr: float = 1e-4,
-        total_steps: int = 100_000,
-        contrastive_temperature: float = 0.1,
-        log_every_steps: int = 100,
-        save_every_steps: Optional[int] = None,
-        val_every_steps: Optional[int] = None,
-        val_max_batches: Optional[int] = 16,
-    ) -> None:
-        super().__init__(
-            model,
-            device,
-            lr=lr,
-            total_steps=total_steps,
-            log_every_steps=log_every_steps,
-            save_every_steps=save_every_steps,
-            val_every_steps=val_every_steps,
-            val_max_batches=val_max_batches,
-            track_best_on_val=True,
-        )
-        self.contrastive_temperature = float(contrastive_temperature)
-        style_params = [
-            param
-            for name, param in self.model.named_parameters()
-            if param.requires_grad and self.model._is_style_state_key(name)
-        ]
-        if not style_params:
-            raise RuntimeError("No style parameters found for style pretraining.")
-        self.optimizer = torch.optim.AdamW(style_params, lr=float(lr), weight_decay=0.05)
-
-    def _compute_losses(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        style = batch["style_img"].to(self.device)
-        style_pos = batch["style_img_pos"].to(self.device)
-        style_ref_mask = batch.get("style_ref_mask")
-        style_ref_mask_pos = batch.get("style_ref_mask_pos")
-        if style_ref_mask is not None:
-            style_ref_mask = style_ref_mask.to(self.device)
-        if style_ref_mask_pos is not None:
-            style_ref_mask_pos = style_ref_mask_pos.to(self.device)
-
-        with self._autocast_context():
-            anchor_style_pack = self.model.encode_style(
-                style_img=style,
-                style_ref_mask=style_ref_mask,
-                return_contrastive=True,
+        mu_flat = _flatten_channelwise(mu.detach())
+        if mu_flat.numel() == 0:
+            return
+        batch_count = int(mu_flat.size(1))
+        batch_sum = mu_flat.sum(dim=1, keepdim=True).reshape(1, -1, 1, 1).cpu()
+        batch_sq_sum = mu_flat.pow(2).sum(dim=1, keepdim=True).reshape(1, -1, 1, 1).cpu()
+        self.latent_norm_count += batch_count
+        self.latent_norm_sum += batch_sum
+        self.latent_norm_sq_sum += batch_sq_sum
+        count = max(self.latent_norm_count, 1)
+        mean = self.latent_norm_sum / float(count)
+        var = (self.latent_norm_sq_sum / float(count)) - mean.pow(2)
+        std = var.clamp_min(1e-6).sqrt()
+        with torch.no_grad():
+            self.model.latent_norm_mean.copy_(
+                mean.to(device=self.model.latent_norm_mean.device, dtype=self.model.latent_norm_mean.dtype)
             )
-            positive_style_pack = self.model.encode_style(
-                style_img=style_pos,
-                style_ref_mask=style_ref_mask_pos,
-                return_contrastive=True,
+            self.model.latent_norm_std.copy_(
+                std.to(device=self.model.latent_norm_std.device, dtype=self.model.latent_norm_std.dtype)
             )
-            anchor_style_embed = anchor_style_pack["contrastive_style"]
-            positive_style_embed = positive_style_pack["contrastive_style"]
-            if anchor_style_embed is None or positive_style_embed is None:
-                raise RuntimeError("Style contrastive embeddings were not produced.")
-            loss_ctr = info_nce_loss(anchor_style_embed, positive_style_embed, self.contrastive_temperature)
+            self.model.latent_norm_initialized.fill_(True)
+
+    def _export_latent_norm_state(self) -> Dict[str, object]:
         return {
-            "loss": loss_ctr,
-            "loss_ctr": loss_ctr,
+            "mean": self.model.latent_norm_mean.detach().cpu(),
+            "std": self.model.latent_norm_std.detach().cpu(),
+            "initialized": bool(self.model.latent_norm_initialized.item()),
         }
 
-    def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
-        self.model.train()
-        self.optimizer.zero_grad(set_to_none=True)
-        metrics = self._compute_losses(batch)
-        metrics["loss"].backward()
-        self.optimizer.step()
-        return _metrics_to_floats(metrics)
+    def _export_latent_norm_accum_state(self) -> Dict[str, object]:
+        return {
+            "count": int(self.latent_norm_count),
+            "sum": self.latent_norm_sum.detach().cpu(),
+            "sq_sum": self.latent_norm_sq_sum.detach().cpu(),
+        }
 
-    def eval_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
-        self.model.eval()
-        with torch.no_grad():
-            return _metrics_to_floats(self._compute_losses(batch))
-
-    def save(self, path: str | Path) -> None:
-        torch.save(
-            {
-                "stage": "style",
-                "style_state": self.model.style_state_dict(),
-                "model_config": self.model.export_config(),
-                "optimizer_state": self.optimizer.state_dict(),
-                "step": int(self.global_step),
-                "epoch": int(self.current_epoch),
-            },
-            Path(path),
-        )
-
-    def load(self, path: str | Path) -> None:
-        checkpoint = torch.load(path, map_location=self.device)
-        self.model.load_style_checkpoint(path)
-        if isinstance(checkpoint, dict) and "optimizer_state" in checkpoint:
-            self.optimizer.load_state_dict(checkpoint["optimizer_state"])
-            self.global_step = int(checkpoint.get("step", 0))
-            self.current_epoch = int(checkpoint.get("epoch", 0))
-
-    @torch.no_grad()
-    def sample_and_save(self, batch: Dict[str, torch.Tensor], out_dir: Path) -> None:
-        return
+    def _load_latent_norm_accum_state(self, state: object) -> None:
+        if not isinstance(state, dict):
+            return
+        count = int(state.get("count", 0))
+        sum_tensor = torch.as_tensor(state.get("sum", self.latent_norm_sum), dtype=self.latent_norm_sum.dtype)
+        sq_sum_tensor = torch.as_tensor(state.get("sq_sum", self.latent_norm_sq_sum), dtype=self.latent_norm_sq_sum.dtype)
+        if tuple(sum_tensor.shape) != tuple(self.latent_norm_sum.shape):
+            return
+        if tuple(sq_sum_tensor.shape) != tuple(self.latent_norm_sq_sum.shape):
+            return
+        self.latent_norm_count = max(0, count)
+        self.latent_norm_sum.copy_(sum_tensor)
+        self.latent_norm_sq_sum.copy_(sq_sum_tensor)
 
 
 class FlowTrainer(_BaseTrainer):
@@ -630,26 +614,18 @@ class FlowTrainer(_BaseTrainer):
         lr: float = 1e-4,
         total_steps: int = 100_000,
         lambda_flow: float = 1.0,
-        lambda_img_l1: float = 0.2,
-        lambda_img_perc: float = 0.02,
         style_lr_scale: float = 1.0,
         style_lr_warmup_steps: int = 5000,
         freeze_vae: bool = True,
-        freeze_style: bool = True,
+        freeze_style: bool = False,
         flow_sample_steps: int = 24,
         lr_warmup_steps: int = 0,
-        lr_min_scale: float = 1.0,
-        difficulty_sampler=None,
-        difficulty_warmup_steps: int = 10_000,
-        difficulty_ema_decay: float = 0.99,
-        difficulty_alpha: float = 0.5,
-        difficulty_min_weight: float = 0.7,
-        difficulty_max_weight: float = 1.5,
-        difficulty_refresh_every_steps: int = 1000,
+        lr_min_scale: float = 0.1,
         log_every_steps: int = 100,
         save_every_steps: Optional[int] = None,
         val_every_steps: Optional[int] = None,
         val_max_batches: Optional[int] = 16,
+        grad_clip_norm: Optional[float] = 1.0,
     ) -> None:
         if freeze_vae:
             model.freeze_vae()
@@ -664,11 +640,10 @@ class FlowTrainer(_BaseTrainer):
             save_every_steps=save_every_steps,
             val_every_steps=val_every_steps,
             val_max_batches=val_max_batches,
+            grad_clip_norm=grad_clip_norm,
             track_best_on_val=True,
         )
         self.lambda_flow = float(lambda_flow)
-        self.lambda_img_l1 = max(0.0, float(lambda_img_l1))
-        self.lambda_img_perc = max(0.0, float(lambda_img_perc))
         self.base_lr = float(lr)
         self.freeze_vae = bool(freeze_vae)
         self.freeze_style = bool(freeze_style)
@@ -677,15 +652,6 @@ class FlowTrainer(_BaseTrainer):
         self.flow_sample_steps = max(1, int(flow_sample_steps))
         self.lr_warmup_steps = max(0, int(lr_warmup_steps))
         self.lr_min_scale = float(min(max(0.0, float(lr_min_scale)), 1.0))
-        self.difficulty_sampler = difficulty_sampler
-        self.difficulty_warmup_steps = max(0, int(difficulty_warmup_steps))
-        self.difficulty_ema_decay = float(difficulty_ema_decay)
-        self.difficulty_alpha = max(0.0, float(difficulty_alpha))
-        self.difficulty_min_weight = max(0.0, float(difficulty_min_weight))
-        self.difficulty_max_weight = max(self.difficulty_min_weight, float(difficulty_max_weight))
-        self.difficulty_refresh_every_steps = max(1, int(difficulty_refresh_every_steps))
-        self.font_difficulty_ema: Dict[str, float] = {}
-        self.font_observation_count: Dict[str, int] = {}
         self.style_finetune_active = not self.freeze_style
         self.style_grad_enabled = not self.freeze_style
         style_params = []
@@ -713,15 +679,13 @@ class FlowTrainer(_BaseTrainer):
         self._set_learning_rate_for_step(0)
 
     def _lr_scale_for_step(self, step: int) -> float:
-        step = max(0, int(step))
-        if self.lr_warmup_steps > 0 and step < self.lr_warmup_steps:
-            return float(step + 1) / float(self.lr_warmup_steps)
-        if self.total_steps <= self.lr_warmup_steps:
-            return 1.0
-        progress = float(step - self.lr_warmup_steps) / float(max(1, self.total_steps - self.lr_warmup_steps))
-        progress = min(max(progress, 0.0), 1.0)
-        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
-        return self.lr_min_scale + (1.0 - self.lr_min_scale) * cosine
+        return _hold_then_cosine_lr_scale(
+            step=step,
+            total_steps=self.total_steps,
+            warmup_steps=self.lr_warmup_steps,
+            min_scale=self.lr_min_scale,
+            decay_fraction=0.2,
+        )
 
     def _set_learning_rate_for_step(self, step: int) -> None:
         lr_scale = self._lr_scale_for_step(step)
@@ -793,142 +757,32 @@ class FlowTrainer(_BaseTrainer):
                 style_global=style_pack["style_global"],
                 style_token_mask=style_pack["style_token_mask"],
             )
-            loss_flow = F.mse_loss(pred_flow, target_flow)
-            z1_hat = zt + (1.0 - t_view) * pred_flow
-            decoded = self.model.decode_from_latent(z1_hat)
-            loss_img_l1_per_sample = _per_sample_mean((decoded - target).abs())
-            loss_img_l1 = (
-                loss_img_l1_per_sample.mean()
-                if self.lambda_img_l1 > 0.0
-                else target.new_zeros(())
-            )
-            loss_img_perc_per_sample = (
-                glyph_perceptual_loss(decoded, target, reduction="none")
-                if self.lambda_img_perc > 0.0
-                else target.new_zeros((target.size(0),))
-            )
-            loss_img_perc = (
-                loss_img_perc_per_sample.mean()
-                if self.lambda_img_perc > 0.0
-                else target.new_zeros(())
-            )
+            loss_flow_per_sample = (pred_flow.float() - target_flow.float()).pow(2).reshape(target.size(0), -1).mean(dim=1)
+            loss_flow = loss_flow_per_sample.mean()
             loss = self.lambda_flow * loss_flow
-            loss = loss + self.lambda_img_l1 * loss_img_l1 + self.lambda_img_perc * loss_img_perc
         metrics = {
             "loss": loss,
             "loss_flow": loss_flow,
-            "loss_img_l1": loss_img_l1,
-            "loss_img_perc": loss_img_perc,
             "t_mean": timesteps.mean(),
             "style_finetune_active": float(self.style_finetune_active),
             "style_lr_mult": float(self._style_lr_scale_for_step(self.global_step)),
         }
-        metrics["difficulty_per_sample"] = loss_img_l1_per_sample.detach() + loss_img_perc_per_sample.detach()
         return metrics
 
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
         metrics = self._compute_losses(batch)
-        difficulty_per_sample = metrics.pop("difficulty_per_sample", None)
         metrics["loss"].backward()
+        metrics.update(self._apply_grad_clip())
         self.optimizer.step()
         self._set_learning_rate_for_step(self.global_step + 1)
-        if difficulty_per_sample is not None:
-            self._update_font_difficulty_ema(batch["font"], difficulty_per_sample)
-            metrics["difficulty_mean"] = difficulty_per_sample.mean()
         return _metrics_to_floats(metrics)
 
     def eval_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
         self.model.eval()
         with torch.no_grad():
-            metrics = self._compute_losses(batch)
-            metrics.pop("difficulty_per_sample", None)
-            return _metrics_to_floats(metrics)
-
-    def _update_font_difficulty_ema(self, fonts, difficulty_per_sample: torch.Tensor) -> None:
-        difficulty_values = difficulty_per_sample.detach().float().cpu().tolist()
-        batch_sums: Dict[str, float] = {}
-        batch_counts: Dict[str, int] = {}
-        for font_name, score in zip(fonts, difficulty_values):
-            batch_sums[font_name] = batch_sums.get(font_name, 0.0) + float(score)
-            batch_counts[font_name] = batch_counts.get(font_name, 0) + 1
-        ema_keep = self.difficulty_ema_decay
-        ema_add = 1.0 - ema_keep
-        for font_name, score_sum in batch_sums.items():
-            batch_mean = score_sum / float(batch_counts[font_name])
-            prev = self.font_difficulty_ema.get(font_name)
-            self.font_difficulty_ema[font_name] = batch_mean if prev is None else ema_keep * prev + ema_add * batch_mean
-            self.font_observation_count[font_name] = self.font_observation_count.get(font_name, 0) + batch_counts[font_name]
-
-    def on_after_train_step(self, batch: Dict[str, torch.Tensor], metrics: Dict[str, float]) -> None:
-        if self.difficulty_sampler is None:
-            return
-        if self.global_step < self.difficulty_warmup_steps:
-            return
-        if self.global_step % self.difficulty_refresh_every_steps != 0:
-            return
-        sampler_summary = self._refresh_difficulty_sampler()
-        if sampler_summary is None:
-            return
-        top_fonts = ", ".join(
-            f"{item['font']}:{float(item['weight']):.2f}"
-            for item in sampler_summary["top_fonts"]
-        )
-        bottom_fonts = ", ".join(
-            f"{item['font']}:{float(item['weight']):.2f}"
-            for item in sampler_summary["bottom_fonts"]
-        )
-        print(
-            "[train] refreshed flow difficulty sampler "
-            f"step={self.global_step} epoch={self.current_epoch} "
-            f"observed_fonts={int(sampler_summary['observed_font_count'])} "
-            f"baseline_difficulty={float(sampler_summary['baseline_difficulty']):.4f} "
-            f"weight_range=[{float(sampler_summary['font_weight_min']):.2f},"
-            f"{float(sampler_summary['font_weight_max']):.2f}] "
-            f"weight_bins(["
-            f"{float(sampler_summary['font_weight_bucket_min']):.2f},"
-            f"{float(sampler_summary['font_weight_bucket_edge_1']):.2f})="
-            f"{int(sampler_summary['font_weight_bucket_count_low'])},"
-            f"[{float(sampler_summary['font_weight_bucket_edge_1']):.2f},"
-            f"{float(sampler_summary['font_weight_bucket_edge_2']):.2f})="
-            f"{int(sampler_summary['font_weight_bucket_count_mid'])},"
-            f"[{float(sampler_summary['font_weight_bucket_edge_2']):.2f},"
-            f"{float(sampler_summary['font_weight_bucket_max']):.2f}]="
-            f"{int(sampler_summary['font_weight_bucket_count_high'])}) "
-            f"top={top_fonts} bottom={bottom_fonts}",
-            flush=True,
-        )
-
-    def _refresh_difficulty_sampler(self) -> Optional[Dict[str, object]]:
-        if self.difficulty_sampler is None:
-            return None
-        if self.global_step < self.difficulty_warmup_steps:
-            return None
-        if not self.font_difficulty_ema:
-            return None
-
-        observed_values = list(self.font_difficulty_ema.values())
-        baseline = sum(observed_values) / float(len(observed_values))
-        baseline = max(baseline, 1e-8)
-        font_weights: Dict[str, float] = {}
-        for font_name in self.difficulty_sampler.dataset.font_names:
-            difficulty = self.font_difficulty_ema.get(font_name, baseline)
-            normalized = max(difficulty / baseline, 1e-8)
-            weight = normalized ** self.difficulty_alpha
-            weight = min(self.difficulty_max_weight, max(self.difficulty_min_weight, weight))
-            font_weights[font_name] = float(weight)
-
-        sampler_summary = self.difficulty_sampler.set_font_weights(font_weights)
-        sampler_summary["observed_font_count"] = int(len(self.font_difficulty_ema))
-        sampler_summary["baseline_difficulty"] = float(baseline)
-        sampler_summary["warmup_steps"] = int(self.difficulty_warmup_steps)
-        sampler_summary["ema_decay"] = float(self.difficulty_ema_decay)
-        sampler_summary["alpha"] = float(self.difficulty_alpha)
-        sampler_summary["min_weight"] = float(self.difficulty_min_weight)
-        sampler_summary["max_weight"] = float(self.difficulty_max_weight)
-        sampler_summary["refresh_every_steps"] = int(self.difficulty_refresh_every_steps)
-        return sampler_summary
+            return _metrics_to_floats(self._compute_losses(batch))
 
     @torch.no_grad()
     def flow_sample(
@@ -991,6 +845,12 @@ class FlowTrainer(_BaseTrainer):
                 "model_state": self.model.state_dict(),
                 "model_config": self.model.export_config(),
                 "optimizer_state": self.optimizer.state_dict(),
+                "trainer_config": {
+                    "flow_sample_steps": int(self.flow_sample_steps),
+                    "lr_warmup_steps": int(self.lr_warmup_steps),
+                    "lr_min_scale": float(self.lr_min_scale),
+                    "grad_clip_norm": None if self.grad_clip_norm is None else float(self.grad_clip_norm),
+                },
                 "step": int(self.global_step),
                 "epoch": int(self.current_epoch),
             },
@@ -1008,6 +868,9 @@ class FlowTrainer(_BaseTrainer):
                 self.optimizer.load_state_dict(checkpoint["optimizer_state"])
             except ValueError as exc:
                 print(f"[flow] skipped optimizer state load: {exc}", flush=True)
+        trainer_config = checkpoint.get("trainer_config", {})
+        if isinstance(trainer_config, dict) and "flow_sample_steps" in trainer_config:
+            self.flow_sample_steps = max(1, int(trainer_config["flow_sample_steps"]))
         self.global_step = resume_step
         self.current_epoch = int(checkpoint.get("epoch", 0))
         self._set_learning_rate_for_step(self.global_step)
