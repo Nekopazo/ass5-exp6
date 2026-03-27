@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Profile peak CUDA memory by major training stage for one flow step."""
+"""Profile peak CUDA memory by major pixel-flow training stages."""
 
 from __future__ import annotations
 
@@ -7,14 +7,14 @@ import argparse
 import json
 from pathlib import Path
 import random
+import sys
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-import sys
-
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -77,10 +77,42 @@ def stage_record(device: torch.device, name: str, fn, records: list[dict]) -> ob
     return result
 
 
+def build_model_from_args(args: argparse.Namespace) -> SourcePartRefDiT:
+    if args.checkpoint is not None:
+        checkpoint = torch.load(args.checkpoint, map_location="cpu")
+        model_config = checkpoint.get("model_config")
+        if not isinstance(model_config, dict):
+            raise RuntimeError("Flow checkpoint is missing 'model_config'.")
+        model = SourcePartRefDiT(**model_config)
+        state_dict = checkpoint.get("model_state")
+        if isinstance(state_dict, dict):
+            model.load_state_dict(state_dict, strict=True)
+        return model
+    return SourcePartRefDiT(
+        in_channels=1,
+        image_size=int(args.image_size),
+        patch_size=int(args.patch_size),
+        encoder_patch_size=int(args.encoder_patch_size),
+        encoder_hidden_dim=int(args.encoder_hidden_dim),
+        encoder_depth=int(args.encoder_depth),
+        encoder_heads=int(args.encoder_heads),
+        dit_hidden_dim=int(args.dit_hidden_dim),
+        dit_depth=int(args.dit_depth),
+        dit_heads=int(args.dit_heads),
+        dit_mlp_ratio=float(args.dit_mlp_ratio),
+        content_fusion_start=int(args.content_fusion_start),
+        content_fusion_end=int(args.content_fusion_end),
+        style_fusion_start=int(args.style_fusion_start),
+        style_fusion_end=int(args.style_fusion_end),
+        detailer_base_channels=int(args.detailer_base_channels),
+        detailer_max_channels=int(args.detailer_max_channels),
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-root", type=Path, default=PROJECT_ROOT)
-    parser.add_argument("--vae-checkpoint", type=Path, required=True)
+    parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--device", type=str, default="cuda:1")
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--style-ref-count", type=int, default=0)
@@ -94,13 +126,32 @@ def main() -> None:
     parser.add_argument("--font-train-ratio", type=float, default=0.9)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--output", type=Path, default=PROJECT_ROOT / "analysis" / "memory_profile.json")
+    parser.add_argument("--image-size", type=int, default=128)
+    parser.add_argument("--patch-size", type=int, default=16)
+    parser.add_argument("--encoder-patch-size", type=int, default=8)
+    parser.add_argument("--encoder-hidden-dim", type=int, default=512)
+    parser.add_argument("--encoder-depth", type=int, default=4)
+    parser.add_argument("--encoder-heads", type=int, default=8)
+    parser.add_argument("--dit-hidden-dim", type=int, default=512)
+    parser.add_argument("--dit-depth", type=int, default=12)
+    parser.add_argument("--dit-heads", type=int, default=8)
+    parser.add_argument("--dit-mlp-ratio", type=float, default=4.0)
+    parser.add_argument("--content-fusion-start", type=int, default=0)
+    parser.add_argument("--content-fusion-end", type=int, default=8)
+    parser.add_argument("--style-fusion-start", type=int, default=6)
+    parser.add_argument("--style-fusion-end", type=int, default=12)
+    parser.add_argument("--detailer-base-channels", type=int, default=32)
+    parser.add_argument("--detailer-max-channels", type=int, default=256)
+    parser.add_argument("--ema-decay", type=float, default=0.9999)
     args = parser.parse_args()
 
     set_seed(int(args.seed))
     device = torch.device(args.device)
+    if device.type != "cuda":
+        raise RuntimeError("profile_memory.py requires a CUDA device.")
     font_split_seed = int(args.seed) if args.font_split_seed is None else int(args.font_split_seed)
     style_ref_count = None if int(args.style_ref_count) <= 0 else int(args.style_ref_count)
-    glyph_transform = build_base_glyph_transform(image_size=128)
+    glyph_transform = build_base_glyph_transform(image_size=int(args.image_size))
     dataset = FontImageDataset(
         project_root=args.data_root,
         max_fonts=int(args.max_fonts),
@@ -130,50 +181,15 @@ def main() -> None:
     )
     batch = next(iter(dataloader))
 
-    vae_checkpoint = torch.load(args.vae_checkpoint, map_location="cpu")
-    model_config = vae_checkpoint.get("model_config", {})
-    content_fusion_start = model_config.get("content_fusion_start")
-    content_fusion_end = model_config.get("content_fusion_end")
-    style_fusion_start = model_config.get("style_fusion_start")
-    style_fusion_end = model_config.get("style_fusion_end")
-    content_cross_attn_layers = model_config.get("content_cross_attn_layers")
-    style_cross_attn_every_n_layers = model_config.get("style_cross_attn_every_n_layers")
-    model = SourcePartRefDiT(
-        in_channels=1,
-        image_size=int(model_config.get("image_size", 128)),
-        latent_channels=int(model_config.get("latent_channels", 6)),
-        latent_size=int(model_config.get("latent_size", 16)),
-        vae_bottleneck_channels=int(model_config.get("vae_bottleneck_channels", 192)),
-        vae_encoder_16x16_blocks=int(model_config.get("vae_encoder_16x16_blocks", 2)),
-        vae_decoder_16x16_blocks=int(model_config.get("vae_decoder_16x16_blocks", 2)),
-        vae_decoder_tail_blocks=int(model_config.get("vae_decoder_tail_blocks", 1)),
-        latent_normalize_for_dit=bool(model_config.get("latent_normalize_for_dit", 0)),
-        encoder_patch_size=int(model_config.get("encoder_patch_size", 8)),
-        encoder_hidden_dim=int(model_config.get("encoder_hidden_dim", 512)),
-        encoder_depth=int(model_config.get("encoder_depth", 4)),
-        encoder_heads=int(model_config.get("encoder_heads", 8)),
-        dit_hidden_dim=int(model_config.get("dit_hidden_dim", 512)),
-        dit_depth=int(model_config.get("dit_depth", 12)),
-        dit_heads=int(model_config.get("dit_heads", 8)),
-        dit_mlp_ratio=float(model_config.get("dit_mlp_ratio", 4.0)),
-        content_fusion_start=None if content_fusion_start is None else int(content_fusion_start),
-        content_fusion_end=None if content_fusion_end is None else int(content_fusion_end),
-        style_fusion_start=None if style_fusion_start is None else int(style_fusion_start),
-        style_fusion_end=None if style_fusion_end is None else int(style_fusion_end),
-        content_cross_attn_layers=None if content_cross_attn_layers is None else int(content_cross_attn_layers),
-        style_cross_attn_every_n_layers=(
-            None if style_cross_attn_every_n_layers is None else int(style_cross_attn_every_n_layers)
-        ),
-    )
-    model.load_vae_checkpoint(args.vae_checkpoint)
+    model = build_model_from_args(args)
     trainer = FlowTrainer(
         model,
         device,
         lr=1e-4,
         total_steps=1,
         lambda_flow=1.0,
-        freeze_vae=True,
         flow_sample_steps=24,
+        ema_decay=float(args.ema_decay),
         log_every_steps=1,
         save_every_steps=None,
         grad_clip_norm=float(args.grad_clip_norm),
@@ -189,12 +205,12 @@ def main() -> None:
     records: list[dict] = []
     torch.cuda.empty_cache()
     with trainer._autocast_context():
-        z1, _, _ = stage_record(device, "vae_encode", lambda: trainer._encode_latent(target), records)
-        z0 = stage_record(device, "noise_sample", lambda: torch.randn_like(z1), records)
-        timesteps = stage_record(device, "time_sample", lambda: torch.rand(z1.size(0), device=device), records)
-        t_view = timesteps.view(-1, 1, 1, 1).to(dtype=z1.dtype)
-        zt = stage_record(device, "flow_interpolate", lambda: (1.0 - t_view) * z0 + t_view * z1, records)
-        target_flow = stage_record(device, "flow_target", lambda: z1 - z0, records)
+        x1 = target
+        x0 = stage_record(device, "noise_sample", lambda: torch.randn_like(x1), records)
+        timesteps = stage_record(device, "time_sample", lambda: torch.rand(x1.size(0), device=device), records)
+        t_view = timesteps.view(-1, 1, 1, 1).to(dtype=x1.dtype)
+        xt = stage_record(device, "flow_interpolate", lambda: (1.0 - t_view) * x0 + t_view * x1, records)
+        target_flow = stage_record(device, "flow_target", lambda: x1 - x0, records)
         content_features = stage_record(device, "content_encode_features", lambda: trainer.model.encode_content_features(content), records)
         content_tokens = stage_record(device, "content_project", lambda: trainer.model.content_proj(content_features), records)
         style_pack = stage_record(
@@ -215,9 +231,9 @@ def main() -> None:
             raise RuntimeError("profile_memory requires style tokens.")
         pred_flow = stage_record(
             device,
-            "dit_backbone",
+            "dip_forward",
             lambda: trainer.model.predict_flow(
-                zt,
+                xt,
                 timesteps,
                 content_tokens=content_tokens,
                 style_tokens=style_tokens,
@@ -226,7 +242,7 @@ def main() -> None:
             ),
             records,
         )
-        loss = stage_record(device, "flow_loss", lambda: torch.nn.functional.mse_loss(pred_flow, target_flow), records)
+        loss = stage_record(device, "flow_loss", lambda: F.mse_loss(pred_flow, target_flow), records)
 
     stage_record(device, "backward", lambda: loss.backward(), records)
     if trainer.grad_clip_norm is not None:
@@ -236,6 +252,7 @@ def main() -> None:
     result = {
         "config": {
             "device": str(device),
+            "checkpoint": None if args.checkpoint is None else str(args.checkpoint),
             "batch": int(args.batch),
             "style_ref_count": None if style_ref_count is None else int(style_ref_count),
             "style_ref_count_min": int(args.style_ref_count_min),
@@ -243,6 +260,7 @@ def main() -> None:
             "max_fonts": int(args.max_fonts),
             "num_workers": int(args.num_workers),
             "grad_clip_norm": float(args.grad_clip_norm),
+            "ema_decay": float(args.ema_decay),
         },
         "largest_peak_stage": max(records, key=lambda row: row["peak_delta_gb"]),
         "largest_alloc_delta_stage": max(records, key=lambda row: row["allocated_delta_gb"]),

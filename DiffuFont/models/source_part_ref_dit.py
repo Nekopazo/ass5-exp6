@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Content+style latent DiT for Chinese glyph generation."""
+"""Content+style pixel-space DiP model for Chinese glyph generation."""
 
 from __future__ import annotations
 
 from contextlib import nullcontext
+import math
 from pathlib import Path
 from typing import Optional
 
@@ -40,104 +41,6 @@ class ResBlock(nn.Module):
         x = self.conv1(F.silu(self.norm1(x)))
         x = self.conv2(F.silu(self.norm2(x)))
         return x + residual
-
-
-class GlyphVAE(nn.Module):
-    def __init__(
-        self,
-        in_channels: int = 1,
-        latent_channels: int = 4,
-        *,
-        bottleneck_channels: int = 192,
-        encoder_16x16_blocks: int = 2,
-        decoder_16x16_blocks: int = 2,
-        decoder_tail_blocks: int = 1,
-    ) -> None:
-        super().__init__()
-        self.in_channels = int(in_channels)
-        self.latent_channels = int(latent_channels)
-        self.bottleneck_channels = int(bottleneck_channels)
-        self.encoder_16x16_blocks = max(1, int(encoder_16x16_blocks))
-        self.decoder_16x16_blocks = max(1, int(decoder_16x16_blocks))
-        self.decoder_tail_blocks = max(0, int(decoder_tail_blocks))
-
-        self.encoder = nn.Sequential(
-            nn.Conv2d(self.in_channels, 32, kernel_size=3, stride=2, padding=1),
-            ResBlock(32, 32),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
-            ResBlock(64, 64),
-            nn.Conv2d(64, self.bottleneck_channels, kernel_size=3, stride=2, padding=1),
-            ResBlock(self.bottleneck_channels, self.bottleneck_channels),
-        )
-        self.enc_block16_extra = nn.Sequential(
-            *[
-                ResBlock(self.bottleneck_channels, self.bottleneck_channels)
-                for _ in range(max(0, self.encoder_16x16_blocks - 1))
-            ]
-        )
-        self.to_stats = nn.Conv2d(self.bottleneck_channels, self.latent_channels * 2, kernel_size=1)
-
-        self.decoder_in = nn.Conv2d(self.latent_channels, self.bottleneck_channels, kernel_size=3, padding=1)
-        self.dec_block16 = ResBlock(self.bottleneck_channels, self.bottleneck_channels)
-        self.dec_block16_extra = nn.Sequential(
-            *[
-                ResBlock(self.bottleneck_channels, self.bottleneck_channels)
-                for _ in range(max(0, self.decoder_16x16_blocks - 1))
-            ]
-        )
-        self.dec_up32 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="nearest"),
-            nn.Conv2d(self.bottleneck_channels, 64, kernel_size=3, padding=1),
-            ResBlock(64, 64),
-        )
-        self.dec_up64 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="nearest"),
-            nn.Conv2d(64, 32, kernel_size=3, padding=1),
-            ResBlock(32, 32),
-        )
-        self.dec_up128 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="nearest"),
-            nn.Conv2d(32, 16, kernel_size=3, padding=1),
-        )
-        if self.decoder_tail_blocks == 0:
-            self.dec_block128 = nn.Identity()
-        elif self.decoder_tail_blocks == 1:
-            self.dec_block128 = ResBlock(16, 16)
-        else:
-            self.dec_block128 = nn.Sequential(*[ResBlock(16, 16) for _ in range(self.decoder_tail_blocks)])
-        self.dec_norm128 = nn.GroupNorm(_group_count(16), 16)
-        self.decoder_out = nn.Conv2d(16, self.in_channels, kernel_size=3, padding=1)
-
-    def encode_stats(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        h = self.encoder(x)
-        h = self.enc_block16_extra(h)
-        mu, logvar = self.to_stats(h).chunk(2, dim=1)
-        return mu, logvar.clamp(-30.0, 20.0)
-
-    def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-        std = torch.exp(0.5 * logvar)
-        return mu + std * torch.randn_like(std)
-
-    def encode(self, x: torch.Tensor, *, sample_posterior: bool = False) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        mu, logvar = self.encode_stats(x)
-        z = self.reparameterize(mu, logvar) if sample_posterior else mu
-        return z, mu, logvar
-
-    def decode(self, z: torch.Tensor) -> torch.Tensor:
-        x = self.decoder_in(z)
-        x = self.dec_block16(x)
-        x = self.dec_block16_extra(x)
-        x = self.dec_up32(x)
-        x = self.dec_up64(x)
-        x = self.dec_up128(x)
-        x = self.dec_block128(x)
-        x = F.silu(self.dec_norm128(x))
-        return torch.tanh(self.decoder_out(x))
-
-    def forward(self, x: torch.Tensor, *, sample_posterior: bool = True) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        z, mu, logvar = self.encode(x, sample_posterior=sample_posterior)
-        recon = self.decode(z)
-        return recon, z, mu, logvar
 
 
 class EncoderBlock(nn.Module):
@@ -242,6 +145,112 @@ class StyleEncoder(nn.Module):
         return self.net(x)
 
 
+class PatchDetailerHead(nn.Module):
+    """Per-patch local refiner conditioned on the final DiT token."""
+
+    def __init__(
+        self,
+        *,
+        in_channels: int = 1,
+        patch_size: int = 16,
+        context_dim: int = 512,
+        base_channels: int = 32,
+        max_channels: int = 256,
+    ) -> None:
+        super().__init__()
+        if patch_size < 8:
+            raise ValueError(f"patch_size must be >= 8, got {patch_size}")
+        depth = int(round(math.log2(patch_size)))
+        if 2**depth != int(patch_size):
+            raise ValueError(f"patch_size must be a power of two, got {patch_size}")
+        self.in_channels = int(in_channels)
+        self.patch_size = int(patch_size)
+        self.context_dim = int(context_dim)
+        self.base_channels = int(base_channels)
+        self.max_channels = int(max_channels)
+        self.depth = int(depth)
+        self.stage_channels = [
+            min(self.base_channels * (2**idx), self.max_channels)
+            for idx in range(self.depth)
+        ]
+
+        self.stem = nn.Conv2d(self.in_channels, self.stage_channels[0], kernel_size=3, padding=1)
+        self.enc_blocks = nn.ModuleList([ResBlock(ch, ch) for ch in self.stage_channels])
+        self.downsamples = nn.ModuleList()
+        for idx, ch in enumerate(self.stage_channels):
+            next_ch = self.stage_channels[min(idx + 1, len(self.stage_channels) - 1)]
+            self.downsamples.append(nn.Conv2d(ch, next_ch, kernel_size=3, stride=2, padding=1))
+
+        bottleneck_channels = self.stage_channels[-1]
+        self.context_proj = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(self.context_dim, bottleneck_channels),
+        )
+        self.bottleneck = ResBlock(bottleneck_channels * 2, bottleneck_channels)
+
+        self.upsamples = nn.ModuleList()
+        self.dec_blocks = nn.ModuleList()
+        current_ch = bottleneck_channels
+        for skip_ch in reversed(self.stage_channels):
+            self.upsamples.append(
+                nn.Sequential(
+                    nn.Upsample(scale_factor=2, mode="nearest"),
+                    nn.Conv2d(current_ch, skip_ch, kernel_size=3, padding=1),
+                )
+            )
+            self.dec_blocks.append(ResBlock(skip_ch + skip_ch, skip_ch))
+            current_ch = skip_ch
+
+        self.out_norm = nn.GroupNorm(_group_count(current_ch), current_ch)
+        self.out_proj = nn.Conv2d(current_ch, self.in_channels, kernel_size=3, padding=1)
+
+    def forward(self, patch_tokens: torch.Tensor, noisy_patches: torch.Tensor) -> torch.Tensor:
+        if patch_tokens.dim() != 3:
+            raise ValueError(f"patch_tokens must be 3D, got {tuple(patch_tokens.shape)}")
+        if noisy_patches.dim() != 5:
+            raise ValueError(f"noisy_patches must be 5D, got {tuple(noisy_patches.shape)}")
+        batch, patch_count, channels, patch_h, patch_w = noisy_patches.shape
+        if channels != self.in_channels:
+            raise ValueError(
+                f"noisy_patches channel mismatch: expected {self.in_channels}, got {channels}"
+            )
+        if patch_h != self.patch_size or patch_w != self.patch_size:
+            raise ValueError(
+                f"noisy_patches spatial mismatch: expected ({self.patch_size}, {self.patch_size}), "
+                f"got ({patch_h}, {patch_w})"
+            )
+        if tuple(patch_tokens.shape[:2]) != (batch, patch_count):
+            raise ValueError(
+                "patch_tokens and noisy_patches must share batch/patch dims: "
+                f"patch_tokens={tuple(patch_tokens.shape)} noisy_patches={tuple(noisy_patches.shape)}"
+            )
+
+        flat_patches = noisy_patches.reshape(batch * patch_count, channels, patch_h, patch_w)
+        flat_tokens = patch_tokens.reshape(batch * patch_count, patch_tokens.size(-1))
+
+        x = self.stem(flat_patches)
+        skips: list[torch.Tensor] = []
+        for enc_block, downsample in zip(self.enc_blocks, self.downsamples):
+            x = enc_block(x)
+            skips.append(x)
+            x = downsample(x)
+
+        context = self.context_proj(flat_tokens).view(flat_tokens.size(0), -1, 1, 1)
+        x = torch.cat([x, context], dim=1)
+        x = self.bottleneck(x)
+
+        for upsample, dec_block, skip in zip(self.upsamples, self.dec_blocks, reversed(skips)):
+            x = upsample(x)
+            if x.shape[-2:] != skip.shape[-2:]:
+                x = F.interpolate(x, size=skip.shape[-2:], mode="nearest")
+            x = torch.cat([x, skip], dim=1)
+            x = dec_block(x)
+
+        x = F.silu(self.out_norm(x))
+        x = self.out_proj(x)
+        return x.view(batch, patch_count, self.in_channels, self.patch_size, self.patch_size)
+
+
 class SourcePartRefDiT(nn.Module):
     STYLE_STATE_PREFIXES = (
         "style_encoder.",
@@ -249,18 +258,13 @@ class SourcePartRefDiT(nn.Module):
         "style_global_proj.",
         "style_contrastive_head.",
     )
+
     def __init__(
         self,
         *,
         in_channels: int = 1,
         image_size: int = 128,
-        latent_channels: int = 6,
-        latent_size: int = 16,
-        vae_bottleneck_channels: int = 192,
-        vae_encoder_16x16_blocks: int = 2,
-        vae_decoder_16x16_blocks: int = 2,
-        vae_decoder_tail_blocks: int = 1,
-        latent_normalize_for_dit: bool = False,
+        patch_size: int = 16,
         encoder_patch_size: int = 8,
         encoder_hidden_dim: int = 512,
         encoder_depth: int = 4,
@@ -276,22 +280,19 @@ class SourcePartRefDiT(nn.Module):
         content_cross_attn_layers: int | None = None,
         style_cross_attn_every_n_layers: int | None = None,
         contrastive_proj_dim: int = 128,
-        style_mid_tokens_per_ref: int = 12,
-        local_style_tokens_per_ref: int = 16,
-        style_residual_tokens: int = 8,
+        detailer_base_channels: int = 32,
+        detailer_max_channels: int = 256,
     ) -> None:
         super().__init__()
         if int(in_channels) != 1:
             raise ValueError(f"Only grayscale glyphs are supported, got in_channels={in_channels}")
+        if image_size % patch_size != 0:
+            raise ValueError(f"image_size must be divisible by patch_size, got {image_size} vs {patch_size}")
         self.in_channels = int(in_channels)
         self.image_size = int(image_size)
-        self.latent_channels = int(latent_channels)
-        self.latent_size = int(latent_size)
-        self.vae_bottleneck_channels = int(vae_bottleneck_channels)
-        self.vae_encoder_16x16_blocks = max(1, int(vae_encoder_16x16_blocks))
-        self.vae_decoder_16x16_blocks = max(1, int(vae_decoder_16x16_blocks))
-        self.vae_decoder_tail_blocks = max(0, int(vae_decoder_tail_blocks))
-        self.latent_normalize_for_dit = bool(latent_normalize_for_dit)
+        self.patch_size = int(patch_size)
+        self.patch_grid_size = self.image_size // self.patch_size
+        self.num_patches = self.patch_grid_size * self.patch_grid_size
         self.encoder_patch_size = int(encoder_patch_size)
         self.encoder_hidden_dim = int(encoder_hidden_dim)
         self.encoder_depth = int(encoder_depth)
@@ -300,6 +301,10 @@ class SourcePartRefDiT(nn.Module):
         self.dit_depth = int(dit_depth)
         self.dit_heads = int(dit_heads)
         self.dit_mlp_ratio = float(dit_mlp_ratio)
+        self.contrastive_proj_dim = int(contrastive_proj_dim)
+        self.detailer_base_channels = int(detailer_base_channels)
+        self.detailer_max_channels = int(detailer_max_channels)
+
         if content_fusion_start is None and content_fusion_end is None:
             if content_cross_attn_layers is None:
                 self.content_fusion_start = 0
@@ -308,7 +313,10 @@ class SourcePartRefDiT(nn.Module):
                 self.content_fusion_start = 0
                 self.content_fusion_end = max(0, min(self.dit_depth, int(content_cross_attn_layers)))
         else:
-            self.content_fusion_start = max(0, min(self.dit_depth, 0 if content_fusion_start is None else int(content_fusion_start)))
+            self.content_fusion_start = max(
+                0,
+                min(self.dit_depth, 0 if content_fusion_start is None else int(content_fusion_start)),
+            )
             self.content_fusion_end = max(
                 self.content_fusion_start,
                 min(self.dit_depth, self.dit_depth if content_fusion_end is None else int(content_fusion_end)),
@@ -322,26 +330,20 @@ class SourcePartRefDiT(nn.Module):
                 self.style_fusion_start = 0
                 self.style_fusion_end = self.dit_depth
         else:
-            self.style_fusion_start = max(0, min(self.dit_depth, 0 if style_fusion_start is None else int(style_fusion_start)))
+            self.style_fusion_start = max(
+                0,
+                min(self.dit_depth, 0 if style_fusion_start is None else int(style_fusion_start)),
+            )
             self.style_fusion_end = max(
                 self.style_fusion_start,
                 min(self.dit_depth, self.dit_depth if style_fusion_end is None else int(style_fusion_end)),
             )
-        self.content_cross_attn_layers = self.content_fusion_end - self.content_fusion_start
-        self.style_cross_attn_every_n_layers = None if style_cross_attn_every_n_layers is None else max(1, int(style_cross_attn_every_n_layers))
-        self.contrastive_proj_dim = int(contrastive_proj_dim)
 
-        self.vae = GlyphVAE(
-            in_channels=self.in_channels,
-            latent_channels=self.latent_channels,
-            bottleneck_channels=self.vae_bottleneck_channels,
-            encoder_16x16_blocks=self.vae_encoder_16x16_blocks,
-            decoder_16x16_blocks=self.vae_decoder_16x16_blocks,
-            decoder_tail_blocks=self.vae_decoder_tail_blocks,
+        self.content_cross_attn_layers = self.content_fusion_end - self.content_fusion_start
+        self.style_cross_attn_every_n_layers = (
+            None if style_cross_attn_every_n_layers is None else max(1, int(style_cross_attn_every_n_layers))
         )
-        self.register_buffer("latent_norm_mean", torch.zeros(1, self.latent_channels, 1, 1), persistent=True)
-        self.register_buffer("latent_norm_std", torch.ones(1, self.latent_channels, 1, 1), persistent=True)
-        self.register_buffer("latent_norm_initialized", torch.tensor(False), persistent=True)
+
         self.content_encoder = GlyphTokenEncoder(
             image_size=self.image_size,
             patch_size=self.encoder_patch_size,
@@ -355,8 +357,9 @@ class SourcePartRefDiT(nn.Module):
             hidden_dim=self.encoder_hidden_dim,
         )
         self.backbone = DiffusionTransformerBackbone(
-            latent_channels=self.latent_channels,
-            latent_size=self.latent_size,
+            in_channels=self.in_channels,
+            image_size=self.image_size,
+            patch_size=self.patch_size,
             hidden_dim=self.dit_hidden_dim,
             depth=self.dit_depth,
             num_heads=self.dit_heads,
@@ -367,6 +370,13 @@ class SourcePartRefDiT(nn.Module):
             style_fusion_end=self.style_fusion_end,
             content_cross_attn_layers=self.content_cross_attn_layers,
             style_cross_attn_every_n_layers=self.style_cross_attn_every_n_layers,
+        )
+        self.detailer = PatchDetailerHead(
+            in_channels=self.in_channels,
+            patch_size=self.patch_size,
+            context_dim=self.dit_hidden_dim,
+            base_channels=self.detailer_base_channels,
+            max_channels=self.detailer_max_channels,
         )
 
         if self.encoder_hidden_dim != self.dit_hidden_dim:
@@ -387,13 +397,7 @@ class SourcePartRefDiT(nn.Module):
         return {
             "in_channels": int(self.in_channels),
             "image_size": int(self.image_size),
-            "latent_channels": int(self.latent_channels),
-            "latent_size": int(self.latent_size),
-            "vae_bottleneck_channels": int(self.vae_bottleneck_channels),
-            "vae_encoder_16x16_blocks": int(self.vae_encoder_16x16_blocks),
-            "vae_decoder_16x16_blocks": int(self.vae_decoder_16x16_blocks),
-            "vae_decoder_tail_blocks": int(self.vae_decoder_tail_blocks),
-            "latent_normalize_for_dit": int(self.latent_normalize_for_dit),
+            "patch_size": int(self.patch_size),
             "encoder_patch_size": int(self.encoder_patch_size),
             "encoder_hidden_dim": int(self.encoder_hidden_dim),
             "encoder_depth": int(self.encoder_depth),
@@ -407,74 +411,9 @@ class SourcePartRefDiT(nn.Module):
             "style_fusion_start": int(self.style_fusion_start),
             "style_fusion_end": int(self.style_fusion_end),
             "contrastive_proj_dim": int(self.contrastive_proj_dim),
+            "detailer_base_channels": int(self.detailer_base_channels),
+            "detailer_max_channels": int(self.detailer_max_channels),
         }
-
-    def encode_to_latent(
-        self,
-        x: torch.Tensor,
-        *,
-        sample_posterior: bool = False,
-        return_stats: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        z, mu, logvar = self.vae.encode(x, sample_posterior=sample_posterior)
-        if self.latent_normalize_for_dit and bool(self.latent_norm_initialized.item()):
-            z = self._normalize_latent(z)
-            mu = self._normalize_latent(mu)
-            logvar = logvar - 2.0 * torch.log(self.latent_norm_std.to(device=logvar.device, dtype=logvar.dtype))
-        if return_stats:
-            return z, mu, logvar
-        return z
-
-    def decode_from_latent(self, z: torch.Tensor) -> torch.Tensor:
-        if self.latent_normalize_for_dit and bool(self.latent_norm_initialized.item()):
-            z = self._denormalize_latent(z)
-        return self.vae.decode(z)
-
-    def vae_forward(
-        self,
-        x: torch.Tensor,
-        *,
-        sample_posterior: bool = True,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        return self.vae(x, sample_posterior=sample_posterior)
-
-    def load_vae_checkpoint(self, path: str | Path) -> None:
-        checkpoint = torch.load(str(path), map_location="cpu")
-        if not isinstance(checkpoint, dict) or "vae_state" not in checkpoint:
-            raise RuntimeError(f"VAE checkpoint must contain 'vae_state': {path}")
-        state_dict = checkpoint["vae_state"]
-        self.vae.load_state_dict(state_dict, strict=True)
-        latent_norm_state = checkpoint.get("latent_norm_state")
-        if isinstance(latent_norm_state, dict):
-            mean = latent_norm_state.get("mean")
-            std = latent_norm_state.get("std")
-            initialized = bool(latent_norm_state.get("initialized", False))
-            if mean is not None and std is not None:
-                mean_tensor = torch.as_tensor(mean, dtype=self.latent_norm_mean.dtype)
-                std_tensor = torch.as_tensor(std, dtype=self.latent_norm_std.dtype)
-                if tuple(mean_tensor.shape) != tuple(self.latent_norm_mean.shape):
-                    raise RuntimeError(
-                        "latent_norm_state mean shape mismatch: "
-                        f"checkpoint={tuple(mean_tensor.shape)} model={tuple(self.latent_norm_mean.shape)}"
-                    )
-                if tuple(std_tensor.shape) != tuple(self.latent_norm_std.shape):
-                    raise RuntimeError(
-                        "latent_norm_state std shape mismatch: "
-                        f"checkpoint={tuple(std_tensor.shape)} model={tuple(self.latent_norm_std.shape)}"
-                    )
-                self.latent_norm_mean.copy_(mean_tensor)
-                self.latent_norm_std.copy_(std_tensor.clamp_min(1e-6))
-                self.latent_norm_initialized.fill_(initialized)
-
-    def _normalize_latent(self, z: torch.Tensor) -> torch.Tensor:
-        mean = self.latent_norm_mean.to(device=z.device, dtype=z.dtype)
-        std = self.latent_norm_std.to(device=z.device, dtype=z.dtype).clamp_min(1e-6)
-        return (z - mean) / std
-
-    def _denormalize_latent(self, z: torch.Tensor) -> torch.Tensor:
-        mean = self.latent_norm_mean.to(device=z.device, dtype=z.dtype)
-        std = self.latent_norm_std.to(device=z.device, dtype=z.dtype)
-        return z * std + mean
 
     @classmethod
     def _is_style_state_key(cls, key: str) -> bool:
@@ -513,10 +452,6 @@ class SourcePartRefDiT(nn.Module):
                 f"{missing_style_keys}. The style encoder architecture likely changed; "
                 "rerun style pretraining for the new aggregator."
             )
-
-    def freeze_vae(self) -> None:
-        for param in self.vae.parameters():
-            param.requires_grad_(False)
 
     def freeze_style(self) -> None:
         for name, param in self.named_parameters():
@@ -576,9 +511,41 @@ class SourcePartRefDiT(nn.Module):
             "contrastive_style": contrastive_style,
         }
 
+    def _patchify(self, x: torch.Tensor) -> torch.Tensor:
+        patches = F.unfold(x, kernel_size=self.patch_size, stride=self.patch_size)
+        patches = patches.transpose(1, 2).contiguous()
+        return patches.view(
+            x.size(0),
+            self.num_patches,
+            self.in_channels,
+            self.patch_size,
+            self.patch_size,
+        )
+
+    def _unpatchify(self, patch_values: torch.Tensor) -> torch.Tensor:
+        if patch_values.dim() != 5:
+            raise ValueError(f"patch_values must be 5D, got {tuple(patch_values.shape)}")
+        batch, patch_count, channels, patch_h, patch_w = patch_values.shape
+        if patch_count != self.num_patches:
+            raise ValueError(f"patch_count mismatch: expected {self.num_patches}, got {patch_count}")
+        if channels != self.in_channels:
+            raise ValueError(f"channel mismatch: expected {self.in_channels}, got {channels}")
+        if patch_h != self.patch_size or patch_w != self.patch_size:
+            raise ValueError(
+                f"patch spatial mismatch: expected ({self.patch_size}, {self.patch_size}), "
+                f"got ({patch_h}, {patch_w})"
+            )
+        patch_cols = patch_values.view(batch, patch_count, -1).transpose(1, 2).contiguous()
+        return F.fold(
+            patch_cols,
+            output_size=(self.image_size, self.image_size),
+            kernel_size=self.patch_size,
+            stride=self.patch_size,
+        )
+
     def predict_flow(
         self,
-        x_t_latent: torch.Tensor,
+        x_t_image: torch.Tensor,
         timesteps: torch.Tensor,
         *,
         content_tokens: torch.Tensor,
@@ -586,18 +553,21 @@ class SourcePartRefDiT(nn.Module):
         style_global: torch.Tensor,
         style_token_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return self.backbone(
-            x_t_latent,
+        patch_tokens = self.backbone(
+            x_t_image,
             timesteps,
             content_tokens=content_tokens,
             style_tokens=style_tokens,
             style_global=style_global,
             style_token_mask=style_token_mask,
         )
+        noisy_patches = self._patchify(x_t_image)
+        pred_patches = self.detailer(patch_tokens, noisy_patches)
+        return self._unpatchify(pred_patches)
 
     def forward(
         self,
-        x_t_latent: torch.Tensor,
+        x_t_image: torch.Tensor,
         timesteps: torch.Tensor,
         content_img: torch.Tensor,
         *,
@@ -611,7 +581,7 @@ class SourcePartRefDiT(nn.Module):
             style_ref_mask=style_ref_mask,
         )
         return self.predict_flow(
-            x_t_latent,
+            x_t_image,
             timesteps,
             content_tokens=content_tokens,
             style_tokens=style_pack["style_tokens"],

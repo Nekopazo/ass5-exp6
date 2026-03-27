@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Latent DiT backbone for content+style glyph flow generation."""
+"""Pixel-space DiT backbone for content+style glyph flow generation."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from .sdpa_attention import SDPAAttention
 def _build_1d_sincos_pos_embed(embed_dim: int, positions: torch.Tensor) -> torch.Tensor:
     half_dim = embed_dim // 2
     omega = torch.arange(half_dim, dtype=torch.float32) / float(max(1, half_dim))
-    omega = 1.0 / (10000 ** omega)
+    omega = 1.0 / (10000**omega)
     out = positions.reshape(-1, 1).float() * omega.reshape(1, -1)
     emb = torch.cat([torch.sin(out), torch.cos(out)], dim=1)
     if embed_dim % 2 == 1:
@@ -110,7 +110,7 @@ class GlyphDiTBlock(nn.Module):
 
     def forward(
         self,
-        latent_tokens: torch.Tensor,
+        patch_tokens: torch.Tensor,
         *,
         cond: torch.Tensor,
         content_tokens: torch.Tensor | None,
@@ -141,7 +141,7 @@ class GlyphDiTBlock(nn.Module):
         scale_mlp = modulation_chunks[chunk_idx + 1]
         gate_mlp = modulation_chunks[chunk_idx + 2]
 
-        x = latent_tokens
+        x = patch_tokens
         q = modulate(self.norm_self(x), shift_self, scale_self)
         self_out, _ = self.self_attn(q, q, q, need_weights=False)
         x = x + gate_self.unsqueeze(1) * self_out
@@ -178,8 +178,9 @@ class DiffusionTransformerBackbone(nn.Module):
     def __init__(
         self,
         *,
-        latent_channels: int = 4,
-        latent_size: int = 16,
+        in_channels: int = 1,
+        image_size: int = 128,
+        patch_size: int = 16,
         hidden_dim: int = 512,
         depth: int = 16,
         num_heads: int = 8,
@@ -192,12 +193,16 @@ class DiffusionTransformerBackbone(nn.Module):
         style_cross_attn_every_n_layers: int | None = None,
     ) -> None:
         super().__init__()
-        self.latent_channels = int(latent_channels)
-        self.latent_size = int(latent_size)
+        if image_size % patch_size != 0:
+            raise ValueError(f"image_size must be divisible by patch_size, got {image_size} vs {patch_size}")
+        self.in_channels = int(in_channels)
+        self.image_size = int(image_size)
+        self.patch_size = int(patch_size)
         self.hidden_dim = int(hidden_dim)
         self.depth = int(depth)
         self.num_heads = int(num_heads)
-        self.num_tokens = self.latent_size * self.latent_size
+        self.grid_size = self.image_size // self.patch_size
+        self.num_tokens = self.grid_size * self.grid_size
         if content_fusion_start is None and content_fusion_end is None:
             if content_cross_attn_layers is None:
                 self.content_fusion_start = 0
@@ -206,14 +211,19 @@ class DiffusionTransformerBackbone(nn.Module):
                 self.content_fusion_start = 0
                 self.content_fusion_end = max(0, min(self.depth, int(content_cross_attn_layers)))
         else:
-            self.content_fusion_start = max(0, min(self.depth, 0 if content_fusion_start is None else int(content_fusion_start)))
+            self.content_fusion_start = max(
+                0,
+                min(self.depth, 0 if content_fusion_start is None else int(content_fusion_start)),
+            )
             self.content_fusion_end = max(
                 self.content_fusion_start,
                 min(self.depth, self.depth if content_fusion_end is None else int(content_fusion_end)),
             )
         self.content_cross_attn_layers = self.content_fusion_end - self.content_fusion_start
 
-        self.style_cross_attn_every_n_layers = None if style_cross_attn_every_n_layers is None else max(1, int(style_cross_attn_every_n_layers))
+        self.style_cross_attn_every_n_layers = (
+            None if style_cross_attn_every_n_layers is None else max(1, int(style_cross_attn_every_n_layers))
+        )
         if style_fusion_start is None and style_fusion_end is None:
             if self.style_cross_attn_every_n_layers is None:
                 self.style_fusion_start = max(0, self.depth - 6)
@@ -222,7 +232,10 @@ class DiffusionTransformerBackbone(nn.Module):
                 self.style_fusion_start = 0
                 self.style_fusion_end = self.depth
         else:
-            self.style_fusion_start = max(0, min(self.depth, 0 if style_fusion_start is None else int(style_fusion_start)))
+            self.style_fusion_start = max(
+                0,
+                min(self.depth, 0 if style_fusion_start is None else int(style_fusion_start)),
+            )
             self.style_fusion_end = max(
                 self.style_fusion_start,
                 min(self.depth, self.depth if style_fusion_end is None else int(style_fusion_end)),
@@ -245,8 +258,13 @@ class DiffusionTransformerBackbone(nn.Module):
         self.has_content_cross_attn = any(self.content_layer_mask)
         self.has_style_cross_attn = any(self.style_layer_mask)
 
-        self.latent_proj = nn.Linear(self.latent_channels, self.hidden_dim)
-        pos_embed = build_2d_sincos_pos_embed(self.hidden_dim, self.latent_size, self.latent_size)
+        self.patch_embed = nn.Conv2d(
+            self.in_channels,
+            self.hidden_dim,
+            kernel_size=self.patch_size,
+            stride=self.patch_size,
+        )
+        pos_embed = build_2d_sincos_pos_embed(self.hidden_dim, self.grid_size, self.grid_size)
         self.register_buffer("pos_embed", pos_embed.unsqueeze(0), persistent=False)
 
         self.time_mlp = nn.Sequential(
@@ -267,13 +285,10 @@ class DiffusionTransformerBackbone(nn.Module):
                 )
             )
         self.final_norm = nn.LayerNorm(self.hidden_dim, eps=1e-6)
-        self.final_proj = nn.Linear(self.hidden_dim, self.latent_channels)
-        nn.init.zeros_(self.final_proj.weight)
-        nn.init.zeros_(self.final_proj.bias)
 
     def forward(
         self,
-        latent: torch.Tensor,
+        image: torch.Tensor,
         timesteps: torch.Tensor,
         *,
         content_tokens: torch.Tensor,
@@ -281,33 +296,25 @@ class DiffusionTransformerBackbone(nn.Module):
         style_global: torch.Tensor,
         style_token_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if latent.dim() != 4:
-            raise ValueError(f"latent must be 4D, got {tuple(latent.shape)}")
-        if tuple(latent.shape[1:]) != (self.latent_channels, self.latent_size, self.latent_size):
+        if image.dim() != 4:
+            raise ValueError(f"image must be 4D, got {tuple(image.shape)}")
+        expected_shape = (self.in_channels, self.image_size, self.image_size)
+        if tuple(image.shape[1:]) != expected_shape:
             raise ValueError(
-                "latent shape mismatch: "
-                f"expected (*, {self.latent_channels}, {self.latent_size}, {self.latent_size}), "
-                f"got {tuple(latent.shape)}"
+                "image shape mismatch: "
+                f"expected (*, {self.in_channels}, {self.image_size}, {self.image_size}), "
+                f"got {tuple(image.shape)}"
             )
 
-        x = latent.flatten(2).transpose(1, 2).contiguous()
-        x = self.latent_proj(x)
+        x = self.patch_embed(image).flatten(2).transpose(1, 2).contiguous()
         x = x + self.pos_embed.to(device=x.device, dtype=x.dtype)
 
         time_cond = timestep_embedding(timesteps, self.hidden_dim).to(dtype=x.dtype)
         time_cond = self.time_mlp(time_cond)
         style_cond = self.style_cond_proj(style_global.to(device=x.device, dtype=x.dtype))
 
-        content_tokens = (
-            content_tokens.to(device=x.device, dtype=x.dtype)
-            if self.has_content_cross_attn
-            else None
-        )
-        style_tokens = (
-            style_tokens.to(device=x.device, dtype=x.dtype)
-            if self.has_style_cross_attn
-            else None
-        )
+        content_tokens = content_tokens.to(device=x.device, dtype=x.dtype) if self.has_content_cross_attn else None
+        style_tokens = style_tokens.to(device=x.device, dtype=x.dtype) if self.has_style_cross_attn else None
         if self.has_style_cross_attn and style_token_mask is not None:
             style_token_mask = style_token_mask.to(device=x.device, dtype=torch.bool)
 
@@ -323,12 +330,4 @@ class DiffusionTransformerBackbone(nn.Module):
                 style_token_mask=style_token_mask if block.use_style_cross_attn else None,
             )
 
-        x = self.final_norm(x)
-        x = self.final_proj(x)
-        x = x.transpose(1, 2).contiguous().view(
-            latent.size(0),
-            self.latent_channels,
-            self.latent_size,
-            self.latent_size,
-        )
-        return x
+        return self.final_norm(x)

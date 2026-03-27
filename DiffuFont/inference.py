@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inference entry for the content+style latent flow path."""
+"""Inference entry for the content+style pixel-space flow path."""
 
 from __future__ import annotations
 
@@ -29,11 +29,13 @@ def load_trainer(checkpoint_path: Path, device: torch.device) -> FlowTrainer:
         model,
         device,
         total_steps=1,
-        freeze_vae=False,
         flow_sample_steps=int(trainer_config.get("flow_sample_steps", 24)),
+        ema_decay=float(trainer_config.get("ema_decay", 0.9999)),
     )
     trainer.load(checkpoint_path)
     trainer.model.eval()
+    if trainer.ema_model is not None:
+        trainer.ema_model.eval()
     return trainer
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Training entry for the latent VAE + DiT glyph generation path."""
+"""Training entry for the pixel-space DiP glyph generation path."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from dataset import CartesianFontCharBatchSampler, FontImageDataset, UniqueFontBatchSampler
-from models.model import FlowTrainer, VAETrainer
+from models.model import FlowTrainer
 from models.sdpa_attention import describe_torch_sdpa_backends, enable_torch_sdpa_backends
 from models.source_part_ref_dit import SourcePartRefDiT
 from style_augment import build_base_glyph_transform
@@ -177,13 +177,7 @@ def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
     return SourcePartRefDiT(
         in_channels=1,
         image_size=int(args.image_size),
-        latent_channels=int(args.latent_channels),
-        latent_size=int(args.latent_size),
-        vae_bottleneck_channels=int(args.vae_bottleneck_channels),
-        vae_encoder_16x16_blocks=int(args.vae_encoder_16x16_blocks),
-        vae_decoder_16x16_blocks=int(args.vae_decoder_16x16_blocks),
-        vae_decoder_tail_blocks=int(args.vae_decoder_tail_blocks),
-        latent_normalize_for_dit=bool(args.latent_normalize_for_dit),
+        patch_size=int(args.patch_size),
         encoder_patch_size=int(args.encoder_patch_size),
         encoder_hidden_dim=int(args.encoder_hidden_dim),
         encoder_depth=int(args.encoder_depth),
@@ -197,22 +191,16 @@ def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
         style_fusion_start=int(args.style_fusion_start),
         style_fusion_end=int(args.style_fusion_end),
         contrastive_proj_dim=int(args.contrastive_proj_dim),
+        detailer_base_channels=int(args.detailer_base_channels),
+        detailer_max_channels=int(args.detailer_max_channels),
     )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stage", type=str, default="flow", choices=["vae", "flow"])
     parser.add_argument("--data-root", type=Path, default=Path("."))
     parser.add_argument("--save-dir", type=Path, default=Path("checkpoints"))
     parser.add_argument("--resume", type=Path, default=None)
-    parser.add_argument("--vae-checkpoint", type=Path, default=None)
-    parser.add_argument(
-        "--train-vae-jointly",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Only used in flow stage. If false, a pretrained VAE checkpoint is required.",
-    )
 
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch", type=int, default=64)
@@ -228,17 +216,7 @@ def main() -> None:
     parser.add_argument("--style-ref-count-max", type=int, default=8)
     parser.add_argument("--image-size", type=int, default=128)
 
-    parser.add_argument("--latent-channels", type=int, default=6)
-    parser.add_argument("--latent-size", type=int, default=16)
-    parser.add_argument("--vae-bottleneck-channels", type=int, default=192)
-    parser.add_argument("--vae-encoder-16x16-blocks", type=int, default=2)
-    parser.add_argument("--vae-decoder-16x16-blocks", type=int, default=2)
-    parser.add_argument("--vae-decoder-tail-blocks", type=int, default=1)
-    parser.add_argument(
-        "--latent-normalize-for-dit",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-    )
+    parser.add_argument("--patch-size", type=int, default=16)
     parser.add_argument("--encoder-patch-size", type=int, default=8)
     parser.add_argument("--encoder-hidden-dim", type=int, default=512)
     parser.add_argument("--encoder-depth", type=int, default=4)
@@ -252,6 +230,9 @@ def main() -> None:
     parser.add_argument("--style-fusion-start", type=int, default=6)
     parser.add_argument("--style-fusion-end", type=int, default=12)
     parser.add_argument("--contrastive-proj-dim", type=int, default=128)
+    parser.add_argument("--detailer-base-channels", type=int, default=32)
+    parser.add_argument("--detailer-max-channels", type=int, default=256)
+    parser.add_argument("--freeze-style", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--train-sampling", type=str, default="shuffle", choices=["shuffle", "cartesian_font_char"])
     parser.add_argument("--cartesian-fonts-per-batch", type=int, default=8)
     parser.add_argument("--cartesian-chars-per-batch", type=int, default=8)
@@ -267,17 +248,9 @@ def main() -> None:
     parser.add_argument("--sample-every-steps", type=int, default=0)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
 
-    parser.add_argument("--vae-lambda-rec", type=float, default=1.0)
-    parser.add_argument("--vae-lambda-perc", type=float, default=0.18)
-    parser.add_argument("--vae-lambda-kl", type=float, default=2e-4)
-    parser.add_argument("--vae-kl-warmup-steps", type=int, default=10_000)
-    parser.add_argument("--vae-latent-mean-weight", type=float, default=0.001)
-    parser.add_argument("--vae-latent-std-weight", type=float, default=0.001)
-    parser.add_argument("--vae-latent-corr-weight", type=float, default=5e-4)
-    parser.add_argument("--vae-latent-std-target", type=float, default=1.0)
-
     parser.add_argument("--flow-lambda", type=float, default=1.0)
     parser.add_argument("--flow-sample-steps", type=int, default=24)
+    parser.add_argument("--ema-decay", type=float, default=0.9999)
     parser.add_argument("--style-lr-scale", type=float, default=1.0)
     parser.add_argument("--style-lr-warmup-steps", type=int, default=10_000)
     args = parser.parse_args()
@@ -285,7 +258,7 @@ def main() -> None:
     set_global_seed(int(args.seed))
     enable_torch_sdpa_backends()
     device = resolve_device(args.device)
-    print(f"[train] stage={args.stage} device={device} seed={int(args.seed)}")
+    print(f"[train] mode=pixel_flow device={device} seed={int(args.seed)}")
     print(f"[train] attention_backend={describe_torch_sdpa_backends()}")
 
     font_split_seed = int(args.seed) if args.font_split_seed is None else int(args.font_split_seed)
@@ -293,10 +266,10 @@ def main() -> None:
     val_every_steps = max(1, int(args.val_every_steps))
     save_every_steps = int(args.save_every_steps)
     if save_every_steps <= 0:
-        save_every_steps = 2000 if args.stage == "vae" else 5000
+        save_every_steps = 5000
     sample_every_steps = int(args.sample_every_steps)
     if sample_every_steps <= 0:
-        sample_every_steps = 500 if args.stage == "vae" else 300
+        sample_every_steps = 300
 
     style_ref_count = None if int(args.style_ref_count) <= 0 else int(args.style_ref_count)
     glyph_transform = build_base_glyph_transform(image_size=int(args.image_size))
@@ -364,71 +337,37 @@ def main() -> None:
 
     total_steps = int(args.total_steps)
     if total_steps <= 0:
-        total_steps = 80_000 if args.stage == "vae" else max(1, len(dataloader) * int(args.epochs))
+        total_steps = max(1, len(dataloader) * int(args.epochs))
     resolved_epochs = max(1, int(args.epochs))
     if len(dataloader) > 0:
         resolved_epochs = max(resolved_epochs, math.ceil(total_steps / len(dataloader)))
 
     model = build_model(args)
-    if args.stage == "flow" and args.resume is None and not bool(args.train_vae_jointly) and args.vae_checkpoint is None:
-        raise ValueError("Flow stage requires --vae-checkpoint unless --train-vae-jointly is enabled.")
-    if args.vae_checkpoint is not None:
-        model.load_vae_checkpoint(args.vae_checkpoint)
-        print(f"[train] loaded VAE checkpoint: {args.vae_checkpoint}")
-
-    if args.stage == "vae":
-        trainer = VAETrainer(
-            model,
-            device,
-            lr=float(args.lr),
-            total_steps=total_steps,
-            lambda_rec=float(args.vae_lambda_rec),
-            lambda_perc=float(args.vae_lambda_perc),
-            lambda_kl=float(args.vae_lambda_kl),
-            kl_warmup_steps=int(args.vae_kl_warmup_steps),
-            latent_mean_weight=float(args.vae_latent_mean_weight),
-            latent_std_weight=float(args.vae_latent_std_weight),
-            latent_corr_weight=float(args.vae_latent_corr_weight),
-            latent_std_target=float(args.vae_latent_std_target),
-            lr_warmup_steps=int(args.lr_warmup_steps),
-            lr_min_scale=float(args.lr_min_scale),
-            log_every_steps=log_every_steps,
-            save_every_steps=save_every_steps,
-            val_every_steps=val_every_steps,
-            val_max_batches=int(args.val_max_batches),
-            grad_clip_norm=float(args.grad_clip_norm),
-        )
-    else:
-        trainer = FlowTrainer(
-            model,
-            device,
-            lr=float(args.lr),
-            total_steps=total_steps,
-            lambda_flow=float(args.flow_lambda),
-            style_lr_scale=float(args.style_lr_scale),
-            style_lr_warmup_steps=int(args.style_lr_warmup_steps),
-            freeze_vae=not bool(args.train_vae_jointly),
-            freeze_style=False,
-            flow_sample_steps=int(args.flow_sample_steps),
-            lr_warmup_steps=int(args.lr_warmup_steps),
-            lr_min_scale=float(args.lr_min_scale),
-            log_every_steps=log_every_steps,
-            save_every_steps=save_every_steps,
-            val_every_steps=val_every_steps,
-            val_max_batches=int(args.val_max_batches),
-            grad_clip_norm=float(args.grad_clip_norm),
-        )
+    trainer = FlowTrainer(
+        model,
+        device,
+        lr=float(args.lr),
+        total_steps=total_steps,
+        lambda_flow=float(args.flow_lambda),
+        style_lr_scale=float(args.style_lr_scale),
+        style_lr_warmup_steps=int(args.style_lr_warmup_steps),
+        freeze_style=bool(args.freeze_style),
+        flow_sample_steps=int(args.flow_sample_steps),
+        ema_decay=float(args.ema_decay),
+        lr_warmup_steps=int(args.lr_warmup_steps),
+        lr_min_scale=float(args.lr_min_scale),
+        log_every_steps=log_every_steps,
+        save_every_steps=save_every_steps,
+        val_every_steps=val_every_steps,
+        val_max_batches=int(args.val_max_batches),
+        grad_clip_norm=float(args.grad_clip_norm),
+    )
 
     if args.resume is not None:
         trainer.load(args.resume)
         print(f"[train] resumed from {args.resume}")
 
-    first_batch = next(iter(dataloader))
-    trainer.sample_batch = (
-        build_sample_batch(dataset, val_dataset, device=device, seed=int(args.seed))
-        if args.stage == "flow"
-        else first_batch
-    )
+    trainer.sample_batch = build_sample_batch(dataset, val_dataset, device=device, seed=int(args.seed))
     trainer.sample_every_steps = sample_every_steps if sample_every_steps > 0 else None
     trainer.sample_dir = args.save_dir / "samples"
 
@@ -445,7 +384,8 @@ def main() -> None:
     run_config["val_fonts"] = 0 if val_dataset is None else int(len(val_dataset.font_names))
     run_config["val_samples"] = 0 if val_dataset is None else int(len(val_dataset.samples))
     run_config["computed_total_steps"] = int(total_steps)
-    run_config["style_trained_jointly"] = int(args.stage == "flow")
+    run_config["model_type"] = "pixel_dip"
+    run_config["style_trained_jointly"] = int(not bool(args.freeze_style))
 
     args.save_dir.mkdir(parents=True, exist_ok=True)
     (args.save_dir / "train_config.json").write_text(
