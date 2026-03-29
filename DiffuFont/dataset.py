@@ -40,6 +40,7 @@ class FontImageDataset(Dataset):
         train_lmdb: Optional[Union[str, Path]] = None,
         transform=None,
         style_transform=None,
+        load_style_refs: bool = True,
         lmdb_decode_cache_size: int = 20_000,
     ) -> None:
         self.root = Path(project_root).resolve()
@@ -61,6 +62,9 @@ class FontImageDataset(Dataset):
             raise ValueError(f"font_train_ratio must be in (0, 1), got {font_train_ratio}")
         self.transform = transform
         self.style_transform = style_transform if style_transform is not None else transform
+        self.load_style_refs = bool(load_style_refs)
+        if self.include_positive_style and not self.load_style_refs:
+            raise ValueError("include_positive_style=True requires load_style_refs=True")
         self._random_seed = int(random_seed)
         self.rng = random.Random(self._random_seed)
         self.lmdb_decode_cache_size = max(0, int(lmdb_decode_cache_size))
@@ -92,6 +96,7 @@ class FontImageDataset(Dataset):
             entries = sorted(entries, key=lambda item: len(item[1]), reverse=True)[: self.max_fonts]
 
         self.font_names = [name for name, _ in entries]
+        self.font_id_by_name = {name: idx for idx, name in enumerate(self.font_names)}
         self.valid_indices_by_font = {name: indices for name, indices in entries}
         self.samples: List[Tuple[str, int]] = []
         self.sample_indices_by_font: Dict[str, List[int]] = {name: [] for name in self.font_names}
@@ -111,6 +116,7 @@ class FontImageDataset(Dataset):
             f"fonts={len(self.font_names)} "
             f"style_ref_count_min={self.style_ref_count_min} "
             f"style_ref_count_max={self.style_ref_count_max} "
+            f"load_style_refs={self.load_style_refs} "
             f"positive_pairs={self.include_positive_style} "
             f"font_split={self.font_split} font_split_seed={self.font_split_seed} "
             f"font_train_ratio={self.font_train_ratio:.2f}"
@@ -284,31 +290,34 @@ class FontImageDataset(Dataset):
         self._ensure_txns()
         font_name, char_index = self.samples[index]
         char = self.char_list[char_index]
+        font_id = self.font_id_by_name[font_name]
 
         content_key = f"ContentFont@{char}"
         target_key = f"{font_name}@{char}"
         content_img = self._load_tensor(self._c_txn, content_key, style=False)
         target_img = self._load_tensor(self._t_txn, target_key, style=False)
 
-        style_indices = self._sample_style_indices(font_name, char_index, self.style_ref_count_max)
-        style_chars = [self.char_list[idx] for idx in style_indices]
-        style_imgs = [
-            self._load_tensor(self._t_txn, f"{font_name}@{style_char}", style=True)
-            for style_char in style_chars
-        ]
-
         sample = {
             "font": font_name,
+            "font_id": int(font_id),
             "char": char,
+            "char_id": int(char_index),
             "content": content_img,
             "target": target_img,
-            "style_img": torch.stack(style_imgs, dim=0),
-            "style_ref_mask": torch.ones((len(style_imgs),), dtype=torch.float32),
-            "style_ref_count_min": self.style_ref_count_min,
-            "style_ref_count_max": self.style_ref_count_max,
-            "style_chars": style_chars,
-            "style_char": style_chars[0],
         }
+        if self.load_style_refs:
+            style_indices = self._sample_style_indices(font_name, char_index, self.style_ref_count_max)
+            style_chars = [self.char_list[idx] for idx in style_indices]
+            style_imgs = [
+                self._load_tensor(self._t_txn, f"{font_name}@{style_char}", style=True)
+                for style_char in style_chars
+            ]
+            sample["style_img"] = torch.stack(style_imgs, dim=0)
+            sample["style_ref_mask"] = torch.ones((len(style_imgs),), dtype=torch.float32)
+            sample["style_ref_count_min"] = self.style_ref_count_min
+            sample["style_ref_count_max"] = self.style_ref_count_max
+            sample["style_chars"] = style_chars
+            sample["style_char"] = style_chars[0]
         if self.include_positive_style:
             positive_style_indices = self._sample_style_indices(
                 font_name,

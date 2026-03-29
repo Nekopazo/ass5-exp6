@@ -58,6 +58,9 @@ def collate_fn(samples) -> Dict[str, torch.Tensor]:
     ref_count = _resolve_batch_ref_count(samples)
     batch = {
         "font": [sample["font"] for sample in samples],
+        "font_id": torch.tensor([sample["font_id"] for sample in samples], dtype=torch.long),
+        "char": [sample["char"] for sample in samples],
+        "char_id": torch.tensor([sample["char_id"] for sample in samples], dtype=torch.long),
         "content": torch.stack([sample["content"] for sample in samples], dim=0),
         "target": torch.stack([sample["target"] for sample in samples], dim=0),
         "style_img": torch.stack([sample["style_img"][:ref_count] for sample in samples], dim=0),
@@ -75,9 +78,9 @@ def build_dataloader(
     seed: int,
     use_unique_font_batches: bool,
     shuffle: bool,
-    sampling_mode: str = "shuffle",
-    cartesian_fonts_per_batch: int = 8,
-    cartesian_chars_per_batch: int = 8,
+    sampling_mode: str,
+    cartesian_fonts_per_batch: int,
+    cartesian_chars_per_batch: int,
 ) -> DataLoader:
     dataloader_kwargs = {
         "dataset": dataset,
@@ -154,6 +157,9 @@ def build_sample_batch(
         seed=seed,
         use_unique_font_batches=True,
         shuffle=False,
+        sampling_mode="shuffle",
+        cartesian_fonts_per_batch=1,
+        cartesian_chars_per_batch=1,
     )
     seen_batch = slice_batch(next(iter(seen_loader)), seen_count)
     if val_dataset is None or len(val_dataset.font_names) == 0:
@@ -168,6 +174,9 @@ def build_sample_batch(
         seed=seed + 1000,
         use_unique_font_batches=True,
         shuffle=False,
+        sampling_mode="shuffle",
+        cartesian_fonts_per_batch=1,
+        cartesian_chars_per_batch=1,
     )
     unseen_batch = slice_batch(next(iter(unseen_loader)), unseen_count)
     return concat_batches(seen_batch, unseen_batch)
@@ -178,10 +187,7 @@ def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
         in_channels=1,
         image_size=int(args.image_size),
         patch_size=int(args.patch_size),
-        encoder_patch_size=int(args.encoder_patch_size),
         encoder_hidden_dim=int(args.encoder_hidden_dim),
-        encoder_depth=int(args.encoder_depth),
-        encoder_heads=int(args.encoder_heads),
         dit_hidden_dim=int(args.dit_hidden_dim),
         dit_depth=int(args.dit_depth),
         dit_heads=int(args.dit_heads),
@@ -190,7 +196,6 @@ def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
         content_fusion_end=int(args.content_fusion_end),
         style_fusion_start=int(args.style_fusion_start),
         style_fusion_end=int(args.style_fusion_end),
-        contrastive_proj_dim=int(args.contrastive_proj_dim),
         detailer_base_channels=int(args.detailer_base_channels),
         detailer_max_channels=int(args.detailer_max_channels),
     )
@@ -198,61 +203,65 @@ def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-root", type=Path, default=Path("."))
-    parser.add_argument("--save-dir", type=Path, default=Path("checkpoints"))
-    parser.add_argument("--resume", type=Path, default=None)
+    parser.add_argument("--data-root", type=Path, required=True)
+    parser.add_argument("--save-dir", type=Path, required=True)
+    parser.add_argument("--resume", type=Path)
 
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch", type=int, default=64)
-    parser.add_argument("--num-workers", type=int, default=8)
-    parser.add_argument("--device", type=str, default="auto")
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--font-split", type=str, default="train", choices=["train", "test", "all"])
-    parser.add_argument("--font-split-seed", type=int, default=None)
-    parser.add_argument("--font-train-ratio", type=float, default=0.95)
-    parser.add_argument("--max-fonts", type=int, default=0)
-    parser.add_argument("--style-ref-count", type=int, default=0)
-    parser.add_argument("--style-ref-count-min", type=int, default=6)
-    parser.add_argument("--style-ref-count-max", type=int, default=8)
-    parser.add_argument("--image-size", type=int, default=128)
+    parser.add_argument("--epochs", type=int, required=True)
+    parser.add_argument("--batch", type=int, required=True)
+    parser.add_argument("--num-workers", type=int, required=True)
+    parser.add_argument("--device", type=str, required=True)
+    parser.add_argument("--seed", type=int, required=True)
+    parser.add_argument("--font-split", type=str, required=True, choices=["train", "test", "all"])
+    parser.add_argument("--font-split-seed", type=int, required=True)
+    parser.add_argument("--font-train-ratio", type=float, required=True)
+    parser.add_argument("--max-fonts", type=int, required=True)
+    parser.add_argument("--style-ref-count", type=int, required=True)
+    parser.add_argument("--style-ref-count-min", type=int, required=True)
+    parser.add_argument("--style-ref-count-max", type=int, required=True)
+    parser.add_argument("--image-size", type=int, required=True)
 
-    parser.add_argument("--patch-size", type=int, default=16)
-    parser.add_argument("--encoder-patch-size", type=int, default=8)
-    parser.add_argument("--encoder-hidden-dim", type=int, default=512)
-    parser.add_argument("--encoder-depth", type=int, default=4)
-    parser.add_argument("--encoder-heads", type=int, default=8)
-    parser.add_argument("--dit-hidden-dim", type=int, default=512)
-    parser.add_argument("--dit-depth", type=int, default=12)
-    parser.add_argument("--dit-heads", type=int, default=8)
-    parser.add_argument("--dit-mlp-ratio", type=float, default=4.0)
-    parser.add_argument("--content-fusion-start", type=int, default=0)
-    parser.add_argument("--content-fusion-end", type=int, default=8)
-    parser.add_argument("--style-fusion-start", type=int, default=6)
-    parser.add_argument("--style-fusion-end", type=int, default=12)
-    parser.add_argument("--contrastive-proj-dim", type=int, default=128)
-    parser.add_argument("--detailer-base-channels", type=int, default=32)
-    parser.add_argument("--detailer-max-channels", type=int, default=256)
-    parser.add_argument("--freeze-style", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--train-sampling", type=str, default="shuffle", choices=["shuffle", "cartesian_font_char"])
-    parser.add_argument("--cartesian-fonts-per-batch", type=int, default=8)
-    parser.add_argument("--cartesian-chars-per-batch", type=int, default=8)
+    parser.add_argument("--patch-size", type=int, required=True)
+    parser.add_argument("--encoder-hidden-dim", type=int, required=True)
+    parser.add_argument("--dit-hidden-dim", type=int, required=True)
+    parser.add_argument("--dit-depth", type=int, required=True)
+    parser.add_argument("--dit-heads", type=int, required=True)
+    parser.add_argument("--dit-mlp-ratio", type=float, required=True)
+    parser.add_argument("--content-fusion-start", type=int, required=True)
+    parser.add_argument("--content-fusion-end", type=int, required=True)
+    parser.add_argument("--style-fusion-start", type=int, required=True)
+    parser.add_argument("--style-fusion-end", type=int, required=True)
+    parser.add_argument("--detailer-base-channels", type=int, required=True)
+    parser.add_argument("--detailer-max-channels", type=int, required=True)
+    parser.add_argument("--train-sampling", type=str, required=True, choices=["shuffle", "cartesian_font_char"])
+    parser.add_argument("--cartesian-fonts-per-batch", type=int, required=True)
+    parser.add_argument("--cartesian-chars-per-batch", type=int, required=True)
 
-    parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--lr-warmup-steps", type=int, default=2000)
+    parser.add_argument("--lr", type=float, required=True)
+    parser.add_argument("--lr-warmup-steps", type=int, default=0)
+    parser.add_argument("--lr-decay-start-step", type=int, default=-1)
     parser.add_argument("--lr-min-scale", type=float, default=0.1)
-    parser.add_argument("--total-steps", type=int, default=0)
-    parser.add_argument("--log-every-steps", type=int, default=100)
-    parser.add_argument("--val-every-steps", type=int, default=100)
-    parser.add_argument("--val-max-batches", type=int, default=16)
-    parser.add_argument("--save-every-steps", type=int, default=0)
-    parser.add_argument("--sample-every-steps", type=int, default=0)
-    parser.add_argument("--grad-clip-norm", type=float, default=1.0)
+    parser.add_argument("--total-loss-warmup-steps", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--total-loss-min-scale", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--total-loss-decay-start-step", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--total-steps", type=int, required=True)
+    parser.add_argument("--log-every-steps", type=int, required=True)
+    parser.add_argument("--val-every-steps", type=int, required=True)
+    parser.add_argument("--val-max-batches", type=int, required=True)
+    parser.add_argument("--save-every-steps", type=int, required=True)
+    parser.add_argument("--sample-every-steps", type=int, required=True)
+    parser.add_argument("--grad-clip-norm", type=float, required=True)
 
-    parser.add_argument("--flow-lambda", type=float, default=1.0)
-    parser.add_argument("--flow-sample-steps", type=int, default=24)
-    parser.add_argument("--ema-decay", type=float, default=0.9999)
-    parser.add_argument("--style-lr-scale", type=float, default=1.0)
-    parser.add_argument("--style-lr-warmup-steps", type=int, default=10_000)
+    parser.add_argument("--flow-lambda", type=float, required=True)
+    use_cnn_perceptor_group = parser.add_mutually_exclusive_group(required=True)
+    use_cnn_perceptor_group.add_argument("--use-cnn-perceptor", dest="use_cnn_perceptor", action="store_true")
+    use_cnn_perceptor_group.add_argument("--no-use-cnn-perceptor", dest="use_cnn_perceptor", action="store_false")
+    parser.add_argument("--perceptor-checkpoint", type=Path)
+    parser.add_argument("--perceptual-loss-lambda", type=float, required=True)
+    parser.add_argument("--style-loss-lambda", type=float, required=True)
+    parser.add_argument("--cnn-ramp-steps", type=int, required=True)
+    parser.add_argument("--flow-sample-steps", type=int, required=True)
+    parser.add_argument("--ema-decay", type=float, required=True)
     args = parser.parse_args()
 
     set_global_seed(int(args.seed))
@@ -261,15 +270,33 @@ def main() -> None:
     print(f"[train] mode=pixel_flow device={device} seed={int(args.seed)}")
     print(f"[train] attention_backend={describe_torch_sdpa_backends()}")
 
-    font_split_seed = int(args.seed) if args.font_split_seed is None else int(args.font_split_seed)
-    log_every_steps = max(1, int(args.log_every_steps))
-    val_every_steps = max(1, int(args.val_every_steps))
+    font_split_seed = int(args.font_split_seed)
+    log_every_steps = int(args.log_every_steps)
+    val_every_steps = int(args.val_every_steps)
     save_every_steps = int(args.save_every_steps)
-    if save_every_steps <= 0:
-        save_every_steps = 5000
     sample_every_steps = int(args.sample_every_steps)
-    if sample_every_steps <= 0:
-        sample_every_steps = 300
+    resolved_save_every_steps = None if save_every_steps == 0 else save_every_steps
+    resolved_sample_every_steps = None if sample_every_steps == 0 else sample_every_steps
+    total_steps = int(args.total_steps)
+    if log_every_steps <= 0 or val_every_steps <= 0:
+        raise ValueError("log_every_steps and val_every_steps must be > 0.")
+    if save_every_steps < 0 or sample_every_steps < 0:
+        raise ValueError("save_every_steps and sample_every_steps must be >= 0.")
+    if total_steps <= 0:
+        raise ValueError("total_steps must be > 0.")
+    if int(args.lr_warmup_steps) < 0:
+        raise ValueError("lr_warmup_steps must be >= 0.")
+    if float(args.lr_min_scale) < 0.0 or float(args.lr_min_scale) > 1.0:
+        raise ValueError("lr_min_scale must be in [0, 1].")
+    if (
+        args.total_loss_warmup_steps is not None
+        or args.total_loss_min_scale is not None
+        or args.total_loss_decay_start_step is not None
+    ):
+        print(
+            "[train] warning: total-loss schedule args are deprecated and ignored; "
+            "use lr-warmup-steps / lr-decay-start-step / lr-min-scale instead"
+        )
 
     style_ref_count = None if int(args.style_ref_count) <= 0 else int(args.style_ref_count)
     glyph_transform = build_base_glyph_transform(image_size=int(args.image_size))
@@ -326,6 +353,9 @@ def main() -> None:
             seed=int(args.seed) + 1,
             use_unique_font_batches=False,
             shuffle=False,
+            sampling_mode="shuffle",
+            cartesian_fonts_per_batch=int(args.cartesian_fonts_per_batch),
+            cartesian_chars_per_batch=int(args.cartesian_chars_per_batch),
         )
     if str(args.train_sampling) == "cartesian_font_char":
         print(
@@ -335,12 +365,19 @@ def main() -> None:
             f"effective_batch<={int(args.cartesian_fonts_per_batch) * int(args.cartesian_chars_per_batch)}"
         )
 
-    total_steps = int(args.total_steps)
-    if total_steps <= 0:
-        total_steps = max(1, len(dataloader) * int(args.epochs))
     resolved_epochs = max(1, int(args.epochs))
     if len(dataloader) > 0:
         resolved_epochs = max(resolved_epochs, math.ceil(total_steps / len(dataloader)))
+
+    effective_perceptor_checkpoint = args.perceptor_checkpoint
+    effective_perceptual_loss_lambda = float(args.perceptual_loss_lambda)
+    effective_style_loss_lambda = float(args.style_loss_lambda)
+    if not bool(args.use_cnn_perceptor):
+        if args.perceptor_checkpoint is not None or effective_perceptual_loss_lambda > 0.0 or effective_style_loss_lambda > 0.0:
+            print("[train] use_cnn_perceptor=0, ignoring perceptor checkpoint and auxiliary loss weights")
+        effective_perceptor_checkpoint = None
+        effective_perceptual_loss_lambda = 0.0
+        effective_style_loss_lambda = 0.0
 
     model = build_model(args)
     trainer = FlowTrainer(
@@ -348,16 +385,19 @@ def main() -> None:
         device,
         lr=float(args.lr),
         total_steps=total_steps,
+        lr_warmup_steps=int(args.lr_warmup_steps),
+        lr_decay_start_step=None if int(args.lr_decay_start_step) < 0 else int(args.lr_decay_start_step),
+        lr_min_scale=float(args.lr_min_scale),
         lambda_flow=float(args.flow_lambda),
-        style_lr_scale=float(args.style_lr_scale),
-        style_lr_warmup_steps=int(args.style_lr_warmup_steps),
-        freeze_style=bool(args.freeze_style),
+        use_cnn_perceptor=bool(args.use_cnn_perceptor),
+        perceptor_checkpoint=effective_perceptor_checkpoint,
+        perceptual_loss_lambda=effective_perceptual_loss_lambda,
+        style_loss_lambda=effective_style_loss_lambda,
+        cnn_ramp_steps=int(args.cnn_ramp_steps),
         flow_sample_steps=int(args.flow_sample_steps),
         ema_decay=float(args.ema_decay),
-        lr_warmup_steps=int(args.lr_warmup_steps),
-        lr_min_scale=float(args.lr_min_scale),
         log_every_steps=log_every_steps,
-        save_every_steps=save_every_steps,
+        save_every_steps=resolved_save_every_steps,
         val_every_steps=val_every_steps,
         val_max_batches=int(args.val_max_batches),
         grad_clip_norm=float(args.grad_clip_norm),
@@ -366,18 +406,33 @@ def main() -> None:
     if args.resume is not None:
         trainer.load(args.resume)
         print(f"[train] resumed from {args.resume}")
+    args.save_dir.mkdir(parents=True, exist_ok=True)
+    if bool(args.use_cnn_perceptor) and trainer.perceptor_report is not None:
+        (args.save_dir / "perceptor_qualification_snapshot.json").write_text(
+            json.dumps(trainer.perceptor_report, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        ready_flag = int(bool(trainer.perceptor_report.get("can_integrate_directly")))
+        print(f"[train] loaded perceptor_report ready_for_flow={ready_flag}")
+        if not ready_flag:
+            print(f"[train] warning: perceptor report suggests not integrating directly yet: {args.perceptor_checkpoint}")
+    elif bool(args.use_cnn_perceptor) and args.perceptor_checkpoint is not None:
+        print(f"[train] loaded perceptor checkpoint without qualification report: {args.perceptor_checkpoint}")
 
     trainer.sample_batch = build_sample_batch(dataset, val_dataset, device=device, seed=int(args.seed))
-    trainer.sample_every_steps = sample_every_steps if sample_every_steps > 0 else None
+    trainer.sample_every_steps = resolved_sample_every_steps
     trainer.sample_dir = args.save_dir / "samples"
 
     run_config = {key: (str(value) if isinstance(value, Path) else value) for key, value in vars(args).items()}
+    run_config.pop("total_loss_warmup_steps", None)
+    run_config.pop("total_loss_min_scale", None)
+    run_config.pop("total_loss_decay_start_step", None)
     run_config["resolved_device"] = str(device)
     run_config["resolved_font_split_seed"] = int(font_split_seed)
     run_config["resolved_log_every_steps"] = int(log_every_steps)
     run_config["resolved_val_every_steps"] = int(val_every_steps)
-    run_config["resolved_save_every_steps"] = int(save_every_steps)
-    run_config["resolved_sample_every_steps"] = int(sample_every_steps)
+    run_config["resolved_save_every_steps"] = None if resolved_save_every_steps is None else int(resolved_save_every_steps)
+    run_config["resolved_sample_every_steps"] = None if resolved_sample_every_steps is None else int(resolved_sample_every_steps)
     run_config["resolved_epochs"] = int(resolved_epochs)
     run_config["train_fonts"] = int(len(dataset.font_names))
     run_config["train_samples"] = int(len(dataset.samples))
@@ -385,9 +440,15 @@ def main() -> None:
     run_config["val_samples"] = 0 if val_dataset is None else int(len(val_dataset.samples))
     run_config["computed_total_steps"] = int(total_steps)
     run_config["model_type"] = "pixel_dip"
-    run_config["style_trained_jointly"] = int(not bool(args.freeze_style))
+    run_config["use_cnn_perceptor"] = int(bool(args.use_cnn_perceptor))
+    run_config["perceptor_checkpoint"] = None if effective_perceptor_checkpoint is None else str(effective_perceptor_checkpoint)
+    run_config["perceptual_loss_lambda"] = float(effective_perceptual_loss_lambda)
+    run_config["style_loss_lambda"] = float(effective_style_loss_lambda)
+    run_config["cnn_ramp_steps"] = int(args.cnn_ramp_steps)
+    run_config["lr_warmup_steps"] = int(args.lr_warmup_steps)
+    run_config["lr_decay_start_step"] = None if int(args.lr_decay_start_step) < 0 else int(args.lr_decay_start_step)
+    run_config["lr_min_scale"] = float(args.lr_min_scale)
 
-    args.save_dir.mkdir(parents=True, exist_ok=True)
     (args.save_dir / "train_config.json").write_text(
         json.dumps(run_config, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",

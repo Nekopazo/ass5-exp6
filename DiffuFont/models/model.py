@@ -6,7 +6,6 @@ from __future__ import annotations
 import copy
 from contextlib import nullcontext
 import json
-import math
 from pathlib import Path
 import time
 from typing import Dict, Optional
@@ -15,6 +14,13 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torchvision.utils import save_image
+
+from .font_perceptor import (
+    FontPerceptor,
+    FrozenFontPerceptorGuidance,
+    style_similarity_stats,
+    supervised_contrastive_loss,
+)
 
 
 def _per_sample_mean(x: torch.Tensor) -> torch.Tensor:
@@ -31,32 +37,42 @@ def _metrics_to_floats(metrics: Dict[str, torch.Tensor | float | int]) -> Dict[s
     return output
 
 
-def _hold_then_cosine_lr_scale(
+def _hold_then_linear_scale(
     *,
     step: int,
     total_steps: int,
     warmup_steps: int,
     min_scale: float,
-    decay_fraction: float = 0.2,
+    decay_start_step: Optional[int] = None,
 ) -> float:
     step = max(0, int(step))
     total_steps = max(1, int(total_steps))
     warmup_steps = max(0, int(warmup_steps))
     min_scale = float(min(max(0.0, float(min_scale)), 1.0))
-    decay_fraction = min(max(float(decay_fraction), 0.0), 1.0)
 
     if warmup_steps > 0 and step < warmup_steps:
         return float(step + 1) / float(warmup_steps)
 
-    decay_start = int(total_steps * (1.0 - decay_fraction))
+    if decay_start_step is None:
+        return 1.0
+
+    decay_start = max(0, int(decay_start_step))
     decay_start = max(warmup_steps, min(total_steps, decay_start))
     if step < decay_start:
         return 1.0
 
-    decay_steps = max(1, total_steps - decay_start)
+    final_step = max(decay_start, total_steps - 1)
+    decay_steps = max(1, final_step - decay_start)
     progress = min(max(float(step - decay_start) / float(decay_steps), 0.0), 1.0)
-    cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
-    return min_scale + (1.0 - min_scale) * cosine
+    return 1.0 + (min_scale - 1.0) * progress
+
+
+def _linear_ramp_to_end(step: int, total_steps: int) -> float:
+    total_steps = max(1, int(total_steps))
+    if total_steps <= 1:
+        return 1.0
+    step = min(max(int(step), 0), total_steps - 1)
+    return float(step) / float(total_steps - 1)
 
 
 class _BaseTrainer:
@@ -67,6 +83,9 @@ class _BaseTrainer:
         *,
         lr: float,
         total_steps: int,
+        lr_warmup_steps: int = 0,
+        lr_decay_start_step: Optional[int] = None,
+        lr_min_scale: float = 0.1,
         log_every_steps: int,
         save_every_steps: Optional[int],
         val_every_steps: Optional[int] = None,
@@ -98,6 +117,24 @@ class _BaseTrainer:
             raise RuntimeError("No trainable parameters found.")
         self.trainable_params = params
         self.optimizer = torch.optim.AdamW(params, lr=float(lr), weight_decay=0.05)
+        self.base_lrs = [float(group["lr"]) for group in self.optimizer.param_groups]
+        self.lr_warmup_steps = max(0, int(lr_warmup_steps))
+        self.lr_decay_start_step = None if lr_decay_start_step is None else max(0, int(lr_decay_start_step))
+        self.lr_min_scale = float(min(max(0.0, float(lr_min_scale)), 1.0))
+
+    def _lr_scale_for_step(self, step: int) -> float:
+        return _hold_then_linear_scale(
+            step=step,
+            total_steps=self.total_steps,
+            warmup_steps=self.lr_warmup_steps,
+            min_scale=self.lr_min_scale,
+            decay_start_step=self.lr_decay_start_step,
+        )
+
+    def _set_learning_rate_for_step(self, step: int) -> None:
+        lr_scale = self._lr_scale_for_step(step)
+        for group, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
+            group["lr"] = float(base_lr) * float(lr_scale)
 
     def _apply_grad_clip(self) -> Dict[str, float]:
         if self.grad_clip_norm is None:
@@ -217,8 +254,9 @@ class _BaseTrainer:
                         **val_metrics,
                     }
                     is_best = False
-                    if self.track_best_on_val and "loss" in val_metrics:
-                        current_val_loss = float(val_metrics["loss"])
+                    best_metric_key = "loss"
+                    if self.track_best_on_val and best_metric_key in val_metrics:
+                        current_val_loss = float(val_metrics[best_metric_key])
                         if self.best_val_loss is None or current_val_loss < self.best_val_loss:
                             self.best_val_loss = current_val_loss
                             is_best = True
@@ -230,6 +268,7 @@ class _BaseTrainer:
                                         {
                                             "step": int(self.global_step),
                                             "epoch": int(self.current_epoch),
+                                            "best_metric_key": best_metric_key,
                                             **{k: float(v) for k, v in val_metrics.items()},
                                         },
                                         ensure_ascii=False,
@@ -296,6 +335,138 @@ class _BaseTrainer:
         return None
 
 
+class FontPerceptorTrainer(_BaseTrainer):
+    def __init__(
+        self,
+        model: FontPerceptor,
+        device: torch.device,
+        *,
+        lr: float = 2e-4,
+        total_steps: int = 50_000,
+        style_supcon_lambda: float = 0.2,
+        style_temperature: float = 0.07,
+        qualify_min_char_acc: float = 0.70,
+        qualify_min_style_margin: float = 0.10,
+        log_every_steps: int = 100,
+        save_every_steps: Optional[int] = None,
+        val_every_steps: Optional[int] = None,
+        val_max_batches: Optional[int] = 16,
+        grad_clip_norm: Optional[float] = 1.0,
+    ) -> None:
+        super().__init__(
+            model,
+            device,
+            lr=lr,
+            total_steps=total_steps,
+            lr_warmup_steps=0,
+            lr_decay_start_step=None,
+            lr_min_scale=0.1,
+            log_every_steps=log_every_steps,
+            save_every_steps=save_every_steps,
+            val_every_steps=val_every_steps,
+            val_max_batches=val_max_batches,
+            grad_clip_norm=grad_clip_norm,
+            track_best_on_val=True,
+        )
+        self.style_supcon_lambda = float(style_supcon_lambda)
+        self.style_temperature = max(1e-6, float(style_temperature))
+        self.qualify_min_char_acc = float(qualify_min_char_acc)
+        self.qualify_min_style_margin = float(qualify_min_style_margin)
+
+    def _compute_losses(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor | float]:
+        images = batch["target"].to(self.device)
+        char_ids = batch["char_id"].to(self.device, dtype=torch.long)
+        font_ids = batch["font_id"].to(self.device, dtype=torch.long)
+        with self._autocast_context():
+            outputs = self.model(images)
+            char_logits = outputs["char_logits"]
+            style_embed = outputs["style_embed"]
+            loss_char_ce = F.cross_entropy(char_logits, char_ids)
+            loss_style_supcon = supervised_contrastive_loss(
+                style_embed,
+                font_ids,
+                temperature=self.style_temperature,
+            )
+            loss = loss_char_ce + self.style_supcon_lambda * loss_style_supcon
+
+        char_acc = (char_logits.argmax(dim=1) == char_ids).float().mean()
+        style_stats = style_similarity_stats(style_embed.float(), font_ids)
+        qualified_now = (
+            float(char_acc.detach().item()) >= self.qualify_min_char_acc
+            and float(style_stats["style_cos_margin"]) >= self.qualify_min_style_margin
+            and float(style_stats["style_pos_pairs"]) > 0.0
+            and float(style_stats["style_neg_pairs"]) > 0.0
+        )
+        metrics: Dict[str, torch.Tensor | float] = {
+            "loss": loss,
+            "loss_char_ce": loss_char_ce,
+            "loss_style_supcon": loss_style_supcon,
+            "char_acc": char_acc,
+            "style_temperature": float(self.style_temperature),
+            "qualified_now": float(qualified_now),
+            **style_stats,
+        }
+        return metrics
+
+    def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
+        self.model.train()
+        self._set_learning_rate_for_step(self.global_step + 1)
+        self.optimizer.zero_grad(set_to_none=True)
+        metrics = self._compute_losses(batch)
+        metrics["loss"].backward()
+        metrics.update(self._apply_grad_clip())
+        self.optimizer.step()
+        return _metrics_to_floats(metrics)
+
+    def eval_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
+        self.model.eval()
+        with torch.no_grad():
+            return _metrics_to_floats(self._compute_losses(batch))
+
+    def save(self, path: str | Path) -> None:
+        torch.save(
+            {
+                "stage": "font_perceptor",
+                "model_state": self.model.state_dict(),
+                "model_config": self.model.export_config(),
+                "optimizer_state": self.optimizer.state_dict(),
+                "trainer_config": {
+                    "style_supcon_lambda": float(self.style_supcon_lambda),
+                    "style_temperature": float(self.style_temperature),
+                    "qualify_min_char_acc": float(self.qualify_min_char_acc),
+                    "qualify_min_style_margin": float(self.qualify_min_style_margin),
+                    "grad_clip_norm": None if self.grad_clip_norm is None else float(self.grad_clip_norm),
+                },
+                "step": int(self.global_step),
+                "epoch": int(self.current_epoch),
+            },
+            Path(path),
+        )
+
+    def load(self, path: str | Path) -> None:
+        checkpoint = torch.load(path, map_location=self.device)
+        if "model_state" not in checkpoint:
+            raise RuntimeError("Font perceptor checkpoint is missing 'model_state'.")
+        self.model.load_state_dict(checkpoint["model_state"], strict=True)
+        if "optimizer_state" in checkpoint:
+            try:
+                self.optimizer.load_state_dict(checkpoint["optimizer_state"])
+            except ValueError as exc:
+                print(f"[font_perceptor] skipped optimizer state load: {exc}", flush=True)
+        trainer_config = checkpoint.get("trainer_config", {})
+        if isinstance(trainer_config, dict):
+            self.style_supcon_lambda = float(trainer_config.get("style_supcon_lambda", self.style_supcon_lambda))
+            self.style_temperature = max(1e-6, float(trainer_config.get("style_temperature", self.style_temperature)))
+            self.qualify_min_char_acc = float(
+                trainer_config.get("qualify_min_char_acc", self.qualify_min_char_acc)
+            )
+            self.qualify_min_style_margin = float(
+                trainer_config.get("qualify_min_style_margin", self.qualify_min_style_margin)
+            )
+        self.global_step = int(checkpoint.get("step", 0))
+        self.current_epoch = int(checkpoint.get("epoch", 0))
+
+
 class FlowTrainer(_BaseTrainer):
     def __init__(
         self,
@@ -304,27 +475,31 @@ class FlowTrainer(_BaseTrainer):
         *,
         lr: float = 1e-4,
         total_steps: int = 100_000,
+        lr_warmup_steps: int = 0,
+        lr_decay_start_step: Optional[int] = None,
+        lr_min_scale: float = 0.1,
         lambda_flow: float = 1.0,
-        style_lr_scale: float = 1.0,
-        style_lr_warmup_steps: int = 5000,
-        freeze_style: bool = False,
+        use_cnn_perceptor: bool = False,
         flow_sample_steps: int = 24,
         ema_decay: float = 0.9999,
-        lr_warmup_steps: int = 0,
-        lr_min_scale: float = 0.1,
+        perceptor_checkpoint: Optional[str | Path] = None,
+        perceptual_loss_lambda: float = 0.0,
+        style_loss_lambda: float = 0.0,
+        cnn_ramp_steps: int = 50_000,
         log_every_steps: int = 100,
         save_every_steps: Optional[int] = None,
         val_every_steps: Optional[int] = None,
         val_max_batches: Optional[int] = 16,
         grad_clip_norm: Optional[float] = 1.0,
     ) -> None:
-        if freeze_style:
-            model.freeze_style()
         super().__init__(
             model,
             device,
             lr=lr,
             total_steps=total_steps,
+            lr_warmup_steps=lr_warmup_steps,
+            lr_decay_start_step=lr_decay_start_step,
+            lr_min_scale=lr_min_scale,
             log_every_steps=log_every_steps,
             save_every_steps=save_every_steps,
             val_every_steps=val_every_steps,
@@ -333,43 +508,31 @@ class FlowTrainer(_BaseTrainer):
             track_best_on_val=True,
         )
         self.lambda_flow = float(lambda_flow)
-        self.base_lr = float(lr)
-        self.freeze_style = bool(freeze_style)
-        self.style_lr_scale = max(0.0, float(style_lr_scale))
-        self.style_lr_warmup_steps = max(0, int(style_lr_warmup_steps))
+        self.use_cnn_perceptor = bool(use_cnn_perceptor)
         self.flow_sample_steps = max(1, int(flow_sample_steps))
+        self.perceptual_loss_lambda = max(0.0, float(perceptual_loss_lambda))
+        self.style_loss_lambda = max(0.0, float(style_loss_lambda))
+        self.cnn_ramp_steps = max(1, int(cnn_ramp_steps))
+        self.perceptor_checkpoint = None if perceptor_checkpoint is None else str(perceptor_checkpoint)
+        self.perceptor_guidance: Optional[FrozenFontPerceptorGuidance] = None
+        self.perceptor_report: Optional[dict] = None
+        if (
+            self.use_cnn_perceptor
+            and self.perceptor_checkpoint is None
+            and (self.perceptual_loss_lambda > 0.0 or self.style_loss_lambda > 0.0)
+        ):
+            raise ValueError("perceptor_checkpoint is required when perceptual/style loss weights are > 0.")
+        if self.use_cnn_perceptor and self.perceptor_checkpoint is not None:
+            self.perceptor_guidance = FrozenFontPerceptorGuidance.from_checkpoint(
+                self.perceptor_checkpoint,
+                device=self.device,
+            )
+            self.perceptor_report = self.perceptor_guidance.qualification_report
         self.ema_model: Optional[nn.Module] = None
         self.ema_enabled = False
         self._set_ema_decay(float(ema_decay))
-        self.lr_warmup_steps = max(0, int(lr_warmup_steps))
-        self.lr_min_scale = float(min(max(0.0, float(lr_min_scale)), 1.0))
-        self.style_finetune_active = not self.freeze_style
-        self.style_grad_enabled = not self.freeze_style
-        style_params = []
-        other_params = []
-        group_is_style = []
-        for name, param in self.model.named_parameters():
-            if not param.requires_grad:
-                continue
-            if self.model._is_style_state_key(name):
-                style_params.append(param)
-            else:
-                other_params.append(param)
-        param_groups = []
-        if other_params:
-            param_groups.append({"params": other_params, "lr": float(lr)})
-            group_is_style.append(False)
-        if style_params:
-            param_groups.append({"params": style_params, "lr": self.base_lr * self.style_lr_scale})
-            group_is_style.append(True)
-        if not param_groups:
-            raise RuntimeError("No trainable parameters found for flow training.")
-        self.optimizer = torch.optim.AdamW(param_groups, lr=self.base_lr, weight_decay=0.05)
-        self.group_base_lrs = [float(group["lr"]) for group in self.optimizer.param_groups]
-        self.group_is_style = group_is_style
         self._ensure_ema_model()
         self._sync_ema_from_model()
-        self._set_learning_rate_for_step(0)
 
     def _set_ema_decay(self, ema_decay: float) -> None:
         ema_decay = float(ema_decay)
@@ -414,45 +577,15 @@ class FlowTrainer(_BaseTrainer):
             return self.ema_model
         return self.model
 
-    def _lr_scale_for_step(self, step: int) -> float:
-        return _hold_then_cosine_lr_scale(
-            step=step,
-            total_steps=self.total_steps,
-            warmup_steps=self.lr_warmup_steps,
-            min_scale=self.lr_min_scale,
-            decay_fraction=0.2,
-        )
-
-    def _set_learning_rate_for_step(self, step: int) -> None:
-        lr_scale = self._lr_scale_for_step(step)
-        style_lr_scale = self._style_lr_scale_for_step(step)
-        for group, base_lr, is_style in zip(self.optimizer.param_groups, self.group_base_lrs, self.group_is_style):
-            group_lr = float(base_lr) * lr_scale
-            if is_style:
-                group_lr *= style_lr_scale
-            group["lr"] = group_lr
-
-    def _style_lr_scale_for_step(self, step: int) -> float:
-        if self.freeze_style:
-            return 0.0
-        if self.style_lr_warmup_steps <= 0:
-            return 1.0
-        step = max(0, int(step))
-        return min(float(step) / float(self.style_lr_warmup_steps), 1.0)
-
     def _encode_style_conditions(
         self,
         model: nn.Module,
         style: torch.Tensor,
         style_ref_mask: Optional[torch.Tensor],
-        *,
-        detach_style_encoder: bool,
-    ) -> dict[str, Optional[torch.Tensor]]:
+    ) -> torch.Tensor:
         return model.encode_style(
             style_img=style,
             style_ref_mask=style_ref_mask,
-            return_contrastive=False,
-            detach_style_encoder=bool(detach_style_encoder),
         )
 
     def _compute_losses(
@@ -460,11 +593,11 @@ class FlowTrainer(_BaseTrainer):
         batch: Dict[str, torch.Tensor],
         *,
         model: Optional[nn.Module] = None,
-        detach_style_encoder: Optional[bool] = None,
+        step: Optional[int] = None,
     ) -> Dict[str, torch.Tensor | float]:
         model = self.model if model is None else model
-        if detach_style_encoder is None:
-            detach_style_encoder = (not self.style_grad_enabled)
+        if step is None:
+            step = int(self.global_step)
         target = batch["target"].to(self.device)
         content = batch["content"].to(self.device)
         style = batch["style_img"].to(self.device)
@@ -481,44 +614,63 @@ class FlowTrainer(_BaseTrainer):
             target_flow = x1 - x0
             content_features = model.encode_content_features(content)
             content_tokens = model.content_proj(content_features)
-            style_pack = self._encode_style_conditions(
+            style_global = self._encode_style_conditions(
                 model,
                 style,
                 style_ref_mask,
-                detach_style_encoder=bool(detach_style_encoder),
             )
             pred_flow = model.predict_flow(
                 xt,
                 timesteps,
                 content_tokens=content_tokens,
-                style_tokens=style_pack["style_tokens"],
-                style_global=style_pack["style_global"],
-                style_token_mask=style_pack["style_token_mask"],
+                style_global=style_global,
             )
             loss_flow_per_sample = (pred_flow.float() - target_flow.float()).pow(2).reshape(target.size(0), -1).mean(dim=1)
             loss_flow = loss_flow_per_sample.mean()
             pred_target = xt + (1.0 - t_view) * pred_flow
             pred_target_l1 = _per_sample_mean((pred_target.float() - target.float()).abs()).mean()
-            loss = self.lambda_flow * loss_flow
+        aux_ramp = _linear_ramp_to_end(step, self.cnn_ramp_steps)
+        aux_scale = aux_ramp
+        perceptual_weight = self.perceptual_loss_lambda * aux_scale
+        style_weight = self.style_loss_lambda * aux_scale
+        loss_perceptual = target.new_tensor(0.0)
+        loss_style_embed = target.new_tensor(0.0)
+        flow_term = self.lambda_flow * loss_flow
+        perceptual_term = target.new_tensor(0.0)
+        style_term = target.new_tensor(0.0)
+        if self.use_cnn_perceptor and self.perceptor_guidance is not None and (perceptual_weight > 0.0 or style_weight > 0.0):
+            guidance_losses = self.perceptor_guidance(pred_target, target)
+            loss_perceptual = guidance_losses["loss_perceptual"]
+            loss_style_embed = guidance_losses["loss_style_embed"]
+            perceptual_term = perceptual_weight * loss_perceptual
+            style_term = style_weight * loss_style_embed
+        loss = flow_term + perceptual_term + style_term
         metrics = {
             "loss": loss,
             "loss_flow": loss_flow,
             "pred_target_l1": pred_target_l1,
+            "loss_perceptual": loss_perceptual,
+            "loss_style_embed": loss_style_embed,
+            "loss_flow_term": flow_term,
+            "loss_perceptual_term": perceptual_term,
+            "loss_style_term": style_term,
+            "perceptual_loss_weight": float(perceptual_weight),
+            "style_loss_weight": float(style_weight),
+            "perceptor_ramp": float(aux_ramp),
+            "perceptor_weight_scale": float(aux_scale),
             "t_mean": timesteps.mean(),
-            "style_finetune_active": float(self.style_finetune_active),
-            "style_lr_mult": float(self._style_lr_scale_for_step(self.global_step)),
         }
         return metrics
 
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
         self.model.train()
+        self._set_learning_rate_for_step(self.global_step + 1)
         self.optimizer.zero_grad(set_to_none=True)
-        metrics = self._compute_losses(batch)
+        metrics = self._compute_losses(batch, step=self.global_step + 1)
         metrics["loss"].backward()
         metrics.update(self._apply_grad_clip())
         self.optimizer.step()
         self._update_ema()
-        self._set_learning_rate_for_step(self.global_step + 1)
         return _metrics_to_floats(metrics)
 
     def eval_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
@@ -530,7 +682,7 @@ class FlowTrainer(_BaseTrainer):
                 self._compute_losses(
                     batch,
                     model=self._inference_model(),
-                    detach_style_encoder=True,
+                    step=self.global_step,
                 )
             )
 
@@ -564,11 +716,9 @@ class FlowTrainer(_BaseTrainer):
         with self._autocast_context():
             content_features = sample_model.encode_content_features(content)
             content_tokens = sample_model.content_proj(content_features)
-            style_pack = sample_model.encode_style(
+            style_global = sample_model.encode_style(
                 style_img=style_img,
                 style_ref_mask=style_ref_mask,
-                return_contrastive=False,
-                detach_style_encoder=True,
             )
             for step_idx in range(step_count):
                 t = torch.full(
@@ -581,9 +731,7 @@ class FlowTrainer(_BaseTrainer):
                     sample,
                     t,
                     content_tokens=content_tokens,
-                    style_tokens=style_pack["style_tokens"],
-                    style_global=style_pack["style_global"],
-                    style_token_mask=style_pack["style_token_mask"],
+                    style_global=style_global,
                 )
                 sample = sample + dt * pred_flow
 
@@ -598,10 +746,17 @@ class FlowTrainer(_BaseTrainer):
                 "model_config": self.model.export_config(),
                 "optimizer_state": self.optimizer.state_dict(),
                 "trainer_config": {
+                    "base_lrs": [float(lr) for lr in self.base_lrs],
+                    "lr_warmup_steps": int(self.lr_warmup_steps),
+                    "lr_decay_start_step": None if self.lr_decay_start_step is None else int(self.lr_decay_start_step),
+                    "lr_min_scale": float(self.lr_min_scale),
                     "flow_sample_steps": int(self.flow_sample_steps),
                     "ema_decay": float(self.ema_decay),
-                    "lr_warmup_steps": int(self.lr_warmup_steps),
-                    "lr_min_scale": float(self.lr_min_scale),
+                    "use_cnn_perceptor": int(self.use_cnn_perceptor),
+                    "perceptor_checkpoint": self.perceptor_checkpoint,
+                    "perceptual_loss_lambda": float(self.perceptual_loss_lambda),
+                    "style_loss_lambda": float(self.style_loss_lambda),
+                    "cnn_ramp_steps": int(self.cnn_ramp_steps),
                     "grad_clip_norm": None if self.grad_clip_norm is None else float(self.grad_clip_norm),
                 },
                 "step": int(self.global_step),
@@ -623,14 +778,45 @@ class FlowTrainer(_BaseTrainer):
                 print(f"[flow] skipped optimizer state load: {exc}", flush=True)
         trainer_config = checkpoint.get("trainer_config", {})
         if isinstance(trainer_config, dict):
+            if "base_lrs" in trainer_config and isinstance(trainer_config["base_lrs"], list):
+                restored_base_lrs = [float(value) for value in trainer_config["base_lrs"]]
+                if len(restored_base_lrs) == len(self.optimizer.param_groups):
+                    self.base_lrs = restored_base_lrs
+            if "lr_warmup_steps" in trainer_config:
+                self.lr_warmup_steps = max(0, int(trainer_config["lr_warmup_steps"]))
+            if "lr_decay_start_step" in trainer_config:
+                lr_decay_start_step = trainer_config["lr_decay_start_step"]
+                self.lr_decay_start_step = None if lr_decay_start_step is None else max(0, int(lr_decay_start_step))
+            if "lr_min_scale" in trainer_config:
+                self.lr_min_scale = float(min(max(0.0, float(trainer_config["lr_min_scale"])), 1.0))
             if "flow_sample_steps" in trainer_config:
                 self.flow_sample_steps = max(1, int(trainer_config["flow_sample_steps"]))
             if "ema_decay" in trainer_config:
                 ema_decay = float(trainer_config["ema_decay"])
                 if 0.0 <= ema_decay < 1.0:
                     self._set_ema_decay(ema_decay)
+            if "perceptual_loss_lambda" in trainer_config:
+                self.perceptual_loss_lambda = max(0.0, float(trainer_config["perceptual_loss_lambda"]))
+            if "style_loss_lambda" in trainer_config:
+                self.style_loss_lambda = max(0.0, float(trainer_config["style_loss_lambda"]))
+            if "cnn_ramp_steps" in trainer_config:
+                self.cnn_ramp_steps = max(1, int(trainer_config["cnn_ramp_steps"]))
+            if self.use_cnn_perceptor and self.perceptor_checkpoint is None and trainer_config.get("perceptor_checkpoint"):
+                self.perceptor_checkpoint = str(trainer_config["perceptor_checkpoint"])
         else:
             self._set_ema_decay(self.ema_decay)
+        if not self.use_cnn_perceptor:
+            self.perceptual_loss_lambda = 0.0
+            self.style_loss_lambda = 0.0
+            self.perceptor_checkpoint = None
+            self.perceptor_guidance = None
+            self.perceptor_report = None
+        if self.use_cnn_perceptor and self.perceptor_guidance is None and self.perceptor_checkpoint is not None:
+            self.perceptor_guidance = FrozenFontPerceptorGuidance.from_checkpoint(
+                self.perceptor_checkpoint,
+                device=self.device,
+            )
+            self.perceptor_report = self.perceptor_guidance.qualification_report
         self._ensure_ema_model()
         ema_state = checkpoint.get("ema_model_state")
         if self.ema_enabled and isinstance(ema_state, dict) and self.ema_model is not None:

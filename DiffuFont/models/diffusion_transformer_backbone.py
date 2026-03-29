@@ -71,35 +71,30 @@ class GlyphDiTBlock(nn.Module):
         num_heads: int,
         mlp_ratio: float,
         *,
-        use_content_cross_attn: bool = True,
-        use_style_cross_attn: bool = True,
+        use_content_fusion: bool = True,
+        use_style_modulation: bool = True,
     ) -> None:
         super().__init__()
-        self.use_content_cross_attn = bool(use_content_cross_attn)
-        self.use_style_cross_attn = bool(use_style_cross_attn)
+        self.use_content_fusion = bool(use_content_fusion)
+        self.use_style_modulation = bool(use_style_modulation)
+        self.norm_content_x = (
+            nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
+            if self.use_content_fusion
+            else None
+        )
+        self.norm_content_cond = (
+            nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
+            if self.use_content_fusion
+            else None
+        )
         self.norm_self = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
-        self.norm_content = (
-            nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
-            if self.use_content_cross_attn
-            else None
-        )
-        self.norm_style = (
-            nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
-            if self.use_style_cross_attn
-            else None
-        )
         self.norm_mlp = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
 
+        self.content_fuse = nn.Linear(hidden_dim * 2, hidden_dim) if self.use_content_fusion else None
         self.self_attn = SDPAAttention(hidden_dim, num_heads)
-        self.content_attn = SDPAAttention(hidden_dim, num_heads) if self.use_content_cross_attn else None
-        self.style_attn = SDPAAttention(hidden_dim, num_heads) if self.use_style_cross_attn else None
         self.mlp = FeedForward(hidden_dim, mlp_ratio)
 
         self.modulation_chunk_count = 6
-        if self.use_content_cross_attn:
-            self.modulation_chunk_count += 2
-        if self.use_style_cross_attn:
-            self.modulation_chunk_count += 2
 
         self.modulation = nn.Sequential(
             nn.SiLU(),
@@ -114,60 +109,33 @@ class GlyphDiTBlock(nn.Module):
         *,
         cond: torch.Tensor,
         content_tokens: torch.Tensor | None,
-        style_tokens: torch.Tensor | None,
-        style_token_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         modulation_chunks = self.modulation(cond).chunk(self.modulation_chunk_count, dim=-1)
-        chunk_idx = 0
-
-        shift_self = modulation_chunks[chunk_idx]
-        scale_self = modulation_chunks[chunk_idx + 1]
-        gate_self = modulation_chunks[chunk_idx + 2]
-        chunk_idx += 3
-
-        shift_content = scale_content = None
-        if self.use_content_cross_attn:
-            shift_content = modulation_chunks[chunk_idx]
-            scale_content = modulation_chunks[chunk_idx + 1]
-            chunk_idx += 2
-
-        shift_style = scale_style = None
-        if self.use_style_cross_attn:
-            shift_style = modulation_chunks[chunk_idx]
-            scale_style = modulation_chunks[chunk_idx + 1]
-            chunk_idx += 2
-
-        shift_mlp = modulation_chunks[chunk_idx]
-        scale_mlp = modulation_chunks[chunk_idx + 1]
-        gate_mlp = modulation_chunks[chunk_idx + 2]
+        shift_self, scale_self, gate_self, shift_mlp, scale_mlp, gate_mlp = modulation_chunks
 
         x = patch_tokens
+        if self.use_content_fusion:
+            if (
+                content_tokens is None
+                or self.norm_content_x is None
+                or self.norm_content_cond is None
+                or self.content_fuse is None
+            ):
+                raise RuntimeError("content_tokens must be provided when content fusion is enabled")
+            if content_tokens.shape[:2] != x.shape[:2]:
+                raise RuntimeError(
+                    "content token shape mismatch: "
+                    f"expected {tuple(x.shape[:2])}, got {tuple(content_tokens.shape[:2])}"
+                )
+            fused = torch.cat(
+                [self.norm_content_x(x), self.norm_content_cond(content_tokens)],
+                dim=-1,
+            )
+            x = x + self.content_fuse(fused)
+
         q = modulate(self.norm_self(x), shift_self, scale_self)
         self_out, _ = self.self_attn(q, q, q, need_weights=False)
         x = x + gate_self.unsqueeze(1) * self_out
-
-        if self.use_content_cross_attn:
-            if content_tokens is None or self.norm_content is None or self.content_attn is None:
-                raise RuntimeError("content_tokens must be provided when content cross-attention is enabled")
-            q = modulate(self.norm_content(x), shift_content, scale_content)
-            content_out, _ = self.content_attn(q, content_tokens, content_tokens, need_weights=False)
-            x = x + content_out
-
-        if self.use_style_cross_attn:
-            if style_tokens is None or self.norm_style is None or self.style_attn is None:
-                raise RuntimeError("style_tokens must be provided when style cross-attention is enabled")
-            q = modulate(self.norm_style(x), shift_style, scale_style)
-            key_padding_mask = None
-            if style_token_mask is not None:
-                key_padding_mask = ~style_token_mask.bool()
-            style_out, _ = self.style_attn(
-                q,
-                style_tokens,
-                style_tokens,
-                key_padding_mask=key_padding_mask,
-                need_weights=False,
-            )
-            x = x + style_out
 
         mlp_out = self.mlp(modulate(self.norm_mlp(x), shift_mlp, scale_mlp))
         x = x + gate_mlp.unsqueeze(1) * mlp_out
@@ -189,8 +157,6 @@ class DiffusionTransformerBackbone(nn.Module):
         content_fusion_end: int | None = None,
         style_fusion_start: int | None = None,
         style_fusion_end: int | None = None,
-        content_cross_attn_layers: int | None = None,
-        style_cross_attn_every_n_layers: int | None = None,
     ) -> None:
         super().__init__()
         if image_size % patch_size != 0:
@@ -204,12 +170,8 @@ class DiffusionTransformerBackbone(nn.Module):
         self.grid_size = self.image_size // self.patch_size
         self.num_tokens = self.grid_size * self.grid_size
         if content_fusion_start is None and content_fusion_end is None:
-            if content_cross_attn_layers is None:
-                self.content_fusion_start = 0
-                self.content_fusion_end = min(self.depth, 8)
-            else:
-                self.content_fusion_start = 0
-                self.content_fusion_end = max(0, min(self.depth, int(content_cross_attn_layers)))
+            self.content_fusion_start = 0
+            self.content_fusion_end = min(self.depth, 6)
         else:
             self.content_fusion_start = max(
                 0,
@@ -219,18 +181,11 @@ class DiffusionTransformerBackbone(nn.Module):
                 self.content_fusion_start,
                 min(self.depth, self.depth if content_fusion_end is None else int(content_fusion_end)),
             )
-        self.content_cross_attn_layers = self.content_fusion_end - self.content_fusion_start
+        self.content_fusion_layers = self.content_fusion_end - self.content_fusion_start
 
-        self.style_cross_attn_every_n_layers = (
-            None if style_cross_attn_every_n_layers is None else max(1, int(style_cross_attn_every_n_layers))
-        )
         if style_fusion_start is None and style_fusion_end is None:
-            if self.style_cross_attn_every_n_layers is None:
-                self.style_fusion_start = max(0, self.depth - 6)
-                self.style_fusion_end = self.depth
-            else:
-                self.style_fusion_start = 0
-                self.style_fusion_end = self.depth
+            self.style_fusion_start = max(0, self.depth - 6)
+            self.style_fusion_end = self.depth
         else:
             self.style_fusion_start = max(
                 0,
@@ -245,18 +200,12 @@ class DiffusionTransformerBackbone(nn.Module):
             self.content_fusion_start <= block_idx < self.content_fusion_end
             for block_idx in range(self.depth)
         ]
-        if self.style_cross_attn_every_n_layers is None:
-            self.style_layer_mask = [
-                self.style_fusion_start <= block_idx < self.style_fusion_end
-                for block_idx in range(self.depth)
-            ]
-        else:
-            self.style_layer_mask = [
-                block_idx % self.style_cross_attn_every_n_layers == 0
-                for block_idx in range(self.depth)
-            ]
-        self.has_content_cross_attn = any(self.content_layer_mask)
-        self.has_style_cross_attn = any(self.style_layer_mask)
+        self.style_layer_mask = [
+            self.style_fusion_start <= block_idx < self.style_fusion_end
+            for block_idx in range(self.depth)
+        ]
+        self.has_content_fusion = any(self.content_layer_mask)
+        self.has_style_modulation = any(self.style_layer_mask)
 
         self.patch_embed = nn.Conv2d(
             self.in_channels,
@@ -280,8 +229,8 @@ class DiffusionTransformerBackbone(nn.Module):
                     self.hidden_dim,
                     self.num_heads,
                     mlp_ratio,
-                    use_content_cross_attn=self.content_layer_mask[block_idx],
-                    use_style_cross_attn=self.style_layer_mask[block_idx],
+                    use_content_fusion=self.content_layer_mask[block_idx],
+                    use_style_modulation=self.style_layer_mask[block_idx],
                 )
             )
         self.final_norm = nn.LayerNorm(self.hidden_dim, eps=1e-6)
@@ -292,9 +241,7 @@ class DiffusionTransformerBackbone(nn.Module):
         timesteps: torch.Tensor,
         *,
         content_tokens: torch.Tensor,
-        style_tokens: torch.Tensor,
         style_global: torch.Tensor,
-        style_token_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if image.dim() != 4:
             raise ValueError(f"image must be 4D, got {tuple(image.shape)}")
@@ -313,21 +260,16 @@ class DiffusionTransformerBackbone(nn.Module):
         time_cond = self.time_mlp(time_cond)
         style_cond = self.style_cond_proj(style_global.to(device=x.device, dtype=x.dtype))
 
-        content_tokens = content_tokens.to(device=x.device, dtype=x.dtype) if self.has_content_cross_attn else None
-        style_tokens = style_tokens.to(device=x.device, dtype=x.dtype) if self.has_style_cross_attn else None
-        if self.has_style_cross_attn and style_token_mask is not None:
-            style_token_mask = style_token_mask.to(device=x.device, dtype=torch.bool)
+        content_tokens = content_tokens.to(device=x.device, dtype=x.dtype) if self.has_content_fusion else None
 
         for block in self.blocks:
             block_cond = time_cond
-            if block.use_style_cross_attn:
+            if block.use_style_modulation:
                 block_cond = block_cond + style_cond
             x = block(
                 x,
                 cond=block_cond,
-                content_tokens=content_tokens if block.use_content_cross_attn else None,
-                style_tokens=style_tokens if block.use_style_cross_attn else None,
-                style_token_mask=style_token_mask if block.use_style_cross_attn else None,
+                content_tokens=content_tokens if block.use_content_fusion else None,
             )
 
         return self.final_norm(x)

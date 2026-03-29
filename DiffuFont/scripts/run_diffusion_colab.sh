@@ -11,15 +11,15 @@ LOG_FILE=""
 PID_FILE=""
 SAVE_DIR="checkpoints/flow_$(date '+%Y%m%d_%H%M%S')"
 
-RESUME_CKPT=""
-DEVICE_ARG="cuda:1"
+RESUME_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/flow_20260328_223942/ckpt_step_70000.pt"
+DEVICE_ARG="auto"
 SEED=42
 FONT_SPLIT="train"
 FONT_SPLIT_SEED=""
 FONT_TRAIN_RATIO="0.95"
 
-EPOCHS=1000000
-TARGET_STEPS=100000
+EPOCHS=10000000
+TARGET_STEPS=150000
 SAVE_EVERY=5000
 SAMPLE_EVERY=300
 LOG_EVERY=100
@@ -27,6 +27,7 @@ VAL_EVERY=100
 VAL_MAX_BATCHES=16
 LR="1e-4"
 LR_WARMUP_STEPS=2000
+LR_DECAY_START_STEP="70000"
 LR_MIN_SCALE="0.1"
 GRAD_CLIP_NORM="1.0"
 
@@ -39,29 +40,27 @@ MAX_FONTS=0
 IMAGE_SIZE=128
 
 PATCH_SIZE=16
-ENCODER_PATCH_SIZE=8
 ENCODER_HIDDEN_DIM=512
-ENCODER_DEPTH=4
-ENCODER_HEADS=8
 DIT_HIDDEN_DIM=512
 DIT_DEPTH=12
 DIT_HEADS=8
 DIT_MLP_RATIO="4.0"
 CONTENT_FUSION_START=0
-CONTENT_FUSION_END=8
+CONTENT_FUSION_END=6
 STYLE_FUSION_START=6
 STYLE_FUSION_END=12
-CONTRASTIVE_PROJ_DIM=128
 DETAILER_BASE_CHANNELS=32
 DETAILER_MAX_CHANNELS=256
-FREEZE_STYLE="0"
 
 FLOW_LAMBDA="1.0"
+USE_CNN_PERCEPTOR="1"
+PERCEPTOR_CHECKPOINT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/font_perceptor_20260328_123942/best.pt"
+PERCEPTUAL_LOSS_LAMBDA="0.1"
+STYLE_LOSS_LAMBDA="0.03"
+CNN_RAMP_STEPS="30000"
 FLOW_SAMPLE_STEPS=24
 EMA_DECAY="0"
-STYLE_LR_SCALE="1.0"
-STYLE_LR_WARMUP_STEPS=10000
-TRAIN_SAMPLING="cartesian_font_char"
+TRAIN_SAMPLING="shuffle"
 CARTESIAN_FONTS_PER_BATCH=16
 CARTESIAN_CHARS_PER_BATCH=8
 
@@ -89,11 +88,16 @@ while [[ $# -gt 0 ]]; do
     --val-max-batches) VAL_MAX_BATCHES="${2:?}"; shift 2 ;;
     --lr) LR="${2:?}"; shift 2 ;;
     --lr-warmup-steps) LR_WARMUP_STEPS="${2:?}"; shift 2 ;;
+    --lr-decay-start-step) LR_DECAY_START_STEP="${2:?}"; shift 2 ;;
     --lr-min-scale) LR_MIN_SCALE="${2:?}"; shift 2 ;;
     --grad-clip-norm) GRAD_CLIP_NORM="${2:?}"; shift 2 ;;
-    --style-lr-scale) STYLE_LR_SCALE="${2:?}"; shift 2 ;;
-    --style-lr-warmup-steps) STYLE_LR_WARMUP_STEPS="${2:?}"; shift 2 ;;
     --flow-lambda) FLOW_LAMBDA="${2:?}"; shift 2 ;;
+    --use-cnn-perceptor) USE_CNN_PERCEPTOR="1"; shift ;;
+    --no-use-cnn-perceptor) USE_CNN_PERCEPTOR="0"; shift ;;
+    --perceptor-checkpoint) PERCEPTOR_CHECKPOINT="${2:?}"; shift 2 ;;
+    --perceptual-loss-lambda) PERCEPTUAL_LOSS_LAMBDA="${2:?}"; shift 2 ;;
+    --style-loss-lambda) STYLE_LOSS_LAMBDA="${2:?}"; shift 2 ;;
+    --cnn-ramp-steps) CNN_RAMP_STEPS="${2:?}"; shift 2 ;;
     --flow-sample-steps) FLOW_SAMPLE_STEPS="${2:?}"; shift 2 ;;
     --ema-decay) EMA_DECAY="${2:?}"; shift 2 ;;
     --style-ref-count) STYLE_REF_COUNT="${2:?}"; shift 2 ;;
@@ -104,10 +108,7 @@ while [[ $# -gt 0 ]]; do
     --max-fonts) MAX_FONTS="${2:?}"; shift 2 ;;
     --image-size) IMAGE_SIZE="${2:?}"; shift 2 ;;
     --patch-size) PATCH_SIZE="${2:?}"; shift 2 ;;
-    --encoder-patch-size) ENCODER_PATCH_SIZE="${2:?}"; shift 2 ;;
     --encoder-hidden-dim) ENCODER_HIDDEN_DIM="${2:?}"; shift 2 ;;
-    --encoder-depth) ENCODER_DEPTH="${2:?}"; shift 2 ;;
-    --encoder-heads) ENCODER_HEADS="${2:?}"; shift 2 ;;
     --dit-hidden-dim) DIT_HIDDEN_DIM="${2:?}"; shift 2 ;;
     --dit-depth) DIT_DEPTH="${2:?}"; shift 2 ;;
     --dit-heads) DIT_HEADS="${2:?}"; shift 2 ;;
@@ -116,22 +117,22 @@ while [[ $# -gt 0 ]]; do
     --content-fusion-end) CONTENT_FUSION_END="${2:?}"; shift 2 ;;
     --style-fusion-start) STYLE_FUSION_START="${2:?}"; shift 2 ;;
     --style-fusion-end) STYLE_FUSION_END="${2:?}"; shift 2 ;;
-    --contrastive-proj-dim) CONTRASTIVE_PROJ_DIM="${2:?}"; shift 2 ;;
     --detailer-base-channels) DETAILER_BASE_CHANNELS="${2:?}"; shift 2 ;;
     --detailer-max-channels) DETAILER_MAX_CHANNELS="${2:?}"; shift 2 ;;
-    --freeze-style) FREEZE_STYLE="1"; shift ;;
-    --no-freeze-style) FREEZE_STYLE="0"; shift ;;
     --train-sampling) TRAIN_SAMPLING="${2:?}"; shift 2 ;;
     --cartesian-fonts-per-batch) CARTESIAN_FONTS_PER_BATCH="${2:?}"; shift 2 ;;
     --cartesian-chars-per-batch) CARTESIAN_CHARS_PER_BATCH="${2:?}"; shift 2 ;;
-    --stage|--vae-checkpoint|--train-vae-jointly|--latent-channels|--latent-size|--vae-bottleneck-channels|--vae-encoder-16x16-blocks|--vae-decoder-16x16-blocks|--vae-decoder-tail-blocks|--style-checkpoint|--train-style-jointly|--flow-difficulty-warmup-steps|--flow-difficulty-ema-decay|--flow-difficulty-alpha|--flow-difficulty-min-weight|--flow-difficulty-max-weight|--flow-difficulty-refresh-every-steps)
-      echo "[run_diffusion_colab] removed option for pixel-space DiP: $1" >&2
-      exit 2
-      ;;
     --) shift; EXTRA_TRAIN_ARGS+=("$@"); break ;;
     *) EXTRA_TRAIN_ARGS+=("$1"); shift ;;
   esac
 done
+
+if [[ -z "${FONT_SPLIT_SEED}" ]]; then
+  FONT_SPLIT_SEED="${SEED}"
+fi
+if [[ "${LR_DECAY_START_STEP}" == "-1" ]]; then
+  LR_DECAY_START_STEP="$(( TARGET_STEPS * 8 / 10 ))"
+fi
 
 cd "${ROOT}"
 mkdir -p logs checkpoints
@@ -145,7 +146,10 @@ if [[ -n "${RESUME_CKPT}" && ! -f "${RESUME_CKPT}" ]]; then
   echo "[run_diffusion_colab] missing resume checkpoint: ${RESUME_CKPT}" >&2
   exit 2
 fi
-
+if [[ "${USE_CNN_PERCEPTOR}" == "1" && -n "${PERCEPTOR_CHECKPOINT}" && ! -f "${PERCEPTOR_CHECKPOINT}" ]]; then
+  echo "[run_diffusion_colab] missing perceptor checkpoint: ${PERCEPTOR_CHECKPOINT}" >&2
+  exit 2
+fi
 if [[ "${RUN_MODE}" == "daemon" ]]; then
   daemon_args=(
     --foreground
@@ -155,6 +159,7 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --device "${DEVICE_ARG}"
     --seed "${SEED}"
     --font-split "${FONT_SPLIT}"
+    --font-split-seed "${FONT_SPLIT_SEED}"
     --font-train-ratio "${FONT_TRAIN_RATIO}"
     --epochs "${EPOCHS}"
     --target-steps "${TARGET_STEPS}"
@@ -165,13 +170,15 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --val-max-batches "${VAL_MAX_BATCHES}"
     --lr "${LR}"
     --lr-warmup-steps "${LR_WARMUP_STEPS}"
+    --lr-decay-start-step "${LR_DECAY_START_STEP}"
     --lr-min-scale "${LR_MIN_SCALE}"
     --grad-clip-norm "${GRAD_CLIP_NORM}"
     --flow-lambda "${FLOW_LAMBDA}"
+    --perceptual-loss-lambda "${PERCEPTUAL_LOSS_LAMBDA}"
+    --style-loss-lambda "${STYLE_LOSS_LAMBDA}"
+    --cnn-ramp-steps "${CNN_RAMP_STEPS}"
     --flow-sample-steps "${FLOW_SAMPLE_STEPS}"
     --ema-decay "${EMA_DECAY}"
-    --style-lr-scale "${STYLE_LR_SCALE}"
-    --style-lr-warmup-steps "${STYLE_LR_WARMUP_STEPS}"
     --style-ref-count "${STYLE_REF_COUNT}"
     --style-ref-count-min "${STYLE_REF_COUNT_MIN}"
     --style-ref-count-max "${STYLE_REF_COUNT_MAX}"
@@ -180,10 +187,7 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --max-fonts "${MAX_FONTS}"
     --image-size "${IMAGE_SIZE}"
     --patch-size "${PATCH_SIZE}"
-    --encoder-patch-size "${ENCODER_PATCH_SIZE}"
     --encoder-hidden-dim "${ENCODER_HIDDEN_DIM}"
-    --encoder-depth "${ENCODER_DEPTH}"
-    --encoder-heads "${ENCODER_HEADS}"
     --dit-hidden-dim "${DIT_HIDDEN_DIM}"
     --dit-depth "${DIT_DEPTH}"
     --dit-heads "${DIT_HEADS}"
@@ -192,21 +196,22 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --content-fusion-end "${CONTENT_FUSION_END}"
     --style-fusion-start "${STYLE_FUSION_START}"
     --style-fusion-end "${STYLE_FUSION_END}"
-    --contrastive-proj-dim "${CONTRASTIVE_PROJ_DIM}"
     --detailer-base-channels "${DETAILER_BASE_CHANNELS}"
     --detailer-max-channels "${DETAILER_MAX_CHANNELS}"
     --train-sampling "${TRAIN_SAMPLING}"
     --cartesian-fonts-per-batch "${CARTESIAN_FONTS_PER_BATCH}"
     --cartesian-chars-per-batch "${CARTESIAN_CHARS_PER_BATCH}"
   )
-  if [[ -n "${FONT_SPLIT_SEED}" ]]; then
-    daemon_args+=(--font-split-seed "${FONT_SPLIT_SEED}")
-  fi
   if [[ -n "${RESUME_CKPT}" ]]; then
     daemon_args+=(--resume "${RESUME_CKPT}")
   fi
-  if [[ "${FREEZE_STYLE}" == "1" ]]; then
-    daemon_args+=(--freeze-style)
+  if [[ "${USE_CNN_PERCEPTOR}" == "1" ]]; then
+    daemon_args+=(--use-cnn-perceptor)
+  else
+    daemon_args+=(--no-use-cnn-perceptor)
+  fi
+  if [[ "${USE_CNN_PERCEPTOR}" == "1" && -n "${PERCEPTOR_CHECKPOINT}" ]]; then
+    daemon_args+=(--perceptor-checkpoint "${PERCEPTOR_CHECKPOINT}")
   fi
   if [[ "${#EXTRA_TRAIN_ARGS[@]}" -gt 0 ]]; then
     daemon_args+=(-- "${EXTRA_TRAIN_ARGS[@]}")
@@ -369,9 +374,11 @@ cmd_common=(
   --save-dir "${SAVE_DIR}"
   --seed "${SEED}"
   --font-split "${FONT_SPLIT}"
+  --font-split-seed "${FONT_SPLIT_SEED}"
   --font-train-ratio "${FONT_TRAIN_RATIO}"
   --lr "${LR}"
   --lr-warmup-steps "${LR_WARMUP_STEPS}"
+  --lr-decay-start-step "${LR_DECAY_START_STEP}"
   --lr-min-scale "${LR_MIN_SCALE}"
   --grad-clip-norm "${GRAD_CLIP_NORM}"
   --batch "${BATCH_SIZE}"
@@ -382,10 +389,7 @@ cmd_common=(
   --max-fonts "${MAX_FONTS}"
   --image-size "${IMAGE_SIZE}"
   --patch-size "${PATCH_SIZE}"
-  --encoder-patch-size "${ENCODER_PATCH_SIZE}"
   --encoder-hidden-dim "${ENCODER_HIDDEN_DIM}"
-  --encoder-depth "${ENCODER_DEPTH}"
-  --encoder-heads "${ENCODER_HEADS}"
   --dit-hidden-dim "${DIT_HIDDEN_DIM}"
   --dit-depth "${DIT_DEPTH}"
   --dit-heads "${DIT_HEADS}"
@@ -394,17 +398,17 @@ cmd_common=(
   --content-fusion-end "${CONTENT_FUSION_END}"
   --style-fusion-start "${STYLE_FUSION_START}"
   --style-fusion-end "${STYLE_FUSION_END}"
-  --contrastive-proj-dim "${CONTRASTIVE_PROJ_DIM}"
   --detailer-base-channels "${DETAILER_BASE_CHANNELS}"
   --detailer-max-channels "${DETAILER_MAX_CHANNELS}"
   --train-sampling "${TRAIN_SAMPLING}"
   --cartesian-fonts-per-batch "${CARTESIAN_FONTS_PER_BATCH}"
   --cartesian-chars-per-batch "${CARTESIAN_CHARS_PER_BATCH}"
   --flow-lambda "${FLOW_LAMBDA}"
+  --perceptual-loss-lambda "${PERCEPTUAL_LOSS_LAMBDA}"
+  --style-loss-lambda "${STYLE_LOSS_LAMBDA}"
+  --cnn-ramp-steps "${CNN_RAMP_STEPS}"
   --flow-sample-steps "${FLOW_SAMPLE_STEPS}"
   --ema-decay "${EMA_DECAY}"
-  --style-lr-scale "${STYLE_LR_SCALE}"
-  --style-lr-warmup-steps "${STYLE_LR_WARMUP_STEPS}"
   --epochs "${EPOCHS}"
   --total-steps "${TARGET_STEPS}"
   --log-every-steps "${LOG_EVERY}"
@@ -414,14 +418,16 @@ cmd_common=(
   --sample-every-steps "${SAMPLE_EVERY}"
 )
 
-if [[ -n "${FONT_SPLIT_SEED}" ]]; then
-  cmd_common+=(--font-split-seed "${FONT_SPLIT_SEED}")
-fi
 if [[ -n "${RESUME_CKPT}" ]]; then
   cmd_common+=(--resume "${RESUME_CKPT}")
 fi
-if [[ "${FREEZE_STYLE}" == "1" ]]; then
-  cmd_common+=(--freeze-style)
+if [[ "${USE_CNN_PERCEPTOR}" == "1" ]]; then
+  cmd_common+=(--use-cnn-perceptor)
+else
+  cmd_common+=(--no-use-cnn-perceptor)
+fi
+if [[ "${USE_CNN_PERCEPTOR}" == "1" && -n "${PERCEPTOR_CHECKPOINT}" ]]; then
+  cmd_common+=(--perceptor-checkpoint "${PERCEPTOR_CHECKPOINT}")
 fi
 if [[ "${#EXTRA_TRAIN_ARGS[@]}" -gt 0 ]]; then
   cmd_common+=("${EXTRA_TRAIN_ARGS[@]}")
@@ -432,11 +438,13 @@ echo "[run_diffusion_colab] save_dir=${SAVE_DIR}"
 echo "[run_diffusion_colab] log_file=${LOG_FILE}"
 echo "[run_diffusion_colab] requested_device=${DEVICE_ARG} seed=${SEED}"
 echo "[run_diffusion_colab] resume=${RESUME_CKPT:-<none>}"
-echo "[run_diffusion_colab] batch=${BATCH_SIZE} lr=${LR} lr_warmup_steps=${LR_WARMUP_STEPS} lr_min_scale=${LR_MIN_SCALE} grad_clip_norm=${GRAD_CLIP_NORM}"
+echo "[run_diffusion_colab] use_cnn_perceptor=${USE_CNN_PERCEPTOR}"
+echo "[run_diffusion_colab] perceptor_checkpoint=${PERCEPTOR_CHECKPOINT:-<none>}"
+echo "[run_diffusion_colab] batch=${BATCH_SIZE} lr=${LR} lr_warmup_steps=${LR_WARMUP_STEPS} lr_decay_start_step=${LR_DECAY_START_STEP} lr_min_scale=${LR_MIN_SCALE} grad_clip_norm=${GRAD_CLIP_NORM}"
 echo "[run_diffusion_colab] style_ref_count=${STYLE_REF_COUNT} style_ref_count_min=${STYLE_REF_COUNT_MIN} style_ref_count_max=${STYLE_REF_COUNT_MAX}"
 echo "[run_diffusion_colab] patch_size=${PATCH_SIZE} image_size=${IMAGE_SIZE} flow_sample_steps=${FLOW_SAMPLE_STEPS} flow_lambda=${FLOW_LAMBDA} ema_decay=${EMA_DECAY}"
-echo "[run_diffusion_colab] detailer_base_channels=${DETAILER_BASE_CHANNELS} detailer_max_channels=${DETAILER_MAX_CHANNELS} freeze_style=${FREEZE_STYLE}"
-echo "[run_diffusion_colab] style_lr_scale=${STYLE_LR_SCALE} style_lr_warmup_steps=${STYLE_LR_WARMUP_STEPS}"
+echo "[run_diffusion_colab] perceptual_loss_lambda=${PERCEPTUAL_LOSS_LAMBDA} style_loss_lambda=${STYLE_LOSS_LAMBDA} cnn_ramp_steps=${CNN_RAMP_STEPS}"
+echo "[run_diffusion_colab] detailer_base_channels=${DETAILER_BASE_CHANNELS} detailer_max_channels=${DETAILER_MAX_CHANNELS}"
 echo "[run_diffusion_colab] content_layers=[${CONTENT_FUSION_START},${CONTENT_FUSION_END}) style_layers=[${STYLE_FUSION_START},${STYLE_FUSION_END})"
 echo "[run_diffusion_colab] train_sampling=${TRAIN_SAMPLING} cartesian_fonts_per_batch=${CARTESIAN_FONTS_PER_BATCH} cartesian_chars_per_batch=${CARTESIAN_CHARS_PER_BATCH}"
 

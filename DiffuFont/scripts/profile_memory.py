@@ -92,10 +92,7 @@ def build_model_from_args(args: argparse.Namespace) -> SourcePartRefDiT:
         in_channels=1,
         image_size=int(args.image_size),
         patch_size=int(args.patch_size),
-        encoder_patch_size=int(args.encoder_patch_size),
         encoder_hidden_dim=int(args.encoder_hidden_dim),
-        encoder_depth=int(args.encoder_depth),
-        encoder_heads=int(args.encoder_heads),
         dit_hidden_dim=int(args.dit_hidden_dim),
         dit_depth=int(args.dit_depth),
         dit_heads=int(args.dit_heads),
@@ -128,16 +125,13 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=PROJECT_ROOT / "analysis" / "memory_profile.json")
     parser.add_argument("--image-size", type=int, default=128)
     parser.add_argument("--patch-size", type=int, default=16)
-    parser.add_argument("--encoder-patch-size", type=int, default=8)
     parser.add_argument("--encoder-hidden-dim", type=int, default=512)
-    parser.add_argument("--encoder-depth", type=int, default=4)
-    parser.add_argument("--encoder-heads", type=int, default=8)
     parser.add_argument("--dit-hidden-dim", type=int, default=512)
     parser.add_argument("--dit-depth", type=int, default=12)
     parser.add_argument("--dit-heads", type=int, default=8)
     parser.add_argument("--dit-mlp-ratio", type=float, default=4.0)
     parser.add_argument("--content-fusion-start", type=int, default=0)
-    parser.add_argument("--content-fusion-end", type=int, default=8)
+    parser.add_argument("--content-fusion-end", type=int, default=6)
     parser.add_argument("--style-fusion-start", type=int, default=6)
     parser.add_argument("--style-fusion-end", type=int, default=12)
     parser.add_argument("--detailer-base-channels", type=int, default=32)
@@ -213,22 +207,15 @@ def main() -> None:
         target_flow = stage_record(device, "flow_target", lambda: x1 - x0, records)
         content_features = stage_record(device, "content_encode_features", lambda: trainer.model.encode_content_features(content), records)
         content_tokens = stage_record(device, "content_project", lambda: trainer.model.content_proj(content_features), records)
-        style_pack = stage_record(
+        style_global = stage_record(
             device,
             "style_encode",
             lambda: trainer.model.encode_style(
                 style_img=style,
                 style_ref_mask=style_ref_mask,
-                return_contrastive=False,
-                detach_style_encoder=(not trainer.style_grad_enabled),
             ),
             records,
         )
-        style_tokens = style_pack["style_tokens"]
-        style_global = style_pack["style_global"]
-        style_token_mask = style_pack["style_token_mask"]
-        if style_tokens is None or style_token_mask is None or style_global is None:
-            raise RuntimeError("profile_memory requires style tokens.")
         pred_flow = stage_record(
             device,
             "dip_forward",
@@ -236,9 +223,7 @@ def main() -> None:
                 xt,
                 timesteps,
                 content_tokens=content_tokens,
-                style_tokens=style_tokens,
                 style_global=style_global,
-                style_token_mask=style_token_mask,
             ),
             records,
         )
