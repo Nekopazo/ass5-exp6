@@ -362,7 +362,8 @@ def main() -> None:
             "[train] using cartesian font-char sampler "
             f"fonts_per_batch={int(args.cartesian_fonts_per_batch)} "
             f"chars_per_batch={int(args.cartesian_chars_per_batch)} "
-            f"effective_batch<={int(args.cartesian_fonts_per_batch) * int(args.cartesian_chars_per_batch)}"
+            f"effective_batch={int(args.cartesian_fonts_per_batch) * int(args.cartesian_chars_per_batch)} "
+            "pad_missing_with_random_samples=1"
         )
 
     resolved_epochs = max(1, int(args.epochs))

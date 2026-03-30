@@ -392,7 +392,13 @@ class UniqueFontBatchSampler(Sampler[List[int]]):
 
 
 class CartesianFontCharBatchSampler(Sampler[List[int]]):
-    """Yields cartesian-product batches over shuffled font groups and char groups."""
+    """Yields cartesian-product batches over shuffled font groups and char groups.
+
+    Each epoch still traverses all available font-char samples once through the
+    base cartesian schedule. If a cartesian batch is smaller than the target
+    size because some font-char combinations are missing, the sampler pads the
+    batch by randomly drawing sample indices from the full dataset.
+    """
 
     def __init__(
         self,
@@ -408,6 +414,7 @@ class CartesianFontCharBatchSampler(Sampler[List[int]]):
         self.chars_per_batch = max(1, int(chars_per_batch))
         self.seed = int(seed)
         self.drop_last = bool(drop_last)
+        self.sample_count = len(self.dataset.samples)
         self._epoch = 0
 
     def __len__(self) -> int:
@@ -424,6 +431,7 @@ class CartesianFontCharBatchSampler(Sampler[List[int]]):
 
         font_groups = self._chunk_items(font_names, self.fonts_per_batch)
         char_groups = self._chunk_items(char_indices, self.chars_per_batch)
+        target_batch_size = self.fonts_per_batch * self.chars_per_batch
         for font_group in font_groups:
             for char_group in char_groups:
                 batch: List[int] = []
@@ -434,6 +442,9 @@ class CartesianFontCharBatchSampler(Sampler[List[int]]):
                         if sample_index is not None:
                             batch.append(int(sample_index))
                 if batch:
+                    if len(batch) < target_batch_size:
+                        pad_count = target_batch_size - len(batch)
+                        batch.extend(int(rng.randrange(self.sample_count)) for _ in range(pad_count))
                     yield batch
         self._epoch += 1
 
