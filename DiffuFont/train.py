@@ -191,14 +191,23 @@ def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
         dit_hidden_dim=int(args.dit_hidden_dim),
         dit_depth=int(args.dit_depth),
         dit_heads=int(args.dit_heads),
+        content_cross_attn_heads=None if args.content_cross_attn_heads is None else int(args.content_cross_attn_heads),
         dit_mlp_ratio=float(args.dit_mlp_ratio),
-        content_fusion_start=int(args.content_fusion_start),
-        content_fusion_end=int(args.content_fusion_end),
-        style_fusion_start=int(args.style_fusion_start),
-        style_fusion_end=int(args.style_fusion_end),
+        content_cross_attn_layers=args.content_cross_attn_layers,
+        style_modulation_layers=args.style_modulation_layers,
         detailer_base_channels=int(args.detailer_base_channels),
         detailer_max_channels=int(args.detailer_max_channels),
     )
+
+
+def parse_layer_indices(value: str) -> tuple[int, ...]:
+    parts = [part.strip() for part in str(value).split(",")]
+    if not parts or any(part == "" for part in parts):
+        raise argparse.ArgumentTypeError("layer list must be a comma-separated list like 1,2,3,4,5,6")
+    try:
+        return tuple(int(part) for part in parts)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid layer list: {value}") from exc
 
 
 def main() -> None:
@@ -226,11 +235,10 @@ def main() -> None:
     parser.add_argument("--dit-hidden-dim", type=int, required=True)
     parser.add_argument("--dit-depth", type=int, required=True)
     parser.add_argument("--dit-heads", type=int, required=True)
+    parser.add_argument("--content-cross-attn-heads", type=int, default=None)
     parser.add_argument("--dit-mlp-ratio", type=float, required=True)
-    parser.add_argument("--content-fusion-start", type=int, required=True)
-    parser.add_argument("--content-fusion-end", type=int, required=True)
-    parser.add_argument("--style-fusion-start", type=int, required=True)
-    parser.add_argument("--style-fusion-end", type=int, required=True)
+    parser.add_argument("--content-cross-attn-layers", type=parse_layer_indices, required=True)
+    parser.add_argument("--style-modulation-layers", type=parse_layer_indices, required=True)
     parser.add_argument("--detailer-base-channels", type=int, required=True)
     parser.add_argument("--detailer-max-channels", type=int, required=True)
     parser.add_argument("--train-sampling", type=str, required=True, choices=["shuffle", "cartesian_font_char"])
@@ -241,9 +249,6 @@ def main() -> None:
     parser.add_argument("--lr-warmup-steps", type=int, default=0)
     parser.add_argument("--lr-decay-start-step", type=int, default=-1)
     parser.add_argument("--lr-min-scale", type=float, default=0.1)
-    parser.add_argument("--total-loss-warmup-steps", type=int, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--total-loss-min-scale", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--total-loss-decay-start-step", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--total-steps", type=int, required=True)
     parser.add_argument("--log-every-steps", type=int, required=True)
     parser.add_argument("--val-every-steps", type=int, required=True)
@@ -259,7 +264,9 @@ def main() -> None:
     parser.add_argument("--perceptor-checkpoint", type=Path)
     parser.add_argument("--perceptual-loss-lambda", type=float, required=True)
     parser.add_argument("--style-loss-lambda", type=float, required=True)
-    parser.add_argument("--cnn-ramp-steps", type=int, required=True)
+    parser.add_argument("--aux-loss-t-logistic-steepness", type=float, default=8.0)
+    parser.add_argument("--perceptual-loss-t-midpoint", type=float, default=0.35)
+    parser.add_argument("--style-loss-t-midpoint", type=float, default=0.45)
     parser.add_argument("--flow-sample-steps", type=int, required=True)
     parser.add_argument("--ema-decay", type=float, required=True)
     args = parser.parse_args()
@@ -288,15 +295,6 @@ def main() -> None:
         raise ValueError("lr_warmup_steps must be >= 0.")
     if float(args.lr_min_scale) < 0.0 or float(args.lr_min_scale) > 1.0:
         raise ValueError("lr_min_scale must be in [0, 1].")
-    if (
-        args.total_loss_warmup_steps is not None
-        or args.total_loss_min_scale is not None
-        or args.total_loss_decay_start_step is not None
-    ):
-        print(
-            "[train] warning: total-loss schedule args are deprecated and ignored; "
-            "use lr-warmup-steps / lr-decay-start-step / lr-min-scale instead"
-        )
 
     style_ref_count = None if int(args.style_ref_count) <= 0 else int(args.style_ref_count)
     glyph_transform = build_base_glyph_transform(image_size=int(args.image_size))
@@ -394,7 +392,9 @@ def main() -> None:
         perceptor_checkpoint=effective_perceptor_checkpoint,
         perceptual_loss_lambda=effective_perceptual_loss_lambda,
         style_loss_lambda=effective_style_loss_lambda,
-        cnn_ramp_steps=int(args.cnn_ramp_steps),
+        aux_loss_t_logistic_steepness=float(args.aux_loss_t_logistic_steepness),
+        perceptual_loss_t_midpoint=float(args.perceptual_loss_t_midpoint),
+        style_loss_t_midpoint=float(args.style_loss_t_midpoint),
         flow_sample_steps=int(args.flow_sample_steps),
         ema_decay=float(args.ema_decay),
         log_every_steps=log_every_steps,
@@ -425,9 +425,6 @@ def main() -> None:
     trainer.sample_dir = args.save_dir / "samples"
 
     run_config = {key: (str(value) if isinstance(value, Path) else value) for key, value in vars(args).items()}
-    run_config.pop("total_loss_warmup_steps", None)
-    run_config.pop("total_loss_min_scale", None)
-    run_config.pop("total_loss_decay_start_step", None)
     run_config["resolved_device"] = str(device)
     run_config["resolved_font_split_seed"] = int(font_split_seed)
     run_config["resolved_log_every_steps"] = int(log_every_steps)
@@ -445,7 +442,9 @@ def main() -> None:
     run_config["perceptor_checkpoint"] = None if effective_perceptor_checkpoint is None else str(effective_perceptor_checkpoint)
     run_config["perceptual_loss_lambda"] = float(effective_perceptual_loss_lambda)
     run_config["style_loss_lambda"] = float(effective_style_loss_lambda)
-    run_config["cnn_ramp_steps"] = int(args.cnn_ramp_steps)
+    run_config["aux_loss_t_logistic_steepness"] = float(args.aux_loss_t_logistic_steepness)
+    run_config["perceptual_loss_t_midpoint"] = float(args.perceptual_loss_t_midpoint)
+    run_config["style_loss_t_midpoint"] = float(args.style_loss_t_midpoint)
     run_config["lr_warmup_steps"] = int(args.lr_warmup_steps)
     run_config["lr_decay_start_step"] = None if int(args.lr_decay_start_step) < 0 else int(args.lr_decay_start_step)
     run_config["lr_min_scale"] = float(args.lr_min_scale)

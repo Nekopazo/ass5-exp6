@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from typing import Optional
 
 import torch
@@ -91,16 +92,12 @@ class ContentEncoder(nn.Module):
         self.stem_resblock = ResBlock(self.base_channels, self.base_channels)
 
         self.downsample_layers = nn.ModuleList()
-        self.stage_resblocks = nn.ModuleList()
+        self.resblocks = nn.ModuleList()
         in_channels = self.base_channels
         remaining_downsample_depth = max(0, self.downsample_depth - 1)
-        current_spatial = self.image_size // self.stem_stride
         if remaining_downsample_depth == 0:
             self.downsample_layers.append(nn.Identity())
-            resblock_stack = nn.ModuleList([ResBlock(in_channels, self.hidden_dim)])
-            if current_spatial in (16, 8):
-                resblock_stack.append(ResBlock(self.hidden_dim, self.hidden_dim))
-            self.stage_resblocks.append(resblock_stack)
+            self.resblocks.append(ResBlock(in_channels, self.hidden_dim))
         else:
             stage_channels = []
             for stage_idx in range(remaining_downsample_depth):
@@ -118,11 +115,7 @@ class ContentEncoder(nn.Module):
                 self.downsample_layers.append(
                     nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1)
                 )
-                current_spatial = max(1, current_spatial // 2)
-                resblock_stack = nn.ModuleList([ResBlock(out_channels, out_channels)])
-                if current_spatial in (16, 8):
-                    resblock_stack.append(ResBlock(out_channels, out_channels))
-                self.stage_resblocks.append(resblock_stack)
+                self.resblocks.append(ResBlock(out_channels, out_channels))
                 in_channels = out_channels
 
         self.out_norm = nn.GroupNorm(_group_count(self.hidden_dim), self.hidden_dim)
@@ -133,10 +126,9 @@ class ContentEncoder(nn.Module):
 
         x = self.stem(x)
         x = self.stem_resblock(x)
-        for downsample, resblock_stack in zip(self.downsample_layers, self.stage_resblocks):
+        for downsample, resblock in zip(self.downsample_layers, self.resblocks):
             x = downsample(x)
-            for resblock in resblock_stack:
-                x = resblock(x)
+            x = resblock(x)
         if x.shape[-2:] != (self.output_grid_size, self.output_grid_size):
             x = F.interpolate(
                 x,
@@ -291,11 +283,10 @@ class SourcePartRefDiT(nn.Module):
         dit_hidden_dim: int = 512,
         dit_depth: int = 12,
         dit_heads: int = 8,
+        content_cross_attn_heads: int | None = None,
         dit_mlp_ratio: float = 4.0,
-        content_fusion_start: int | None = None,
-        content_fusion_end: int | None = None,
-        style_fusion_start: int | None = None,
-        style_fusion_end: int | None = None,
+        content_cross_attn_layers: Sequence[int] | None = None,
+        style_modulation_layers: Sequence[int] | None = None,
         detailer_base_channels: int = 32,
         detailer_max_channels: int = 256,
         detailer_bottleneck_channels: int = 384,
@@ -315,36 +306,25 @@ class SourcePartRefDiT(nn.Module):
         self.dit_hidden_dim = int(dit_hidden_dim)
         self.dit_depth = int(dit_depth)
         self.dit_heads = int(dit_heads)
+        self.content_cross_attn_heads = (
+            self.dit_heads if content_cross_attn_heads is None else int(content_cross_attn_heads)
+        )
         self.dit_mlp_ratio = float(dit_mlp_ratio)
         self.detailer_base_channels = int(detailer_base_channels)
         self.detailer_max_channels = int(detailer_max_channels)
         self.detailer_bottleneck_channels = int(detailer_bottleneck_channels)
-
-        if content_fusion_start is None and content_fusion_end is None:
-            self.content_fusion_start = 0
-            self.content_fusion_end = min(self.dit_depth, 6)
-        else:
-            self.content_fusion_start = max(
-                0,
-                min(self.dit_depth, 0 if content_fusion_start is None else int(content_fusion_start)),
-            )
-            self.content_fusion_end = max(
-                self.content_fusion_start,
-                min(self.dit_depth, self.dit_depth if content_fusion_end is None else int(content_fusion_end)),
-            )
-
-        if style_fusion_start is None and style_fusion_end is None:
-            self.style_fusion_start = max(0, self.dit_depth - 6)
-            self.style_fusion_end = self.dit_depth
-        else:
-            self.style_fusion_start = max(
-                0,
-                min(self.dit_depth, 0 if style_fusion_start is None else int(style_fusion_start)),
-            )
-            self.style_fusion_end = max(
-                self.style_fusion_start,
-                min(self.dit_depth, self.dit_depth if style_fusion_end is None else int(style_fusion_end)),
-            )
+        self.content_cross_attn_layers = DiffusionTransformerBackbone._normalize_layer_indices(
+            content_cross_attn_layers,
+            default_layers=range(1, min(self.dit_depth, 6) + 1),
+            depth=self.dit_depth,
+            field_name="content_cross_attn_layers",
+        )
+        self.style_modulation_layers = DiffusionTransformerBackbone._normalize_layer_indices(
+            style_modulation_layers,
+            default_layers=range(max(1, self.dit_depth - 5), self.dit_depth + 1),
+            depth=self.dit_depth,
+            field_name="style_modulation_layers",
+        )
 
         self.content_encoder = ContentEncoder(
             image_size=self.image_size,
@@ -362,11 +342,10 @@ class SourcePartRefDiT(nn.Module):
             hidden_dim=self.dit_hidden_dim,
             depth=self.dit_depth,
             num_heads=self.dit_heads,
+            content_cross_attn_heads=self.content_cross_attn_heads,
             mlp_ratio=self.dit_mlp_ratio,
-            content_fusion_start=self.content_fusion_start,
-            content_fusion_end=self.content_fusion_end,
-            style_fusion_start=self.style_fusion_start,
-            style_fusion_end=self.style_fusion_end,
+            content_cross_attn_layers=self.content_cross_attn_layers,
+            style_modulation_layers=self.style_modulation_layers,
         )
         self.detailer = PatchDetailerHead(
             in_channels=self.in_channels,
@@ -396,17 +375,16 @@ class SourcePartRefDiT(nn.Module):
             "dit_hidden_dim": int(self.dit_hidden_dim),
             "dit_depth": int(self.dit_depth),
             "dit_heads": int(self.dit_heads),
+            "content_cross_attn_heads": int(self.content_cross_attn_heads),
             "dit_mlp_ratio": float(self.dit_mlp_ratio),
-            "content_fusion_start": int(self.content_fusion_start),
-            "content_fusion_end": int(self.content_fusion_end),
-            "style_fusion_start": int(self.style_fusion_start),
-            "style_fusion_end": int(self.style_fusion_end),
+            "content_cross_attn_layers": list(self.content_cross_attn_layers),
+            "style_modulation_layers": list(self.style_modulation_layers),
             "detailer_base_channels": int(self.detailer_base_channels),
             "detailer_max_channels": int(self.detailer_max_channels),
             "detailer_bottleneck_channels": int(self.detailer_bottleneck_channels),
         }
 
-    def encode_content_features(self, content_img: torch.Tensor) -> torch.Tensor:
+    def encode_content_tokens(self, content_img: torch.Tensor) -> torch.Tensor:
         content_features = self.content_encoder(content_img)
         return content_features.flatten(2).transpose(1, 2).contiguous()
 
@@ -500,8 +478,8 @@ class SourcePartRefDiT(nn.Module):
         style_img: torch.Tensor,
         style_ref_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        content_features = self.encode_content_features(content_img)
-        content_tokens = self.content_proj(content_features)
+        content_tokens = self.encode_content_tokens(content_img)
+        content_tokens = self.content_proj(content_tokens)
         style_global = self.encode_style(
             style_img,
             style_ref_mask=style_ref_mask,

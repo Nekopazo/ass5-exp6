@@ -31,6 +31,9 @@ def load_trainer(checkpoint_path: Path, device: torch.device) -> FlowTrainer:
         total_steps=1,
         flow_sample_steps=int(trainer_config.get("flow_sample_steps", 24)),
         ema_decay=float(trainer_config.get("ema_decay", 0.9999)),
+        aux_loss_t_logistic_steepness=float(trainer_config.get("aux_loss_t_logistic_steepness", 8.0)),
+        perceptual_loss_t_midpoint=float(trainer_config.get("perceptual_loss_t_midpoint", 0.35)),
+        style_loss_t_midpoint=float(trainer_config.get("style_loss_t_midpoint", 0.45)),
     )
     trainer.load(checkpoint_path)
     trainer.model.eval()
@@ -63,6 +66,34 @@ def find_sample_index(dataset: FontImageDataset, font_name: str, char: str) -> i
         if font == font_name and dataset.char_list[char_index] == char:
             return idx
     raise KeyError(f"Missing sample for font='{font_name}' char='{char}'")
+
+
+def resolve_chars_for_fonts(
+    dataset: FontImageDataset,
+    *,
+    font_names: List[str],
+    requested_chars: List[str],
+    num_chars: int,
+) -> List[str]:
+    common_char_indices = None
+    for font_name in font_names:
+        font_char_indices = set(dataset.sample_index_by_font_char[font_name].keys())
+        common_char_indices = font_char_indices if common_char_indices is None else (common_char_indices & font_char_indices)
+    common_char_indices = set() if common_char_indices is None else common_char_indices
+    common_chars = [dataset.char_list[idx] for idx in sorted(common_char_indices)]
+    if not common_chars:
+        raise RuntimeError(f"No shared chars found across selected fonts: {font_names}")
+
+    if requested_chars:
+        missing = [char for char in requested_chars if char not in common_chars]
+        if missing:
+            raise KeyError(
+                "Requested chars are not available for every selected font: "
+                f"missing={missing} fonts={font_names}"
+            )
+        return requested_chars
+
+    return random.sample(common_chars, k=min(int(num_chars), len(common_chars)))
 
 
 @torch.no_grad()
@@ -140,7 +171,7 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--data-root", type=Path, default=Path("."))
     parser.add_argument("--output", type=Path, default=Path("outputs/inference_grid.png"))
-    parser.add_argument("--device", type=str, default="cuda:1")
+    parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-fonts", type=int, default=0)
     parser.add_argument("--style-ref-count", type=int, default=0)
@@ -164,7 +195,8 @@ def main() -> None:
     else:
         device = torch.device(args.device)
 
-    glyph_transform = build_base_glyph_transform(image_size=128)
+    trainer = load_trainer(args.checkpoint, device)
+    glyph_transform = build_base_glyph_transform(image_size=int(trainer.model.image_size))
     style_ref_count = None if int(args.style_ref_count) <= 0 else int(args.style_ref_count)
     dataset = FontImageDataset(
         project_root=args.data_root,
@@ -176,18 +208,23 @@ def main() -> None:
         transform=glyph_transform,
         style_transform=glyph_transform,
     )
-    trainer = load_trainer(args.checkpoint, device)
 
     all_fonts = sorted(dataset.font_names)
     if args.font_names.strip():
         font_names = [name.strip() for name in args.font_names.split(",") if name.strip()]
     else:
         font_names = random.sample(all_fonts, k=min(int(args.num_fonts), len(all_fonts)))
+    missing_fonts = [name for name in font_names if name not in dataset.font_id_by_name]
+    if missing_fonts:
+        raise KeyError(f"Missing fonts in dataset: {missing_fonts}")
 
-    if args.chars.strip():
-        chars = [char.strip() for char in args.chars.split(",") if char.strip()]
-    else:
-        chars = random.sample(dataset.char_list, k=min(int(args.num_chars), len(dataset.char_list)))
+    requested_chars = [char.strip() for char in args.chars.split(",") if char.strip()] if args.chars.strip() else []
+    chars = resolve_chars_for_fonts(
+        dataset,
+        font_names=font_names,
+        requested_chars=requested_chars,
+        num_chars=int(args.num_chars),
+    )
 
     results = run_inference(
         trainer,

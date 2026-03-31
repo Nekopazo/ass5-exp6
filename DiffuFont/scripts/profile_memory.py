@@ -96,14 +96,23 @@ def build_model_from_args(args: argparse.Namespace) -> SourcePartRefDiT:
         dit_hidden_dim=int(args.dit_hidden_dim),
         dit_depth=int(args.dit_depth),
         dit_heads=int(args.dit_heads),
+        content_cross_attn_heads=None if args.content_cross_attn_heads is None else int(args.content_cross_attn_heads),
         dit_mlp_ratio=float(args.dit_mlp_ratio),
-        content_fusion_start=int(args.content_fusion_start),
-        content_fusion_end=int(args.content_fusion_end),
-        style_fusion_start=int(args.style_fusion_start),
-        style_fusion_end=int(args.style_fusion_end),
+        content_cross_attn_layers=args.content_cross_attn_layers,
+        style_modulation_layers=args.style_modulation_layers,
         detailer_base_channels=int(args.detailer_base_channels),
         detailer_max_channels=int(args.detailer_max_channels),
     )
+
+
+def parse_layer_indices(value: str) -> tuple[int, ...]:
+    parts = [part.strip() for part in str(value).split(",")]
+    if not parts or any(part == "" for part in parts):
+        raise argparse.ArgumentTypeError("layer list must be a comma-separated list like 1,2,3,4,5,6")
+    try:
+        return tuple(int(part) for part in parts)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid layer list: {value}") from exc
 
 
 def main() -> None:
@@ -129,11 +138,10 @@ def main() -> None:
     parser.add_argument("--dit-hidden-dim", type=int, default=512)
     parser.add_argument("--dit-depth", type=int, default=12)
     parser.add_argument("--dit-heads", type=int, default=8)
+    parser.add_argument("--content-cross-attn-heads", type=int, default=None)
     parser.add_argument("--dit-mlp-ratio", type=float, default=4.0)
-    parser.add_argument("--content-fusion-start", type=int, default=0)
-    parser.add_argument("--content-fusion-end", type=int, default=6)
-    parser.add_argument("--style-fusion-start", type=int, default=6)
-    parser.add_argument("--style-fusion-end", type=int, default=12)
+    parser.add_argument("--content-cross-attn-layers", type=parse_layer_indices, default=(1, 2, 3, 4, 5, 6))
+    parser.add_argument("--style-modulation-layers", type=parse_layer_indices, default=(7, 8, 9, 10, 11, 12))
     parser.add_argument("--detailer-base-channels", type=int, default=32)
     parser.add_argument("--detailer-max-channels", type=int, default=256)
     parser.add_argument("--ema-decay", type=float, default=0.9999)
@@ -205,8 +213,8 @@ def main() -> None:
         t_view = timesteps.view(-1, 1, 1, 1).to(dtype=x1.dtype)
         xt = stage_record(device, "flow_interpolate", lambda: (1.0 - t_view) * x0 + t_view * x1, records)
         target_flow = stage_record(device, "flow_target", lambda: x1 - x0, records)
-        content_features = stage_record(device, "content_encode_features", lambda: trainer.model.encode_content_features(content), records)
-        content_tokens = stage_record(device, "content_project", lambda: trainer.model.content_proj(content_features), records)
+        content_tokens = stage_record(device, "content_encode_tokens", lambda: trainer.model.encode_content_tokens(content), records)
+        content_tokens = stage_record(device, "content_project", lambda: trainer.model.content_proj(content_tokens), records)
         style_global = stage_record(
             device,
             "style_encode",

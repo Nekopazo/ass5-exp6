@@ -77,8 +77,9 @@ def print_model_summary(model: SourcePartRefDiT) -> None:
             f"dit_hidden_dim: {model.dit_hidden_dim}",
             f"dit_depth: {model.dit_depth}",
             f"dit_heads: {model.dit_heads}",
-            f"content_fusion_layers: [{model.content_fusion_start}, {model.content_fusion_end})",
-            f"style_fusion_layers: [{model.style_fusion_start}, {model.style_fusion_end})",
+            f"content_cross_attn_heads: {model.content_cross_attn_heads}",
+            f"content_cross_attn_layers: {list(model.content_cross_attn_layers)}",
+            f"style_modulation_layers: {list(model.style_modulation_layers)}",
         ]
     )
 
@@ -101,7 +102,7 @@ def print_model_summary(model: SourcePartRefDiT) -> None:
     print("backbone_layer_plan:")
     for idx, block in enumerate(model.backbone.blocks):
         print(
-            f"  - block_{idx:02d}: content_fusion={int(block.use_content_fusion)} "
+            f"  - block_{idx:02d}: content_cross_attn={int(block.use_content_cross_attn)} "
             f"style_modulation={int(block.use_style_modulation)}"
         )
 
@@ -114,13 +115,11 @@ def trace_content_path(model: SourcePartRefDiT, content: torch.Tensor) -> tuple[
     print(f"content.stem: {shape_of(x)}")
     x = encoder.stem_resblock(x)
     print(f"content.stem_resblock: {shape_of(x)}")
-    for idx, (downsample, resblock_stack) in enumerate(zip(encoder.downsample_layers, encoder.stage_resblocks)):
+    for idx, (downsample, resblock) in enumerate(zip(encoder.downsample_layers, encoder.resblocks)):
         x = downsample(x)
         print(f"content.downsample_{idx}: {shape_of(x)}")
-        for resblock_idx, resblock in enumerate(resblock_stack):
-            x = resblock(x)
-            label = f"content.resblock_{idx}" if resblock_idx == 0 else f"content.resblock_{idx}_extra{resblock_idx}"
-            print(f"{label}: {shape_of(x)}")
+        x = resblock(x)
+        print(f"content.resblock_{idx}: {shape_of(x)}")
     if x.shape[-2:] != (encoder.output_grid_size, encoder.output_grid_size):
         x = F.interpolate(
             x,
@@ -185,6 +184,8 @@ def trace_backbone_path(
     print(f"backbone.patch_embed_tokens: {shape_of(x)}")
     x = x + backbone.pos_embed.to(device=x.device, dtype=x.dtype)
     print(f"backbone.tokens_plus_pos: {shape_of(x)}")
+    content_tokens = content_tokens.to(device=x.device, dtype=x.dtype) + backbone.pos_embed.to(device=x.device, dtype=x.dtype)
+    print(f"backbone.content_tokens_plus_pos: {shape_of(content_tokens)}")
     time_cond = timestep_embedding(timesteps, backbone.hidden_dim).to(dtype=x.dtype)
     print(f"backbone.timestep_embedding: {shape_of(time_cond)}")
     time_cond = backbone.time_mlp(time_cond)
@@ -192,15 +193,16 @@ def trace_backbone_path(
     style_cond = backbone.style_cond_proj(style_global.to(device=x.device, dtype=x.dtype))
     print(f"backbone.style_cond_proj: {shape_of(style_cond)}")
     for idx, block in enumerate(backbone.blocks):
-        block_cond = time_cond + style_cond if block.use_style_modulation else time_cond
+        self_cond = time_cond + style_cond if block.use_style_modulation else time_cond
         x = block(
             x,
-            cond=block_cond,
-            content_tokens=content_tokens if block.use_content_fusion else None,
+            self_cond=self_cond,
+            content_time_cond=time_cond if block.use_content_cross_attn else None,
+            content_tokens=content_tokens if block.use_content_cross_attn else None,
         )
         print(
             f"backbone.block_{idx:02d}: out={shape_of(x)} "
-            f"content_fusion={int(block.use_content_fusion)} "
+            f"content_cross_attn={int(block.use_content_cross_attn)} "
             f"style_modulation={int(block.use_style_modulation)}"
         )
     x = backbone.final_norm(x)

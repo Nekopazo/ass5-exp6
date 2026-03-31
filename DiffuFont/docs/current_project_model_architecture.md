@@ -8,7 +8,7 @@ This document describes:
 - the current grayscale CNN font perceptor
 - the actual tensor flow and tensor shapes
 - the current loss composition
-- the remaining redundancy candidates in the codebase
+- the remaining non-runtime cleanup candidates in the repository
 
 The shape traces below were obtained with:
 
@@ -24,8 +24,8 @@ The current project has two active model paths:
 1. `SourcePartRefDiT`
    - used by the main pixel-space glyph flow training
    - input is grayscale glyph image space, not latent space
-   - content is injected only in the first 6 DiT blocks
-   - style is injected only in the last 6 DiT blocks
+   - content is injected on explicitly selected DiT layer indices
+   - style is injected on explicitly selected DiT layer indices
    - style conditioning is now pure AdaLN-style modulation
    - there is no style cross-attention anymore
 
@@ -52,8 +52,9 @@ Current default structure resolved from the model:
 | `dit_hidden_dim` | `512` |
 | `dit_depth` | `12` |
 | `dit_heads` | `8` |
-| `content_fusion_layers` | `[0, 6)` |
-| `style_fusion_layers` | `[6, 12)` |
+| `content_cross_attn_heads` | `8` |
+| `content_cross_attn_layers` | `[1, 2, 3, 4, 5, 6]` |
+| `style_modulation_layers` | `[7, 8, 9, 10, 11, 12]` |
 | `detailer_bottleneck_channels` | `384` |
 
 ### 2.2 Top-level module composition
@@ -62,19 +63,19 @@ Measured parameter counts:
 
 | module | params |
 | --- | ---: |
-| `content_encoder` | `13,726,336` |
+| `content_encoder` | `7,823,488` |
 | `content_proj` | `0` |
 | `style_encoder` | `11,953,920` |
 | `style_global_proj` | `0` |
-| `backbone` | `60,784,640` |
+| `backbone` | `68,667,392` |
 | `detailer` | `4,852,737` |
-| total | `91,317,633` |
+| total | `93,297,537` |
 
 ### 2.3 Backbone block plan
 
 The 12 DiT blocks are split exactly as follows:
 
-| block | content injection | style modulation |
+| block | content cross-attn | style modulation |
 | --- | --- | --- |
 | `0` | yes | no |
 | `1` | yes | no |
@@ -91,8 +92,8 @@ The 12 DiT blocks are split exactly as follows:
 
 This means:
 
-- front 6 layers only fuse content tokens
-- back 6 layers only receive style-conditioned AdaLN modulation
+- layers `1..6` apply content cross-attention
+- layers `7..12` receive style-conditioned AdaLN modulation
 - style no longer enters through cross-attention
 
 ## 3. Main Model Tensor Flow
@@ -129,10 +130,8 @@ The shape trace below uses:
 | `content.resblock_0` | `(2, 128, 32, 32)` |
 | `content.downsample_1` | `(2, 256, 16, 16)` |
 | `content.resblock_1` | `(2, 256, 16, 16)` |
-| `content.resblock_1_extra1` | `(2, 256, 16, 16)` |
 | `content.downsample_2` | `(2, 512, 8, 8)` |
 | `content.resblock_2` | `(2, 512, 8, 8)` |
-| `content.resblock_2_extra1` | `(2, 512, 8, 8)` |
 | `content.out_norm_silu` | `(2, 512, 8, 8)` |
 | `content.tokens_before_proj` | `(2, 64, 512)` |
 | `content.tokens_after_proj` | `(2, 64, 512)` |
@@ -191,10 +190,10 @@ The noisy glyph `xt` is patchified by a strided conv and processed as a 64-token
 Block semantics:
 
 - blocks `0..5`
-  - use content token fusion
+  - use content cross-attention
   - do not use style modulation
 - blocks `6..11`
-  - do not use content fusion
+  - do not use content cross-attention
   - add `style_cond` into the AdaLN conditioning path
 
 ### 3.5 Patch detailer path
@@ -264,12 +263,10 @@ pred_target = xt + (1 - t) * pred_flow
 The current main loss is:
 
 ```text
-loss_unscaled =
+loss =
     lambda_flow * loss_flow
   + perceptual_weight(step) * loss_perceptual
   + style_weight(step) * loss_style_embed
-
-loss = total_loss_scale(step) * loss_unscaled
 ```
 
 Where:
@@ -284,12 +281,14 @@ Where:
 Current scheduling:
 
 - `perceptual_weight(step)` and `style_weight(step)`
-  - ramp linearly from `0` to target value in the first `cnn_ramp_steps`
-  - then decay together with the last-20%-of-training schedule
-- `total_loss_scale(step)`
-  - warmup at the beginning
-  - hold at `1.0` in the middle
-  - linearly decay to `total_loss_min_scale` in the last `20%` of training
+  - for each sample, scale with a normalized logistic function of that sample's `t`
+  - implemented as a sigmoid normalized to `[0, 1]`, with shared steepness `8.0`
+  - default midpoint is `0.35` for perceptual loss and `0.45` for style embedding loss
+  - `t=0` gives weight `0`, `t=1` gives the configured target weight
+- learning rate
+  - optional warmup during `lr_warmup_steps`
+  - hold at base lr until `lr_decay_start_step`
+  - linearly decay to `lr_min_scale * lr` after that point
 
 ### 4.3 Sampling flow
 
@@ -394,7 +393,7 @@ After the recent cleanups, the current active main path is internally consistent
 
 - no style cross-attention branch remains in the backbone
 - first 6 blocks are content-only
-- last 6 blocks are style-modulated only
+- the default active layer sets are content `1..6` and style `7..12`
 - the flow path is fully image-space
 
 There is no large dead branch left inside the active forward path.
@@ -402,6 +401,8 @@ There is no large dead branch left inside the active forward path.
 ### 7.2 Remaining redundancy candidates
 
 No obvious dead branch remains in the active training or inference path.
+
+The old `content_fusion_*` compatibility aliases and deprecated total-loss schedule CLI arguments have been removed from the runnable code.
 
 The only stale pieces still visible in the repository are analysis artifacts, not runnable model code:
 

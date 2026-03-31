@@ -320,16 +320,20 @@ class FrozenFontPerceptorGuidance(nn.Module):
             if not isinstance(pred_feature_maps, list) or not isinstance(target_feature_maps, list):
                 raise RuntimeError("FontPerceptor must return feature_maps as a list.")
 
-            perceptual = pred.new_tensor(0.0)
+            perceptual_per_sample = pred.new_zeros(pred.size(0))
             for pred_feat, target_feat in zip(pred_feature_maps, target_feature_maps):
-                perceptual = perceptual + (pred_feat - target_feat).abs().mean()
-            style = 1.0 - F.cosine_similarity(
+                perceptual_per_sample = perceptual_per_sample + (pred_feat - target_feat).abs().flatten(1).mean(dim=1)
+            style_per_sample = 1.0 - F.cosine_similarity(
                 pred_outputs["style_embed"],
                 target_outputs["style_embed"],
                 dim=-1,
                 eps=1e-6,
-            ).mean()
+            )
+            perceptual = perceptual_per_sample.mean()
+            style = style_per_sample.mean()
         return {
             "loss_perceptual": perceptual,
+            "loss_perceptual_per_sample": perceptual_per_sample,
             "loss_style_embed": style,
+            "loss_style_embed_per_sample": style_per_sample,
         }

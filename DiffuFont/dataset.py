@@ -441,11 +441,10 @@ class CartesianFontCharBatchSampler(Sampler[List[int]]):
                         sample_index = lookup.get(int(char_index))
                         if sample_index is not None:
                             batch.append(int(sample_index))
-                if batch:
-                    if len(batch) < target_batch_size:
-                        pad_count = target_batch_size - len(batch)
-                        batch.extend(int(rng.randrange(self.sample_count)) for _ in range(pad_count))
-                    yield batch
+                if len(batch) < target_batch_size:
+                    pad_count = target_batch_size - len(batch)
+                    batch.extend(int(rng.randrange(self.sample_count)) for _ in range(pad_count))
+                yield batch
         self._epoch += 1
 
     def _chunk_items(self, items: List[Any], chunk_size: int) -> List[List[Any]]:

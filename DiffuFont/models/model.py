@@ -67,12 +67,22 @@ def _hold_then_linear_scale(
     return 1.0 + (min_scale - 1.0) * progress
 
 
-def _linear_ramp_to_end(step: int, total_steps: int) -> float:
-    total_steps = max(1, int(total_steps))
-    if total_steps <= 1:
-        return 1.0
-    step = min(max(int(step), 0), total_steps - 1)
-    return float(step) / float(total_steps - 1)
+def _normalized_logistic_t_scale(
+    timesteps: torch.Tensor,
+    *,
+    steepness: float = 8.0,
+    midpoint: float = 0.5,
+) -> torch.Tensor:
+    """Normalized logistic schedule with scale(0)=0 and scale(1)=1."""
+
+    logistic_steepness = max(1e-3, float(steepness))
+    logistic_midpoint = min(max(float(midpoint), 0.0), 1.0)
+    t = timesteps.float().clamp(0.0, 1.0)
+    lo = torch.sigmoid(t.new_tensor(logistic_steepness * (0.0 - logistic_midpoint)))
+    hi = torch.sigmoid(t.new_tensor(logistic_steepness * (1.0 - logistic_midpoint)))
+    denom = (hi - lo).clamp_min(torch.finfo(t.dtype).eps)
+    logits = logistic_steepness * (t - logistic_midpoint)
+    return ((torch.sigmoid(logits) - lo) / denom).clamp(0.0, 1.0)
 
 
 class _BaseTrainer:
@@ -485,7 +495,9 @@ class FlowTrainer(_BaseTrainer):
         perceptor_checkpoint: Optional[str | Path] = None,
         perceptual_loss_lambda: float = 0.0,
         style_loss_lambda: float = 0.0,
-        cnn_ramp_steps: int = 50_000,
+        aux_loss_t_logistic_steepness: float = 8.0,
+        perceptual_loss_t_midpoint: float = 0.35,
+        style_loss_t_midpoint: float = 0.45,
         log_every_steps: int = 100,
         save_every_steps: Optional[int] = None,
         val_every_steps: Optional[int] = None,
@@ -512,7 +524,9 @@ class FlowTrainer(_BaseTrainer):
         self.flow_sample_steps = max(1, int(flow_sample_steps))
         self.perceptual_loss_lambda = max(0.0, float(perceptual_loss_lambda))
         self.style_loss_lambda = max(0.0, float(style_loss_lambda))
-        self.cnn_ramp_steps = max(1, int(cnn_ramp_steps))
+        self.aux_loss_t_logistic_steepness = max(1e-3, float(aux_loss_t_logistic_steepness))
+        self.perceptual_loss_t_midpoint = min(max(float(perceptual_loss_t_midpoint), 0.0), 1.0)
+        self.style_loss_t_midpoint = min(max(float(style_loss_t_midpoint), 0.0), 1.0)
         self.perceptor_checkpoint = None if perceptor_checkpoint is None else str(perceptor_checkpoint)
         self.perceptor_guidance: Optional[FrozenFontPerceptorGuidance] = None
         self.perceptor_report: Optional[dict] = None
@@ -612,8 +626,8 @@ class FlowTrainer(_BaseTrainer):
             t_view = timesteps.view(-1, 1, 1, 1).to(dtype=x1.dtype)
             xt = (1.0 - t_view) * x0 + t_view * x1
             target_flow = x1 - x0
-            content_features = model.encode_content_features(content)
-            content_tokens = model.content_proj(content_features)
+            content_tokens = model.encode_content_tokens(content)
+            content_tokens = model.content_proj(content_tokens)
             style_global = self._encode_style_conditions(
                 model,
                 style,
@@ -629,21 +643,35 @@ class FlowTrainer(_BaseTrainer):
             loss_flow = loss_flow_per_sample.mean()
             pred_target = xt + (1.0 - t_view) * pred_flow
             pred_target_l1 = _per_sample_mean((pred_target.float() - target.float()).abs()).mean()
-        aux_ramp = _linear_ramp_to_end(step, self.cnn_ramp_steps)
-        aux_scale = aux_ramp
-        perceptual_weight = self.perceptual_loss_lambda * aux_scale
-        style_weight = self.style_loss_lambda * aux_scale
+        perceptual_t_scale = _normalized_logistic_t_scale(
+            timesteps,
+            steepness=self.aux_loss_t_logistic_steepness,
+            midpoint=self.perceptual_loss_t_midpoint,
+        )
+        style_t_scale = _normalized_logistic_t_scale(
+            timesteps,
+            steepness=self.aux_loss_t_logistic_steepness,
+            midpoint=self.style_loss_t_midpoint,
+        )
+        perceptual_weight_per_sample = self.perceptual_loss_lambda * perceptual_t_scale
+        style_weight_per_sample = self.style_loss_lambda * style_t_scale
+        perceptual_weight = float(perceptual_weight_per_sample.mean().item())
+        style_weight = float(style_weight_per_sample.mean().item())
         loss_perceptual = target.new_tensor(0.0)
         loss_style_embed = target.new_tensor(0.0)
         flow_term = self.lambda_flow * loss_flow
         perceptual_term = target.new_tensor(0.0)
         style_term = target.new_tensor(0.0)
-        if self.use_cnn_perceptor and self.perceptor_guidance is not None and (perceptual_weight > 0.0 or style_weight > 0.0):
+        if self.use_cnn_perceptor and self.perceptor_guidance is not None and (
+            self.perceptual_loss_lambda > 0.0 or self.style_loss_lambda > 0.0
+        ):
             guidance_losses = self.perceptor_guidance(pred_target, target)
             loss_perceptual = guidance_losses["loss_perceptual"]
             loss_style_embed = guidance_losses["loss_style_embed"]
-            perceptual_term = perceptual_weight * loss_perceptual
-            style_term = style_weight * loss_style_embed
+            loss_perceptual_per_sample = guidance_losses["loss_perceptual_per_sample"]
+            loss_style_embed_per_sample = guidance_losses["loss_style_embed_per_sample"]
+            perceptual_term = (perceptual_weight_per_sample * loss_perceptual_per_sample).mean()
+            style_term = (style_weight_per_sample * loss_style_embed_per_sample).mean()
         loss = flow_term + perceptual_term + style_term
         metrics = {
             "loss": loss,
@@ -656,8 +684,8 @@ class FlowTrainer(_BaseTrainer):
             "loss_style_term": style_term,
             "perceptual_loss_weight": float(perceptual_weight),
             "style_loss_weight": float(style_weight),
-            "perceptor_ramp": float(aux_ramp),
-            "perceptor_weight_scale": float(aux_scale),
+            "perceptual_loss_t_scale_mean": float(perceptual_t_scale.mean().item()),
+            "style_loss_t_scale_mean": float(style_t_scale.mean().item()),
             "t_mean": timesteps.mean(),
         }
         return metrics
@@ -714,8 +742,8 @@ class FlowTrainer(_BaseTrainer):
         step_count = self.flow_sample_steps if num_inference_steps is None else max(1, int(num_inference_steps))
         dt = 1.0 / float(step_count)
         with self._autocast_context():
-            content_features = sample_model.encode_content_features(content)
-            content_tokens = sample_model.content_proj(content_features)
+            content_tokens = sample_model.encode_content_tokens(content)
+            content_tokens = sample_model.content_proj(content_tokens)
             style_global = sample_model.encode_style(
                 style_img=style_img,
                 style_ref_mask=style_ref_mask,
@@ -756,7 +784,9 @@ class FlowTrainer(_BaseTrainer):
                     "perceptor_checkpoint": self.perceptor_checkpoint,
                     "perceptual_loss_lambda": float(self.perceptual_loss_lambda),
                     "style_loss_lambda": float(self.style_loss_lambda),
-                    "cnn_ramp_steps": int(self.cnn_ramp_steps),
+                    "aux_loss_t_logistic_steepness": float(self.aux_loss_t_logistic_steepness),
+                    "perceptual_loss_t_midpoint": float(self.perceptual_loss_t_midpoint),
+                    "style_loss_t_midpoint": float(self.style_loss_t_midpoint),
                     "grad_clip_norm": None if self.grad_clip_norm is None else float(self.grad_clip_norm),
                 },
                 "step": int(self.global_step),
@@ -799,8 +829,15 @@ class FlowTrainer(_BaseTrainer):
                 self.perceptual_loss_lambda = max(0.0, float(trainer_config["perceptual_loss_lambda"]))
             if "style_loss_lambda" in trainer_config:
                 self.style_loss_lambda = max(0.0, float(trainer_config["style_loss_lambda"]))
-            if "cnn_ramp_steps" in trainer_config:
-                self.cnn_ramp_steps = max(1, int(trainer_config["cnn_ramp_steps"]))
+            if "aux_loss_t_logistic_steepness" in trainer_config:
+                self.aux_loss_t_logistic_steepness = max(
+                    1e-3,
+                    float(trainer_config["aux_loss_t_logistic_steepness"]),
+                )
+            if "perceptual_loss_t_midpoint" in trainer_config:
+                self.perceptual_loss_t_midpoint = min(max(float(trainer_config["perceptual_loss_t_midpoint"]), 0.0), 1.0)
+            if "style_loss_t_midpoint" in trainer_config:
+                self.style_loss_t_midpoint = min(max(float(trainer_config["style_loss_t_midpoint"]), 0.0), 1.0)
             if self.use_cnn_perceptor and self.perceptor_checkpoint is None and trainer_config.get("perceptor_checkpoint"):
                 self.perceptor_checkpoint = str(trainer_config["perceptor_checkpoint"])
         else:

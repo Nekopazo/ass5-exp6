@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 
 import torch
 import torch.nn as nn
@@ -69,28 +70,39 @@ class GlyphDiTBlock(nn.Module):
         self,
         hidden_dim: int,
         num_heads: int,
+        content_cross_attn_heads: int,
         mlp_ratio: float,
         *,
-        use_content_fusion: bool = True,
+        use_content_cross_attn: bool = True,
         use_style_modulation: bool = True,
     ) -> None:
         super().__init__()
-        self.use_content_fusion = bool(use_content_fusion)
+        self.use_content_cross_attn = bool(use_content_cross_attn)
         self.use_style_modulation = bool(use_style_modulation)
-        self.norm_content_x = (
+        self.norm_content_query = (
             nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
-            if self.use_content_fusion
+            if self.use_content_cross_attn
             else None
         )
-        self.norm_content_cond = (
+        self.norm_content_kv = (
             nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
-            if self.use_content_fusion
+            if self.use_content_cross_attn
             else None
         )
         self.norm_self = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
         self.norm_mlp = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
 
-        self.content_fuse = nn.Linear(hidden_dim * 2, hidden_dim) if self.use_content_fusion else None
+        self.content_cross_attn = (
+            SDPAAttention(hidden_dim, content_cross_attn_heads) if self.use_content_cross_attn else None
+        )
+        self.content_modulation = (
+            nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(hidden_dim, hidden_dim * 3),
+            )
+            if self.use_content_cross_attn
+            else None
+        )
         self.self_attn = SDPAAttention(hidden_dim, num_heads)
         self.mlp = FeedForward(hidden_dim, mlp_ratio)
 
@@ -102,36 +114,47 @@ class GlyphDiTBlock(nn.Module):
         )
         nn.init.zeros_(self.modulation[-1].weight)
         nn.init.zeros_(self.modulation[-1].bias)
+        if self.content_modulation is not None:
+            nn.init.zeros_(self.content_modulation[-1].weight)
+            nn.init.zeros_(self.content_modulation[-1].bias)
 
     def forward(
         self,
         patch_tokens: torch.Tensor,
         *,
-        cond: torch.Tensor,
+        self_cond: torch.Tensor,
+        content_time_cond: torch.Tensor | None,
         content_tokens: torch.Tensor | None,
     ) -> torch.Tensor:
-        modulation_chunks = self.modulation(cond).chunk(self.modulation_chunk_count, dim=-1)
+        modulation_chunks = self.modulation(self_cond).chunk(self.modulation_chunk_count, dim=-1)
         shift_self, scale_self, gate_self, shift_mlp, scale_mlp, gate_mlp = modulation_chunks
 
         x = patch_tokens
-        if self.use_content_fusion:
+        if self.use_content_cross_attn:
             if (
-                content_tokens is None
-                or self.norm_content_x is None
-                or self.norm_content_cond is None
-                or self.content_fuse is None
+                content_time_cond is None
+                or content_tokens is None
+                or self.norm_content_query is None
+                or self.norm_content_kv is None
+                or self.content_cross_attn is None
+                or self.content_modulation is None
             ):
-                raise RuntimeError("content_tokens must be provided when content fusion is enabled")
+                raise RuntimeError(
+                    "content_time_cond and content_tokens must be provided when content cross-attention is enabled"
+                )
             if content_tokens.shape[:2] != x.shape[:2]:
                 raise RuntimeError(
                     "content token shape mismatch: "
                     f"expected {tuple(x.shape[:2])}, got {tuple(content_tokens.shape[:2])}"
                 )
-            fused = torch.cat(
-                [self.norm_content_x(x), self.norm_content_cond(content_tokens)],
-                dim=-1,
+            shift_content, scale_content, gate_content = self.content_modulation(content_time_cond).chunk(3, dim=-1)
+            content_out, _ = self.content_cross_attn(
+                modulate(self.norm_content_query(x), shift_content, scale_content),
+                self.norm_content_kv(content_tokens),
+                self.norm_content_kv(content_tokens),
+                need_weights=False,
             )
-            x = x + self.content_fuse(fused)
+            x = x + gate_content.unsqueeze(1) * content_out
 
         q = modulate(self.norm_self(x), shift_self, scale_self)
         self_out, _ = self.self_attn(q, q, q, need_weights=False)
@@ -152,11 +175,10 @@ class DiffusionTransformerBackbone(nn.Module):
         hidden_dim: int = 512,
         depth: int = 16,
         num_heads: int = 8,
+        content_cross_attn_heads: int | None = None,
         mlp_ratio: float = 4.0,
-        content_fusion_start: int | None = None,
-        content_fusion_end: int | None = None,
-        style_fusion_start: int | None = None,
-        style_fusion_end: int | None = None,
+        content_cross_attn_layers: Sequence[int] | None = None,
+        style_modulation_layers: Sequence[int] | None = None,
     ) -> None:
         super().__init__()
         if image_size % patch_size != 0:
@@ -167,45 +189,35 @@ class DiffusionTransformerBackbone(nn.Module):
         self.hidden_dim = int(hidden_dim)
         self.depth = int(depth)
         self.num_heads = int(num_heads)
+        self.content_cross_attn_heads = (
+            self.num_heads if content_cross_attn_heads is None else int(content_cross_attn_heads)
+        )
         self.grid_size = self.image_size // self.patch_size
         self.num_tokens = self.grid_size * self.grid_size
-        if content_fusion_start is None and content_fusion_end is None:
-            self.content_fusion_start = 0
-            self.content_fusion_end = min(self.depth, 6)
-        else:
-            self.content_fusion_start = max(
-                0,
-                min(self.depth, 0 if content_fusion_start is None else int(content_fusion_start)),
-            )
-            self.content_fusion_end = max(
-                self.content_fusion_start,
-                min(self.depth, self.depth if content_fusion_end is None else int(content_fusion_end)),
-            )
-        self.content_fusion_layers = self.content_fusion_end - self.content_fusion_start
-
-        if style_fusion_start is None and style_fusion_end is None:
-            self.style_fusion_start = max(0, self.depth - 6)
-            self.style_fusion_end = self.depth
-        else:
-            self.style_fusion_start = max(
-                0,
-                min(self.depth, 0 if style_fusion_start is None else int(style_fusion_start)),
-            )
-            self.style_fusion_end = max(
-                self.style_fusion_start,
-                min(self.depth, self.depth if style_fusion_end is None else int(style_fusion_end)),
-            )
+        self.content_cross_attn_layers = self._normalize_layer_indices(
+            content_cross_attn_layers,
+            default_layers=range(1, min(self.depth, 6) + 1),
+            depth=self.depth,
+            field_name="content_cross_attn_layers",
+        )
+        self.style_modulation_layers = self._normalize_layer_indices(
+            style_modulation_layers,
+            default_layers=range(max(1, self.depth - 5), self.depth + 1),
+            depth=self.depth,
+            field_name="style_modulation_layers",
+        )
+        content_layer_set = set(self.content_cross_attn_layers)
+        style_layer_set = set(self.style_modulation_layers)
 
         self.content_layer_mask = [
-            self.content_fusion_start <= block_idx < self.content_fusion_end
+            (block_idx + 1) in content_layer_set
             for block_idx in range(self.depth)
         ]
         self.style_layer_mask = [
-            self.style_fusion_start <= block_idx < self.style_fusion_end
+            (block_idx + 1) in style_layer_set
             for block_idx in range(self.depth)
         ]
-        self.has_content_fusion = any(self.content_layer_mask)
-        self.has_style_modulation = any(self.style_layer_mask)
+        self.has_content_cross_attn = any(self.content_layer_mask)
 
         self.patch_embed = nn.Conv2d(
             self.in_channels,
@@ -228,12 +240,36 @@ class DiffusionTransformerBackbone(nn.Module):
                 GlyphDiTBlock(
                     self.hidden_dim,
                     self.num_heads,
+                    self.content_cross_attn_heads,
                     mlp_ratio,
-                    use_content_fusion=self.content_layer_mask[block_idx],
+                    use_content_cross_attn=self.content_layer_mask[block_idx],
                     use_style_modulation=self.style_layer_mask[block_idx],
                 )
             )
         self.final_norm = nn.LayerNorm(self.hidden_dim, eps=1e-6)
+
+    @staticmethod
+    def _normalize_layer_indices(
+        layers: Sequence[int] | None,
+        *,
+        default_layers: Sequence[int],
+        depth: int,
+        field_name: str,
+    ) -> tuple[int, ...]:
+        raw_layers = default_layers if layers is None else layers
+        if isinstance(raw_layers, (str, bytes)):
+            raise TypeError(f"{field_name} must be a sequence of integers, got {type(raw_layers).__name__}")
+        normalized: list[int] = []
+        seen: set[int] = set()
+        for raw_idx in raw_layers:
+            layer_idx = int(raw_idx)
+            if layer_idx < 1 or layer_idx > int(depth):
+                raise ValueError(f"{field_name} entries must be in [1, {depth}], got {layer_idx}")
+            if layer_idx in seen:
+                continue
+            normalized.append(layer_idx)
+            seen.add(layer_idx)
+        return tuple(normalized)
 
     def forward(
         self,
@@ -260,16 +296,21 @@ class DiffusionTransformerBackbone(nn.Module):
         time_cond = self.time_mlp(time_cond)
         style_cond = self.style_cond_proj(style_global.to(device=x.device, dtype=x.dtype))
 
-        content_tokens = content_tokens.to(device=x.device, dtype=x.dtype) if self.has_content_fusion else None
+        if self.has_content_cross_attn:
+            content_tokens = content_tokens.to(device=x.device, dtype=x.dtype)
+            content_tokens = content_tokens + self.pos_embed.to(device=x.device, dtype=x.dtype)
+        else:
+            content_tokens = None
 
         for block in self.blocks:
-            block_cond = time_cond
+            self_cond = time_cond
             if block.use_style_modulation:
-                block_cond = block_cond + style_cond
+                self_cond = self_cond + style_cond
             x = block(
                 x,
-                cond=block_cond,
-                content_tokens=content_tokens if block.use_content_fusion else None,
+                self_cond=self_cond,
+                content_time_cond=time_cond if block.use_content_cross_attn else None,
+                content_tokens=content_tokens if block.use_content_cross_attn else None,
             )
 
         return self.final_norm(x)
