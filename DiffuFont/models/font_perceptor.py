@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Dict, List, Sequence
 
@@ -259,15 +258,6 @@ def style_similarity_stats(
     }
 
 
-def _load_json_if_exists(path: Path) -> dict | None:
-    if not path.is_file():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None
-
-
 def load_font_perceptor_from_checkpoint(
     checkpoint_path: str | Path,
     *,
@@ -281,8 +271,6 @@ def load_font_perceptor_from_checkpoint(
     model = FontPerceptor(**model_config)
     model.load_state_dict(checkpoint["model_state"], strict=True)
     report = checkpoint.get("qualification")
-    if report is None:
-        report = _load_json_if_exists(checkpoint_path.parent / "qualification_report.json")
     return model, checkpoint, report
 
 

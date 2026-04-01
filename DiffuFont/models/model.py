@@ -67,6 +67,32 @@ def _hold_then_linear_scale(
     return 1.0 + (min_scale - 1.0) * progress
 
 
+def _hold_then_linear_value(
+    *,
+    step: int,
+    total_steps: int,
+    start_value: float,
+    end_value: float,
+    hold_start_step: Optional[int] = None,
+) -> float:
+    step = max(0, int(step))
+    total_steps = max(1, int(total_steps))
+    start_value = float(start_value)
+    end_value = float(end_value)
+
+    if hold_start_step is None:
+        return start_value
+
+    start_step = max(0, min(int(hold_start_step), total_steps))
+    if step < start_step:
+        return start_value
+
+    final_step = max(start_step, total_steps - 1)
+    decay_steps = max(1, final_step - start_step)
+    progress = min(max(float(step - start_step) / float(decay_steps), 0.0), 1.0)
+    return start_value + (end_value - start_value) * progress
+
+
 def _normalized_logistic_t_scale(
     timesteps: torch.Tensor,
     *,
@@ -101,6 +127,7 @@ class _BaseTrainer:
         val_every_steps: Optional[int] = None,
         val_max_batches: Optional[int] = 16,
         grad_clip_norm: Optional[float] = 1.0,
+        grad_clip_min_norm: Optional[float] = None,
         track_best_on_val: bool = False,
     ) -> None:
         self.model = model.to(device)
@@ -111,6 +138,12 @@ class _BaseTrainer:
         self.val_every_steps = self.log_every_steps if val_every_steps is None else max(1, int(val_every_steps))
         self.val_max_batches = None if val_max_batches is None else max(1, int(val_max_batches))
         self.grad_clip_norm = None if grad_clip_norm is None or float(grad_clip_norm) <= 0.0 else float(grad_clip_norm)
+        if self.grad_clip_norm is None:
+            self.grad_clip_min_norm = None
+        elif grad_clip_min_norm is None:
+            self.grad_clip_min_norm = self.grad_clip_norm
+        else:
+            self.grad_clip_min_norm = max(0.0, min(float(grad_clip_min_norm), self.grad_clip_norm))
         self.track_best_on_val = bool(track_best_on_val)
         self.global_step = 0
         self.current_epoch = 0
@@ -126,7 +159,7 @@ class _BaseTrainer:
         if not params:
             raise RuntimeError("No trainable parameters found.")
         self.trainable_params = params
-        self.optimizer = torch.optim.AdamW(params, lr=float(lr), weight_decay=0.05)
+        self.optimizer = torch.optim.AdamW(params, lr=float(lr), weight_decay=0.0)
         self.base_lrs = [float(group["lr"]) for group in self.optimizer.param_groups]
         self.lr_warmup_steps = max(0, int(lr_warmup_steps))
         self.lr_decay_start_step = None if lr_decay_start_step is None else max(0, int(lr_decay_start_step))
@@ -146,15 +179,29 @@ class _BaseTrainer:
         for group, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
             group["lr"] = float(base_lr) * float(lr_scale)
 
-    def _apply_grad_clip(self) -> Dict[str, float]:
+    def _grad_clip_value_for_step(self, step: int) -> Optional[float]:
+        if self.grad_clip_norm is None:
+            return None
+        return _hold_then_linear_value(
+            step=step,
+            total_steps=self.total_steps,
+            start_value=self.grad_clip_norm,
+            end_value=self.grad_clip_min_norm if self.grad_clip_min_norm is not None else self.grad_clip_norm,
+            hold_start_step=self.lr_decay_start_step,
+        )
+
+    def _apply_grad_clip(self, *, step: int) -> Dict[str, float]:
         if self.grad_clip_norm is None:
             return {}
-        grad_norm = torch.nn.utils.clip_grad_norm_(self.trainable_params, self.grad_clip_norm)
+        clip_value = self._grad_clip_value_for_step(step)
+        if clip_value is None:
+            return {}
+        grad_norm = torch.nn.utils.clip_grad_norm_(self.trainable_params, clip_value)
         if torch.is_tensor(grad_norm):
             grad_norm = float(grad_norm.detach().item())
         else:
             grad_norm = float(grad_norm)
-        return {"grad_norm": grad_norm}
+        return {"grad_norm": grad_norm, "grad_clip_norm_threshold": float(clip_value)}
 
     def _autocast_context(self):
         if self.device.type == "cuda":
@@ -362,6 +409,7 @@ class FontPerceptorTrainer(_BaseTrainer):
         val_every_steps: Optional[int] = None,
         val_max_batches: Optional[int] = 16,
         grad_clip_norm: Optional[float] = 1.0,
+        grad_clip_min_norm: Optional[float] = None,
     ) -> None:
         super().__init__(
             model,
@@ -376,6 +424,7 @@ class FontPerceptorTrainer(_BaseTrainer):
             val_every_steps=val_every_steps,
             val_max_batches=val_max_batches,
             grad_clip_norm=grad_clip_norm,
+            grad_clip_min_norm=grad_clip_min_norm,
             track_best_on_val=True,
         )
         self.style_supcon_lambda = float(style_supcon_lambda)
@@ -424,7 +473,7 @@ class FontPerceptorTrainer(_BaseTrainer):
         self.optimizer.zero_grad(set_to_none=True)
         metrics = self._compute_losses(batch)
         metrics["loss"].backward()
-        metrics.update(self._apply_grad_clip())
+        metrics.update(self._apply_grad_clip(step=self.global_step + 1))
         self.optimizer.step()
         return _metrics_to_floats(metrics)
 
@@ -446,6 +495,7 @@ class FontPerceptorTrainer(_BaseTrainer):
                     "qualify_min_char_acc": float(self.qualify_min_char_acc),
                     "qualify_min_style_margin": float(self.qualify_min_style_margin),
                     "grad_clip_norm": None if self.grad_clip_norm is None else float(self.grad_clip_norm),
+                    "grad_clip_min_norm": None if self.grad_clip_min_norm is None else float(self.grad_clip_min_norm),
                 },
                 "step": int(self.global_step),
                 "epoch": int(self.current_epoch),
@@ -459,10 +509,7 @@ class FontPerceptorTrainer(_BaseTrainer):
             raise RuntimeError("Font perceptor checkpoint is missing 'model_state'.")
         self.model.load_state_dict(checkpoint["model_state"], strict=True)
         if "optimizer_state" in checkpoint:
-            try:
-                self.optimizer.load_state_dict(checkpoint["optimizer_state"])
-            except ValueError as exc:
-                print(f"[font_perceptor] skipped optimizer state load: {exc}", flush=True)
+            self.optimizer.load_state_dict(checkpoint["optimizer_state"])
         trainer_config = checkpoint.get("trainer_config", {})
         if isinstance(trainer_config, dict):
             self.style_supcon_lambda = float(trainer_config.get("style_supcon_lambda", self.style_supcon_lambda))
@@ -473,6 +520,12 @@ class FontPerceptorTrainer(_BaseTrainer):
             self.qualify_min_style_margin = float(
                 trainer_config.get("qualify_min_style_margin", self.qualify_min_style_margin)
             )
+            if "grad_clip_min_norm" in trainer_config and self.grad_clip_norm is not None:
+                restored_clip_min = trainer_config["grad_clip_min_norm"]
+                if restored_clip_min is None:
+                    self.grad_clip_min_norm = self.grad_clip_norm
+                else:
+                    self.grad_clip_min_norm = max(0.0, min(float(restored_clip_min), self.grad_clip_norm))
         self.global_step = int(checkpoint.get("step", 0))
         self.current_epoch = int(checkpoint.get("epoch", 0))
 
@@ -503,6 +556,7 @@ class FlowTrainer(_BaseTrainer):
         val_every_steps: Optional[int] = None,
         val_max_batches: Optional[int] = 16,
         grad_clip_norm: Optional[float] = 1.0,
+        grad_clip_min_norm: Optional[float] = None,
     ) -> None:
         super().__init__(
             model,
@@ -517,6 +571,7 @@ class FlowTrainer(_BaseTrainer):
             val_every_steps=val_every_steps,
             val_max_batches=val_max_batches,
             grad_clip_norm=grad_clip_norm,
+            grad_clip_min_norm=grad_clip_min_norm,
             track_best_on_val=True,
         )
         self.lambda_flow = float(lambda_flow)
@@ -622,7 +677,9 @@ class FlowTrainer(_BaseTrainer):
         with self._autocast_context():
             x1 = target
             x0 = torch.randn_like(x1)
-            timesteps = torch.rand(x1.size(0), device=self.device)
+            # Avoid the most extreme endpoints, which are the least stable region for the current conditioning path.
+            t_eps = 0.02
+            timesteps = t_eps + (1.0 - 2.0 * t_eps) * torch.rand(x1.size(0), device=self.device)
             t_view = timesteps.view(-1, 1, 1, 1).to(dtype=x1.dtype)
             xt = (1.0 - t_view) * x0 + t_view * x1
             target_flow = x1 - x0
@@ -696,7 +753,7 @@ class FlowTrainer(_BaseTrainer):
         self.optimizer.zero_grad(set_to_none=True)
         metrics = self._compute_losses(batch, step=self.global_step + 1)
         metrics["loss"].backward()
-        metrics.update(self._apply_grad_clip())
+        metrics.update(self._apply_grad_clip(step=self.global_step + 1))
         self.optimizer.step()
         self._update_ema()
         return _metrics_to_floats(metrics)
@@ -788,6 +845,7 @@ class FlowTrainer(_BaseTrainer):
                     "perceptual_loss_t_midpoint": float(self.perceptual_loss_t_midpoint),
                     "style_loss_t_midpoint": float(self.style_loss_t_midpoint),
                     "grad_clip_norm": None if self.grad_clip_norm is None else float(self.grad_clip_norm),
+                    "grad_clip_min_norm": None if self.grad_clip_min_norm is None else float(self.grad_clip_min_norm),
                 },
                 "step": int(self.global_step),
                 "epoch": int(self.current_epoch),
@@ -802,10 +860,7 @@ class FlowTrainer(_BaseTrainer):
         self.model.load_state_dict(checkpoint["model_state"], strict=True)
         resume_step = int(checkpoint.get("step", 0))
         if "optimizer_state" in checkpoint:
-            try:
-                self.optimizer.load_state_dict(checkpoint["optimizer_state"])
-            except ValueError as exc:
-                print(f"[flow] skipped optimizer state load: {exc}", flush=True)
+            self.optimizer.load_state_dict(checkpoint["optimizer_state"])
         trainer_config = checkpoint.get("trainer_config", {})
         if isinstance(trainer_config, dict):
             if "base_lrs" in trainer_config and isinstance(trainer_config["base_lrs"], list):
@@ -838,6 +893,12 @@ class FlowTrainer(_BaseTrainer):
                 self.perceptual_loss_t_midpoint = min(max(float(trainer_config["perceptual_loss_t_midpoint"]), 0.0), 1.0)
             if "style_loss_t_midpoint" in trainer_config:
                 self.style_loss_t_midpoint = min(max(float(trainer_config["style_loss_t_midpoint"]), 0.0), 1.0)
+            if "grad_clip_min_norm" in trainer_config and self.grad_clip_norm is not None:
+                restored_clip_min = trainer_config["grad_clip_min_norm"]
+                if restored_clip_min is None:
+                    self.grad_clip_min_norm = self.grad_clip_norm
+                else:
+                    self.grad_clip_min_norm = max(0.0, min(float(restored_clip_min), self.grad_clip_norm))
             if self.use_cnn_perceptor and self.perceptor_checkpoint is None and trainer_config.get("perceptor_checkpoint"):
                 self.perceptor_checkpoint = str(trainer_config["perceptor_checkpoint"])
         else:

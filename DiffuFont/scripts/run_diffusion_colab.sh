@@ -12,7 +12,7 @@ PID_FILE=""
 SAVE_DIR="checkpoints/flow_$(date '+%Y%m%d_%H%M%S')"
 
 RESUME_CKPT=""
-DEVICE_ARG="auto"
+DEVICE_ARG="cuda:1"
 SEED=42
 FONT_SPLIT="train"
 FONT_SPLIT_SEED=""
@@ -27,14 +27,15 @@ VAL_EVERY=100
 VAL_MAX_BATCHES=16
 LR="1e-4"
 LR_WARMUP_STEPS=0
-LR_DECAY_START_STEP="50000"
+LR_DECAY_START_STEP="30000"
 LR_MIN_SCALE="0.1"
 GRAD_CLIP_NORM="1.0"
+GRAD_CLIP_MIN_NORM="0.5"
 
 STYLE_REF_COUNT=0
 STYLE_REF_COUNT_MIN=4
-STYLE_REF_COUNT_MAX=6
-BATCH_SIZE=128
+STYLE_REF_COUNT_MAX=4
+BATCH_SIZE=256
 NUM_WORKERS=8
 MAX_FONTS=0
 IMAGE_SIZE=128
@@ -46,8 +47,8 @@ DIT_DEPTH=12
 DIT_HEADS=8
 CONTENT_CROSS_ATTN_HEADS="4"
 DIT_MLP_RATIO="4.0"
-CONTENT_CROSS_ATTN_LAYERS="1,2,4,6,8,10"
-STYLE_MODULATION_LAYERS="3,5,7,9,11,12"
+CONTENT_CROSS_ATTN_LAYERS="2,4,6,8,10"
+STYLE_MODULATION_LAYERS="1,2,3,4,5,6,7,8,9,10,11,12"
 DETAILER_BASE_CHANNELS=32
 DETAILER_MAX_CHANNELS=256
 
@@ -61,7 +62,7 @@ PERCEPTUAL_LOSS_T_MIDPOINT="0.35"
 STYLE_LOSS_T_MIDPOINT="0.45"
 FLOW_SAMPLE_STEPS=20
 EMA_DECAY="0"
-TRAIN_SAMPLING="cartesian_font_char"
+TRAIN_SAMPLING="shuffle"
 CARTESIAN_FONTS_PER_BATCH=64
 CARTESIAN_CHARS_PER_BATCH=4
 
@@ -92,6 +93,7 @@ while [[ $# -gt 0 ]]; do
     --lr-decay-start-step) LR_DECAY_START_STEP="${2:?}"; shift 2 ;;
     --lr-min-scale) LR_MIN_SCALE="${2:?}"; shift 2 ;;
     --grad-clip-norm) GRAD_CLIP_NORM="${2:?}"; shift 2 ;;
+    --grad-clip-min-norm) GRAD_CLIP_MIN_NORM="${2:?}"; shift 2 ;;
     --flow-lambda) FLOW_LAMBDA="${2:?}"; shift 2 ;;
     --use-cnn-perceptor) USE_CNN_PERCEPTOR="1"; shift ;;
     --no-use-cnn-perceptor) USE_CNN_PERCEPTOR="0"; shift ;;
@@ -178,6 +180,7 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --lr-decay-start-step "${LR_DECAY_START_STEP}"
     --lr-min-scale "${LR_MIN_SCALE}"
     --grad-clip-norm "${GRAD_CLIP_NORM}"
+    --grad-clip-min-norm "${GRAD_CLIP_MIN_NORM}"
     --flow-lambda "${FLOW_LAMBDA}"
     --perceptual-loss-lambda "${PERCEPTUAL_LOSS_LAMBDA}"
     --style-loss-lambda "${STYLE_LOSS_LAMBDA}"
@@ -384,6 +387,7 @@ cmd_common=(
   --lr-decay-start-step "${LR_DECAY_START_STEP}"
   --lr-min-scale "${LR_MIN_SCALE}"
   --grad-clip-norm "${GRAD_CLIP_NORM}"
+  --grad-clip-min-norm "${GRAD_CLIP_MIN_NORM}"
   --batch "${BATCH_SIZE}"
   --num-workers "${NUM_WORKERS}"
   --style-ref-count "${STYLE_REF_COUNT}"

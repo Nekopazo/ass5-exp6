@@ -77,6 +77,7 @@ class GlyphDiTBlock(nn.Module):
         use_style_modulation: bool = True,
     ) -> None:
         super().__init__()
+        layer_scale_init = 1e-2
         self.use_content_cross_attn = bool(use_content_cross_attn)
         self.use_style_modulation = bool(use_style_modulation)
         self.norm_content_query = (
@@ -105,6 +106,12 @@ class GlyphDiTBlock(nn.Module):
         )
         self.self_attn = SDPAAttention(hidden_dim, num_heads)
         self.mlp = FeedForward(hidden_dim, mlp_ratio)
+        if self.use_content_cross_attn:
+            self.content_layer_scale = nn.Parameter(torch.full((hidden_dim,), float(layer_scale_init)))
+        else:
+            self.content_layer_scale = None
+        self.self_layer_scale = nn.Parameter(torch.full((hidden_dim,), float(layer_scale_init)))
+        self.mlp_layer_scale = nn.Parameter(torch.full((hidden_dim,), float(layer_scale_init)))
 
         self.modulation_chunk_count = 6
 
@@ -112,11 +119,15 @@ class GlyphDiTBlock(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim * self.modulation_chunk_count),
         )
+        self.mod_input_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
         nn.init.zeros_(self.modulation[-1].weight)
         nn.init.zeros_(self.modulation[-1].bias)
         if self.content_modulation is not None:
+            self.content_mod_input_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
             nn.init.zeros_(self.content_modulation[-1].weight)
             nn.init.zeros_(self.content_modulation[-1].bias)
+        else:
+            self.content_mod_input_norm = None
 
     def forward(
         self,
@@ -126,10 +137,14 @@ class GlyphDiTBlock(nn.Module):
         content_time_cond: torch.Tensor | None,
         content_tokens: torch.Tensor | None,
     ) -> torch.Tensor:
-        modulation_chunks = self.modulation(self_cond).chunk(self.modulation_chunk_count, dim=-1)
+        modulation_chunks = self.modulation(self.mod_input_norm(self_cond)).chunk(self.modulation_chunk_count, dim=-1)
         shift_self, scale_self, gate_self, shift_mlp, scale_mlp, gate_mlp = modulation_chunks
 
         x = patch_tokens
+        q = modulate(self.norm_self(x), shift_self, scale_self)
+        self_out, _ = self.self_attn(q, q, q, need_weights=False)
+        x = x + self.self_layer_scale.view(1, 1, -1) * gate_self.unsqueeze(1) * self_out
+
         if self.use_content_cross_attn:
             if (
                 content_time_cond is None
@@ -147,21 +162,19 @@ class GlyphDiTBlock(nn.Module):
                     "content token shape mismatch: "
                     f"expected {tuple(x.shape[:2])}, got {tuple(content_tokens.shape[:2])}"
                 )
-            shift_content, scale_content, gate_content = self.content_modulation(content_time_cond).chunk(3, dim=-1)
+            shift_content, scale_content, gate_content = self.content_modulation(
+                self.content_mod_input_norm(content_time_cond)
+            ).chunk(3, dim=-1)
             content_out, _ = self.content_cross_attn(
                 modulate(self.norm_content_query(x), shift_content, scale_content),
                 self.norm_content_kv(content_tokens),
                 self.norm_content_kv(content_tokens),
                 need_weights=False,
             )
-            x = x + gate_content.unsqueeze(1) * content_out
-
-        q = modulate(self.norm_self(x), shift_self, scale_self)
-        self_out, _ = self.self_attn(q, q, q, need_weights=False)
-        x = x + gate_self.unsqueeze(1) * self_out
+            x = x + self.content_layer_scale.view(1, 1, -1) * gate_content.unsqueeze(1) * content_out
 
         mlp_out = self.mlp(modulate(self.norm_mlp(x), shift_mlp, scale_mlp))
-        x = x + gate_mlp.unsqueeze(1) * mlp_out
+        x = x + self.mlp_layer_scale.view(1, 1, -1) * gate_mlp.unsqueeze(1) * mlp_out
         return x
 
 
@@ -233,6 +246,8 @@ class DiffusionTransformerBackbone(nn.Module):
             nn.SiLU(),
             nn.Linear(self.hidden_dim, self.hidden_dim),
         )
+        # Keep long-run time conditioning amplitude stable before it enters modulation heads.
+        self.time_cond_norm = nn.LayerNorm(self.hidden_dim, elementwise_affine=False, eps=1e-6)
         self.style_cond_proj = nn.Linear(self.hidden_dim, self.hidden_dim)
         self.blocks = nn.ModuleList()
         for block_idx in range(self.depth):
@@ -294,6 +309,7 @@ class DiffusionTransformerBackbone(nn.Module):
 
         time_cond = timestep_embedding(timesteps, self.hidden_dim).to(dtype=x.dtype)
         time_cond = self.time_mlp(time_cond)
+        time_cond = self.time_cond_norm(time_cond)
         style_cond = self.style_cond_proj(style_global.to(device=x.device, dtype=x.dtype))
 
         if self.has_content_cross_attn:

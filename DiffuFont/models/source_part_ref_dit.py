@@ -224,6 +224,8 @@ class PatchDetailerHead(nn.Module):
             current_ch = skip_ch
 
         self.out_proj = nn.Conv2d(current_ch, self.in_channels, kernel_size=1)
+        nn.init.zeros_(self.out_proj.weight)
+        nn.init.zeros_(self.out_proj.bias)
 
     def forward(self, patch_tokens: torch.Tensor, noisy_patches: torch.Tensor) -> torch.Tensor:
         if patch_tokens.dim() != 3:
@@ -411,11 +413,11 @@ class SourcePartRefDiT(nn.Module):
 
         style_features = self.style_encoder(flat_style)
         style_vectors = F.adaptive_avg_pool2d(style_features, output_size=1).flatten(1)
-        style_vectors = F.normalize(style_vectors, dim=-1, eps=1e-6)
         style_vectors = style_vectors.view(batch, refs, style_vectors.size(-1))
         ref_weights = ref_valid_mask.to(device=style_vectors.device, dtype=style_vectors.dtype)
         ref_weight_sum = ref_weights.sum(dim=1, keepdim=True).clamp_min(1.0)
         pooled_style = (style_vectors * ref_weights.unsqueeze(-1)).sum(dim=1) / ref_weight_sum
+        pooled_style = F.normalize(pooled_style, dim=-1, eps=1e-6)
         style_global = self.style_global_proj(pooled_style)
         return style_global
 

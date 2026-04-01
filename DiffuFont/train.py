@@ -256,6 +256,7 @@ def main() -> None:
     parser.add_argument("--save-every-steps", type=int, required=True)
     parser.add_argument("--sample-every-steps", type=int, required=True)
     parser.add_argument("--grad-clip-norm", type=float, required=True)
+    parser.add_argument("--grad-clip-min-norm", type=float, default=None)
 
     parser.add_argument("--flow-lambda", type=float, required=True)
     use_cnn_perceptor_group = parser.add_mutually_exclusive_group(required=True)
@@ -402,6 +403,7 @@ def main() -> None:
         val_every_steps=val_every_steps,
         val_max_batches=int(args.val_max_batches),
         grad_clip_norm=float(args.grad_clip_norm),
+        grad_clip_min_norm=None if args.grad_clip_min_norm is None else float(args.grad_clip_min_norm),
     )
 
     if args.resume is not None:
@@ -448,6 +450,7 @@ def main() -> None:
     run_config["lr_warmup_steps"] = int(args.lr_warmup_steps)
     run_config["lr_decay_start_step"] = None if int(args.lr_decay_start_step) < 0 else int(args.lr_decay_start_step)
     run_config["lr_min_scale"] = float(args.lr_min_scale)
+    run_config["grad_clip_min_norm"] = None if args.grad_clip_min_norm is None else float(args.grad_clip_min_norm)
 
     (args.save_dir / "train_config.json").write_text(
         json.dumps(run_config, ensure_ascii=False, indent=2, sort_keys=True),
