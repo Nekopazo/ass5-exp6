@@ -33,8 +33,8 @@ GRAD_CLIP_NORM="1.0"
 GRAD_CLIP_MIN_NORM="0.5"
 
 STYLE_REF_COUNT=0
-STYLE_REF_COUNT_MIN=4
-STYLE_REF_COUNT_MAX=4
+STYLE_REF_COUNT_MIN=6
+STYLE_REF_COUNT_MAX=6
 BATCH_SIZE=256
 NUM_WORKERS=8
 MAX_FONTS=0
@@ -48,7 +48,7 @@ DIT_HEADS=8
 CONTENT_CROSS_ATTN_HEADS="4"
 DIT_MLP_RATIO="4.0"
 CONTENT_CROSS_ATTN_LAYERS="2,4,6,8,10"
-STYLE_MODULATION_LAYERS="1,2,3,4,5,6,7,8,9,10,11,12"
+STYLE_MODULATION_LAYERS="5,7,9"
 DETAILER_BASE_CHANNELS=32
 DETAILER_MAX_CHANNELS=256
 
@@ -57,12 +57,15 @@ USE_CNN_PERCEPTOR="1"
 PERCEPTOR_CHECKPOINT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/font_perceptor_20260328_123942/best.pt"
 PERCEPTUAL_LOSS_LAMBDA="0.2"
 STYLE_LOSS_LAMBDA="0.05"
+STYLE_BATCH_SUPCON_LAMBDA="0.01"
+PIXEL_LOSS_LAMBDA="0.05"
 AUX_LOSS_T_LOGISTIC_STEEPNESS="8.0"
 PERCEPTUAL_LOSS_T_MIDPOINT="0.35"
 STYLE_LOSS_T_MIDPOINT="0.45"
+PIXEL_LOSS_T_MIDPOINT="0.55"
 FLOW_SAMPLE_STEPS=20
 EMA_DECAY="0"
-TRAIN_SAMPLING="shuffle"
+TRAIN_SAMPLING="cartesian_font_char"
 CARTESIAN_FONTS_PER_BATCH=64
 CARTESIAN_CHARS_PER_BATCH=4
 
@@ -100,9 +103,12 @@ while [[ $# -gt 0 ]]; do
     --perceptor-checkpoint) PERCEPTOR_CHECKPOINT="${2:?}"; shift 2 ;;
     --perceptual-loss-lambda) PERCEPTUAL_LOSS_LAMBDA="${2:?}"; shift 2 ;;
     --style-loss-lambda) STYLE_LOSS_LAMBDA="${2:?}"; shift 2 ;;
+    --style-batch-supcon-lambda) STYLE_BATCH_SUPCON_LAMBDA="${2:?}"; shift 2 ;;
+    --pixel-loss-lambda) PIXEL_LOSS_LAMBDA="${2:?}"; shift 2 ;;
     --aux-loss-t-logistic-steepness) AUX_LOSS_T_LOGISTIC_STEEPNESS="${2:?}"; shift 2 ;;
     --perceptual-loss-t-midpoint) PERCEPTUAL_LOSS_T_MIDPOINT="${2:?}"; shift 2 ;;
     --style-loss-t-midpoint) STYLE_LOSS_T_MIDPOINT="${2:?}"; shift 2 ;;
+    --pixel-loss-t-midpoint) PIXEL_LOSS_T_MIDPOINT="${2:?}"; shift 2 ;;
     --flow-sample-steps) FLOW_SAMPLE_STEPS="${2:?}"; shift 2 ;;
     --ema-decay) EMA_DECAY="${2:?}"; shift 2 ;;
     --style-ref-count) STYLE_REF_COUNT="${2:?}"; shift 2 ;;
@@ -184,6 +190,7 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --flow-lambda "${FLOW_LAMBDA}"
     --perceptual-loss-lambda "${PERCEPTUAL_LOSS_LAMBDA}"
     --style-loss-lambda "${STYLE_LOSS_LAMBDA}"
+    --style-batch-supcon-lambda "${STYLE_BATCH_SUPCON_LAMBDA}"
     --flow-sample-steps "${FLOW_SAMPLE_STEPS}"
     --ema-decay "${EMA_DECAY}"
     --style-ref-count "${STYLE_REF_COUNT}"
@@ -412,9 +419,12 @@ cmd_common=(
   --flow-lambda "${FLOW_LAMBDA}"
   --perceptual-loss-lambda "${PERCEPTUAL_LOSS_LAMBDA}"
   --style-loss-lambda "${STYLE_LOSS_LAMBDA}"
+  --style-batch-supcon-lambda "${STYLE_BATCH_SUPCON_LAMBDA}"
+  --pixel-loss-lambda "${PIXEL_LOSS_LAMBDA}"
   --aux-loss-t-logistic-steepness "${AUX_LOSS_T_LOGISTIC_STEEPNESS}"
   --perceptual-loss-t-midpoint "${PERCEPTUAL_LOSS_T_MIDPOINT}"
   --style-loss-t-midpoint "${STYLE_LOSS_T_MIDPOINT}"
+  --pixel-loss-t-midpoint "${PIXEL_LOSS_T_MIDPOINT}"
   --flow-sample-steps "${FLOW_SAMPLE_STEPS}"
   --ema-decay "${EMA_DECAY}"
   --epochs "${EPOCHS}"
@@ -452,7 +462,7 @@ echo "[run_diffusion_colab] batch=${BATCH_SIZE} lr=${LR} lr_warmup_steps=${LR_WA
 echo "[run_diffusion_colab] style_ref_count=${STYLE_REF_COUNT} style_ref_count_min=${STYLE_REF_COUNT_MIN} style_ref_count_max=${STYLE_REF_COUNT_MAX}"
 echo "[run_diffusion_colab] patch_size=${PATCH_SIZE} image_size=${IMAGE_SIZE} flow_sample_steps=${FLOW_SAMPLE_STEPS} flow_lambda=${FLOW_LAMBDA} ema_decay=${EMA_DECAY}"
 echo "[run_diffusion_colab] dit_heads=${DIT_HEADS} content_cross_attn_heads=${CONTENT_CROSS_ATTN_HEADS}"
-echo "[run_diffusion_colab] perceptual_loss_lambda=${PERCEPTUAL_LOSS_LAMBDA} style_loss_lambda=${STYLE_LOSS_LAMBDA} aux_loss_t_logistic_steepness=${AUX_LOSS_T_LOGISTIC_STEEPNESS} perceptual_loss_t_midpoint=${PERCEPTUAL_LOSS_T_MIDPOINT} style_loss_t_midpoint=${STYLE_LOSS_T_MIDPOINT}"
+echo "[run_diffusion_colab] perceptual_loss_lambda=${PERCEPTUAL_LOSS_LAMBDA} style_loss_lambda=${STYLE_LOSS_LAMBDA} style_batch_supcon_lambda=${STYLE_BATCH_SUPCON_LAMBDA} pixel_loss_lambda=${PIXEL_LOSS_LAMBDA} aux_loss_t_logistic_steepness=${AUX_LOSS_T_LOGISTIC_STEEPNESS} perceptual_loss_t_midpoint=${PERCEPTUAL_LOSS_T_MIDPOINT} style_loss_t_midpoint=${STYLE_LOSS_T_MIDPOINT} pixel_loss_t_midpoint=${PIXEL_LOSS_T_MIDPOINT}"
 echo "[run_diffusion_colab] detailer_base_channels=${DETAILER_BASE_CHANNELS} detailer_max_channels=${DETAILER_MAX_CHANNELS}"
 echo "[run_diffusion_colab] content_cross_attn_layers=${CONTENT_CROSS_ATTN_LAYERS} style_modulation_layers=${STYLE_MODULATION_LAYERS}"
 echo "[run_diffusion_colab] train_sampling=${TRAIN_SAMPLING} cartesian_fonts_per_batch=${CARTESIAN_FONTS_PER_BATCH} cartesian_chars_per_batch=${CARTESIAN_CHARS_PER_BATCH}"

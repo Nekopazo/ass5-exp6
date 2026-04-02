@@ -113,15 +113,27 @@ class GlyphDiTBlock(nn.Module):
         self.self_layer_scale = nn.Parameter(torch.full((hidden_dim,), float(layer_scale_init)))
         self.mlp_layer_scale = nn.Parameter(torch.full((hidden_dim,), float(layer_scale_init)))
 
-        self.modulation_chunk_count = 6
+        self.time_modulation_chunk_count = 6
+        self.style_modulation_chunk_count = 2
 
-        self.modulation = nn.Sequential(
+        self.time_modulation = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim * self.modulation_chunk_count),
+            nn.Linear(hidden_dim, hidden_dim * self.time_modulation_chunk_count),
         )
-        self.mod_input_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
-        nn.init.zeros_(self.modulation[-1].weight)
-        nn.init.zeros_(self.modulation[-1].bias)
+        self.time_mod_input_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
+        nn.init.zeros_(self.time_modulation[-1].weight)
+        nn.init.zeros_(self.time_modulation[-1].bias)
+        if self.use_style_modulation:
+            self.style_modulation = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(hidden_dim, hidden_dim * self.style_modulation_chunk_count),
+            )
+            self.style_mod_input_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
+            nn.init.zeros_(self.style_modulation[-1].weight)
+            nn.init.zeros_(self.style_modulation[-1].bias)
+        else:
+            self.style_modulation = None
+            self.style_mod_input_norm = None
         if self.content_modulation is not None:
             self.content_mod_input_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
             nn.init.zeros_(self.content_modulation[-1].weight)
@@ -133,12 +145,26 @@ class GlyphDiTBlock(nn.Module):
         self,
         patch_tokens: torch.Tensor,
         *,
-        self_cond: torch.Tensor,
+        time_cond: torch.Tensor,
+        style_cond: torch.Tensor | None,
         content_time_cond: torch.Tensor | None,
         content_tokens: torch.Tensor | None,
     ) -> torch.Tensor:
-        modulation_chunks = self.modulation(self.mod_input_norm(self_cond)).chunk(self.modulation_chunk_count, dim=-1)
-        shift_self, scale_self, gate_self, shift_mlp, scale_mlp, gate_mlp = modulation_chunks
+        time_chunks = self.time_modulation(self.time_mod_input_norm(time_cond)).chunk(
+            self.time_modulation_chunk_count,
+            dim=-1,
+        )
+        shift_self, scale_self, gate_self, shift_mlp, scale_mlp, gate_mlp = time_chunks
+        if self.use_style_modulation:
+            if style_cond is None or self.style_modulation is None or self.style_mod_input_norm is None:
+                raise RuntimeError("style_cond must be provided when style modulation is enabled")
+            style_chunks = self.style_modulation(self.style_mod_input_norm(style_cond)).chunk(
+                self.style_modulation_chunk_count,
+                dim=-1,
+            )
+            style_scale_mlp, style_gate_mlp = style_chunks
+            scale_mlp = scale_mlp + style_scale_mlp
+            gate_mlp = gate_mlp + style_gate_mlp
 
         x = patch_tokens
         q = modulate(self.norm_self(x), shift_self, scale_self)
@@ -319,12 +345,10 @@ class DiffusionTransformerBackbone(nn.Module):
             content_tokens = None
 
         for block in self.blocks:
-            self_cond = time_cond
-            if block.use_style_modulation:
-                self_cond = self_cond + style_cond
             x = block(
                 x,
-                self_cond=self_cond,
+                time_cond=time_cond,
+                style_cond=style_cond if block.use_style_modulation else None,
                 content_time_cond=time_cond if block.use_content_cross_attn else None,
                 content_tokens=content_tokens if block.use_content_cross_attn else None,
             )

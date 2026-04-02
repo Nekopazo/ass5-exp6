@@ -283,6 +283,29 @@ class FontImageDataset(Dataset):
         )
         return anchor_indices, positive_indices
 
+    def get_fixed_style_refs(
+        self,
+        font_name: str,
+        target_index: int,
+        ref_count: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor, List[str]]:
+        self._ensure_txns()
+        target_index = int(target_index)
+        ref_count = max(1, int(ref_count))
+        candidates = [int(idx) for idx in self.valid_indices_by_font[font_name] if int(idx) != target_index]
+        if not candidates:
+            raise RuntimeError(f"Font '{font_name}' has no alternative glyph for fixed style reference.")
+        repeat = (ref_count + len(candidates) - 1) // len(candidates)
+        chosen = (candidates * repeat)[:ref_count]
+        style_chars = [self.char_list[idx] for idx in chosen]
+        style_imgs = [
+            self._load_tensor(self._t_txn, f"{font_name}@{style_char}", style=True)
+            for style_char in style_chars
+        ]
+        style_img = torch.stack(style_imgs, dim=0)
+        style_ref_mask = torch.ones((len(style_imgs),), dtype=torch.float32)
+        return style_img, style_ref_mask, style_chars
+
     def __len__(self) -> int:
         return len(self.samples)
 
@@ -396,8 +419,9 @@ class CartesianFontCharBatchSampler(Sampler[List[int]]):
 
     Each epoch still traverses all available font-char samples once through the
     base cartesian schedule. If a cartesian batch is smaller than the target
-    size because some font-char combinations are missing, the sampler pads the
-    batch by randomly drawing sample indices from the full dataset.
+    size because some font-char combinations are missing or the trailing font
+    group is smaller than fonts_per_batch, the sampler pads the batch with
+    extra characters drawn from the current font group only.
     """
 
     def __init__(
@@ -435,15 +459,35 @@ class CartesianFontCharBatchSampler(Sampler[List[int]]):
         for font_group in font_groups:
             for char_group in char_groups:
                 batch: List[int] = []
+                batch_set: set[int] = set()
                 for font_name in font_group:
                     lookup = self.dataset.sample_index_by_font_char[font_name]
                     for char_index in char_group:
                         sample_index = lookup.get(int(char_index))
                         if sample_index is not None:
-                            batch.append(int(sample_index))
+                            sample_index = int(sample_index)
+                            batch.append(sample_index)
+                            batch_set.add(sample_index)
                 if len(batch) < target_batch_size:
                     pad_count = target_batch_size - len(batch)
-                    batch.extend(int(rng.randrange(self.sample_count)) for _ in range(pad_count))
+                    pad_candidates = [
+                        int(sample_index)
+                        for font_name in font_group
+                        for sample_index in self.dataset.sample_indices_by_font[font_name]
+                        if int(sample_index) not in batch_set
+                    ]
+                    rng.shuffle(pad_candidates)
+                    batch.extend(pad_candidates[:pad_count])
+                    if len(batch) < target_batch_size:
+                        fallback_candidates = [
+                            int(sample_index)
+                            for font_name in font_group
+                            for sample_index in self.dataset.sample_indices_by_font[font_name]
+                        ]
+                        if not fallback_candidates:
+                            raise RuntimeError("cartesian sampler cannot pad an empty font group")
+                        remaining = target_batch_size - len(batch)
+                        batch.extend(rng.choices(fallback_candidates, k=remaining))
                 yield batch
         self._epoch += 1
 

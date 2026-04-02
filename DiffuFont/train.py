@@ -141,6 +141,37 @@ def concat_batches(*batches: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]
     return merged
 
 
+def apply_fixed_style_refs(
+    batch: Dict[str, torch.Tensor],
+    train_dataset: FontImageDataset,
+    val_dataset: FontImageDataset | None,
+    *,
+    seen_count: int,
+) -> Dict[str, torch.Tensor]:
+    if "style_img" not in batch or "style_ref_mask" not in batch:
+        return batch
+    ref_count = int(batch["style_img"].size(1))
+    fixed_style_imgs = []
+    fixed_style_masks = []
+    fixed_style_chars = []
+    for idx, (font_name, char_id) in enumerate(zip(batch["font"], batch["char_id"].tolist(), strict=True)):
+        dataset = train_dataset if idx < seen_count else val_dataset
+        if dataset is None:
+            raise RuntimeError("val dataset is required for unseen sample style references")
+        style_img, style_ref_mask, style_chars = dataset.get_fixed_style_refs(
+            font_name,
+            int(char_id),
+            ref_count,
+        )
+        fixed_style_imgs.append(style_img)
+        fixed_style_masks.append(style_ref_mask)
+        fixed_style_chars.append(style_chars)
+    batch["style_img"] = torch.stack(fixed_style_imgs, dim=0)
+    batch["style_ref_mask"] = torch.stack(fixed_style_masks, dim=0)
+    batch["style_chars"] = fixed_style_chars
+    return batch
+
+
 def build_sample_batch(
     train_dataset: FontImageDataset,
     val_dataset: FontImageDataset | None,
@@ -179,7 +210,13 @@ def build_sample_batch(
         cartesian_chars_per_batch=1,
     )
     unseen_batch = slice_batch(next(iter(unseen_loader)), unseen_count)
-    return concat_batches(seen_batch, unseen_batch)
+    sample_batch = concat_batches(seen_batch, unseen_batch)
+    return apply_fixed_style_refs(
+        sample_batch,
+        train_dataset,
+        val_dataset,
+        seen_count=seen_count,
+    )
 
 
 def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
@@ -265,9 +302,12 @@ def main() -> None:
     parser.add_argument("--perceptor-checkpoint", type=Path)
     parser.add_argument("--perceptual-loss-lambda", type=float, required=True)
     parser.add_argument("--style-loss-lambda", type=float, required=True)
+    parser.add_argument("--style-batch-supcon-lambda", type=float, default=0.0)
+    parser.add_argument("--pixel-loss-lambda", type=float, default=0.05)
     parser.add_argument("--aux-loss-t-logistic-steepness", type=float, default=8.0)
     parser.add_argument("--perceptual-loss-t-midpoint", type=float, default=0.35)
     parser.add_argument("--style-loss-t-midpoint", type=float, default=0.45)
+    parser.add_argument("--pixel-loss-t-midpoint", type=float, default=0.55)
     parser.add_argument("--flow-sample-steps", type=int, required=True)
     parser.add_argument("--ema-decay", type=float, required=True)
     args = parser.parse_args()
@@ -362,7 +402,7 @@ def main() -> None:
             f"fonts_per_batch={int(args.cartesian_fonts_per_batch)} "
             f"chars_per_batch={int(args.cartesian_chars_per_batch)} "
             f"effective_batch={int(args.cartesian_fonts_per_batch) * int(args.cartesian_chars_per_batch)} "
-            "pad_missing_with_random_samples=1"
+            "pad_missing_within_font_group=1"
         )
 
     resolved_epochs = max(1, int(args.epochs))
@@ -372,12 +412,16 @@ def main() -> None:
     effective_perceptor_checkpoint = args.perceptor_checkpoint
     effective_perceptual_loss_lambda = float(args.perceptual_loss_lambda)
     effective_style_loss_lambda = float(args.style_loss_lambda)
+    effective_style_batch_supcon_lambda = max(0.0, float(args.style_batch_supcon_lambda))
+    effective_pixel_loss_lambda = max(0.0, float(args.pixel_loss_lambda))
     if not bool(args.use_cnn_perceptor):
         if args.perceptor_checkpoint is not None or effective_perceptual_loss_lambda > 0.0 or effective_style_loss_lambda > 0.0:
             print("[train] use_cnn_perceptor=0, ignoring perceptor checkpoint and auxiliary loss weights")
         effective_perceptor_checkpoint = None
         effective_perceptual_loss_lambda = 0.0
         effective_style_loss_lambda = 0.0
+    if effective_style_batch_supcon_lambda > 0.0 and str(args.train_sampling) != "cartesian_font_char":
+        print("[train] warning: style_batch_supcon_lambda is most effective with train_sampling=cartesian_font_char")
 
     model = build_model(args)
     trainer = FlowTrainer(
@@ -393,9 +437,12 @@ def main() -> None:
         perceptor_checkpoint=effective_perceptor_checkpoint,
         perceptual_loss_lambda=effective_perceptual_loss_lambda,
         style_loss_lambda=effective_style_loss_lambda,
+        style_batch_supcon_lambda=effective_style_batch_supcon_lambda,
+        pixel_loss_lambda=effective_pixel_loss_lambda,
         aux_loss_t_logistic_steepness=float(args.aux_loss_t_logistic_steepness),
         perceptual_loss_t_midpoint=float(args.perceptual_loss_t_midpoint),
         style_loss_t_midpoint=float(args.style_loss_t_midpoint),
+        pixel_loss_t_midpoint=float(args.pixel_loss_t_midpoint),
         flow_sample_steps=int(args.flow_sample_steps),
         ema_decay=float(args.ema_decay),
         log_every_steps=log_every_steps,
@@ -444,9 +491,12 @@ def main() -> None:
     run_config["perceptor_checkpoint"] = None if effective_perceptor_checkpoint is None else str(effective_perceptor_checkpoint)
     run_config["perceptual_loss_lambda"] = float(effective_perceptual_loss_lambda)
     run_config["style_loss_lambda"] = float(effective_style_loss_lambda)
+    run_config["style_batch_supcon_lambda"] = float(effective_style_batch_supcon_lambda)
+    run_config["pixel_loss_lambda"] = float(effective_pixel_loss_lambda)
     run_config["aux_loss_t_logistic_steepness"] = float(args.aux_loss_t_logistic_steepness)
     run_config["perceptual_loss_t_midpoint"] = float(args.perceptual_loss_t_midpoint)
     run_config["style_loss_t_midpoint"] = float(args.style_loss_t_midpoint)
+    run_config["pixel_loss_t_midpoint"] = float(args.pixel_loss_t_midpoint)
     run_config["lr_warmup_steps"] = int(args.lr_warmup_steps)
     run_config["lr_decay_start_step"] = None if int(args.lr_decay_start_step) < 0 else int(args.lr_decay_start_step)
     run_config["lr_min_scale"] = float(args.lr_min_scale)
