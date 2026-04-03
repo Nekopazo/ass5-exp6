@@ -77,9 +77,8 @@ def print_model_summary(model: SourcePartRefDiT) -> None:
             f"dit_hidden_dim: {model.dit_hidden_dim}",
             f"dit_depth: {model.dit_depth}",
             f"dit_heads: {model.dit_heads}",
-            f"content_cross_attn_heads: {model.content_cross_attn_heads}",
-            f"content_cross_attn_layers: {list(model.content_cross_attn_layers)}",
-            f"style_modulation_layers: {list(model.style_modulation_layers)}",
+            f"content_injection_layers: {list(model.content_injection_layers)}",
+            f"style_injection_layers: {list(model.style_injection_layers)}",
         ]
     )
 
@@ -89,7 +88,7 @@ def print_model_summary(model: SourcePartRefDiT) -> None:
         "content_encoder",
         "content_proj",
         "style_encoder",
-        "style_global_proj",
+        "style_proj",
         "backbone",
         "detailer",
     ]
@@ -97,13 +96,23 @@ def print_model_summary(model: SourcePartRefDiT) -> None:
         module = getattr(model, name)
         total, trainable = count_params(module)
         print(f"  - {name}: {module.__class__.__name__} total={total:,} trainable={trainable:,}")
+        if name == "style_encoder":
+            stat_pool_params = (
+                int(model.style_std_scale.numel())
+                + sum(int(param.numel()) for param in model.style_post_norm.parameters())
+                + sum(int(param.numel()) for param in model.style_post_mlp.parameters())
+            )
+            print(
+                "  - style_stat_pooling: "
+                f"mu_std+masked_mean+residual_mlp total={stat_pool_params:,} trainable={stat_pool_params:,}"
+            )
 
     print()
     print("backbone_layer_plan:")
     for idx, block in enumerate(model.backbone.blocks):
         print(
-            f"  - block_{idx:02d}: content_cross_attn={int(block.use_content_cross_attn)} "
-            f"style_modulation={int(block.use_style_modulation)}"
+            f"  - block_{idx:02d}: content_injection={int(block.use_content_injection)} "
+            f"style_injection={int(block.use_style_injection)}"
         )
 
 
@@ -155,17 +164,27 @@ def trace_style_path(
         print(f"style.downsample_{idx}: {shape_of(x)}")
         x = resblock(x)
         print(f"style.resblock_{idx}: {shape_of(x)}")
-    style_features = x
-    style_vectors = F.adaptive_avg_pool2d(style_features, output_size=1).flatten(1)
-    print(f"style.global_pool_flatten: {shape_of(style_vectors)}")
-    style_vectors = F.normalize(style_vectors, dim=-1, eps=1e-6)
-    style_vectors = style_vectors.view(batch, refs, style_vectors.size(-1))
+    style_mean = x.float().mean(dim=(2, 3))
+    print(f"style.channel_mean: {shape_of(style_mean)}")
+    style_std = x.float().std(dim=(2, 3), unbiased=False)
+    print(f"style.channel_std: {shape_of(style_std)}")
+    style_vectors = style_mean + style_std * model.style_std_scale.float().view(1, -1)
+    print(f"style.mu_plus_scaled_std: {shape_of(style_vectors)}")
+    style_vectors = style_vectors.to(dtype=x.dtype).view(batch, refs, style_vectors.size(-1))
     print(f"style.per_ref_vectors: {shape_of(style_vectors)}")
-    ref_weights = style_ref_mask.to(device=style_vectors.device, dtype=style_vectors.dtype)
-    ref_weight_sum = ref_weights.sum(dim=1, keepdim=True).clamp_min(1.0)
-    pooled_style = (style_vectors * ref_weights.unsqueeze(-1)).sum(dim=1) / ref_weight_sum
+    ref_valid_mask = style_ref_mask.to(device=style_vectors.device, dtype=torch.bool)
+    ref_weights = ref_valid_mask.to(dtype=style_vectors.dtype).unsqueeze(-1)
+    ref_weights = ref_weights / ref_weights.sum(dim=1, keepdim=True).clamp_min(1.0)
+    print(f"style.masked_ref_weights: {shape_of(ref_weights)}")
+    pooled_style = (style_vectors * ref_weights).sum(dim=1)
     print(f"style.pooled_style: {shape_of(pooled_style)}")
-    style_global = model.style_global_proj(pooled_style)
+    style_post_hidden = model.style_post_norm(pooled_style)
+    print(f"style.post_norm: {shape_of(style_post_hidden)}")
+    style_post_delta = model.style_post_mlp(style_post_hidden)
+    print(f"style.post_mlp_delta: {shape_of(style_post_delta)}")
+    style_residual = pooled_style + style_post_delta
+    print(f"style.post_mlp_residual: {shape_of(style_residual)}")
+    style_global = model.style_proj(style_residual)
     print(f"style.global: {shape_of(style_global)}")
     return style_global
 
@@ -184,26 +203,25 @@ def trace_backbone_path(
     print(f"backbone.patch_embed_tokens: {shape_of(x)}")
     x = x + backbone.pos_embed.to(device=x.device, dtype=x.dtype)
     print(f"backbone.tokens_plus_pos: {shape_of(x)}")
-    content_tokens = content_tokens.to(device=x.device, dtype=x.dtype) + backbone.pos_embed.to(device=x.device, dtype=x.dtype)
-    print(f"backbone.content_tokens_plus_pos: {shape_of(content_tokens)}")
+    content_tokens = content_tokens.to(device=x.device, dtype=x.dtype)
+    print(f"backbone.content_tokens: {shape_of(content_tokens)}")
+    style_global = style_global.to(device=x.device, dtype=x.dtype)
+    print(f"backbone.style_global: {shape_of(style_global)}")
     time_cond = timestep_embedding(timesteps, backbone.hidden_dim).to(dtype=x.dtype)
     print(f"backbone.timestep_embedding: {shape_of(time_cond)}")
     time_cond = backbone.time_mlp(time_cond)
     print(f"backbone.time_mlp: {shape_of(time_cond)}")
-    style_cond = backbone.style_cond_proj(style_global.to(device=x.device, dtype=x.dtype))
-    print(f"backbone.style_cond_proj: {shape_of(style_cond)}")
     for idx, block in enumerate(backbone.blocks):
-        self_cond = time_cond + style_cond if block.use_style_modulation else time_cond
         x = block(
             x,
-            self_cond=self_cond,
-            content_time_cond=time_cond if block.use_content_cross_attn else None,
-            content_tokens=content_tokens if block.use_content_cross_attn else None,
+            time_cond=time_cond,
+            content_tokens=content_tokens if block.use_content_injection else None,
+            style_global=style_global if block.use_style_injection else None,
         )
         print(
             f"backbone.block_{idx:02d}: out={shape_of(x)} "
-            f"content_cross_attn={int(block.use_content_cross_attn)} "
-            f"style_modulation={int(block.use_style_modulation)}"
+            f"content_injection={int(block.use_content_injection)} "
+            f"style_injection={int(block.use_style_injection)}"
         )
     x = backbone.final_norm(x)
     print(f"backbone.final_norm: {shape_of(x)}")

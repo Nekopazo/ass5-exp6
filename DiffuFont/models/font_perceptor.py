@@ -235,11 +235,39 @@ def supervised_contrastive_loss(
 def style_similarity_stats(
     style_embed: torch.Tensor,
     labels: torch.Tensor,
+    *,
+    max_samples: int = 64,
+    max_samples_per_label: int = 2,
 ) -> Dict[str, float]:
     if labels.dim() != 1:
         labels = labels.view(-1)
-    style_embed = F.normalize(style_embed, dim=-1, eps=1e-6)
+    if style_embed.size(0) != labels.size(0):
+        raise ValueError(f"style_embed/labels batch mismatch: {tuple(style_embed.shape)} vs {tuple(labels.shape)}")
+    if style_embed.dim() != 2:
+        raise ValueError(f"style_embed must be 2D, got {tuple(style_embed.shape)}")
+
     labels = labels.to(device=style_embed.device)
+    batch_size = int(style_embed.size(0))
+    sample_budget = max(2, int(max_samples))
+    per_label_budget = max(1, int(max_samples_per_label))
+    if batch_size > sample_budget:
+        unique_labels, counts = torch.unique(labels, sorted=True, return_counts=True)
+        prioritized_labels = torch.cat([unique_labels[counts > 1], unique_labels[counts <= 1]], dim=0)
+        sample_index_chunks = []
+        sample_count = 0
+        for label_value in prioritized_labels.tolist():
+            label_indices = torch.nonzero(labels.eq(label_value), as_tuple=False).flatten()
+            take_count = min(int(label_indices.numel()), per_label_budget, sample_budget - sample_count)
+            if take_count <= 0:
+                break
+            sample_index_chunks.append(label_indices[:take_count])
+            sample_count += take_count
+            if sample_count >= sample_budget:
+                break
+        sample_indices = torch.cat(sample_index_chunks, dim=0)
+        style_embed = style_embed.index_select(0, sample_indices)
+        labels = labels.index_select(0, sample_indices)
+    style_embed = F.normalize(style_embed, dim=-1, eps=1e-6)
     sim = torch.matmul(style_embed, style_embed.t())
     identity_mask = torch.eye(style_embed.size(0), device=style_embed.device, dtype=torch.bool)
     positive_mask = labels.unsqueeze(0).eq(labels.unsqueeze(1)) & (~identity_mask)

@@ -228,10 +228,9 @@ def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
         dit_hidden_dim=int(args.dit_hidden_dim),
         dit_depth=int(args.dit_depth),
         dit_heads=int(args.dit_heads),
-        content_cross_attn_heads=None if args.content_cross_attn_heads is None else int(args.content_cross_attn_heads),
         dit_mlp_ratio=float(args.dit_mlp_ratio),
-        content_cross_attn_layers=args.content_cross_attn_layers,
-        style_modulation_layers=args.style_modulation_layers,
+        content_injection_layers=args.content_injection_layers,
+        style_injection_layers=args.style_injection_layers,
         detailer_base_channels=int(args.detailer_base_channels),
         detailer_max_channels=int(args.detailer_max_channels),
     )
@@ -272,10 +271,9 @@ def main() -> None:
     parser.add_argument("--dit-hidden-dim", type=int, required=True)
     parser.add_argument("--dit-depth", type=int, required=True)
     parser.add_argument("--dit-heads", type=int, required=True)
-    parser.add_argument("--content-cross-attn-heads", type=int, default=None)
     parser.add_argument("--dit-mlp-ratio", type=float, required=True)
-    parser.add_argument("--content-cross-attn-layers", type=parse_layer_indices, required=True)
-    parser.add_argument("--style-modulation-layers", type=parse_layer_indices, required=True)
+    parser.add_argument("--content-injection-layers", type=parse_layer_indices, required=True)
+    parser.add_argument("--style-injection-layers", type=parse_layer_indices, required=True)
     parser.add_argument("--detailer-base-channels", type=int, required=True)
     parser.add_argument("--detailer-max-channels", type=int, required=True)
     parser.add_argument("--train-sampling", type=str, required=True, choices=["shuffle", "cartesian_font_char"])

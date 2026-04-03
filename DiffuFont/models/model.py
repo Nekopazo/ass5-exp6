@@ -658,7 +658,7 @@ class FlowTrainer(_BaseTrainer):
         style: torch.Tensor,
         style_ref_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        return model.encode_style(
+        return model.encode_style_global(
             style_img=style,
             style_ref_mask=style_ref_mask,
         )
@@ -727,6 +727,7 @@ class FlowTrainer(_BaseTrainer):
         perceptual_weight_per_sample = self.perceptual_loss_lambda * perceptual_t_scale
         style_weight_per_sample = self.style_loss_lambda * style_t_scale
         pixel_weight_per_sample = self.pixel_loss_lambda * pixel_t_scale
+        style_batch_weight = self.style_batch_supcon_lambda
         perceptual_weight = float(perceptual_weight_per_sample.mean().item())
         style_weight = float(style_weight_per_sample.mean().item())
         pixel_weight = float(pixel_weight_per_sample.mean().item())
@@ -751,7 +752,8 @@ class FlowTrainer(_BaseTrainer):
             style_term = (style_weight_per_sample * loss_style_embed_per_sample).mean()
         if include_style_batch and self.style_batch_supcon_lambda > 0.0:
             loss_style_batch = supervised_contrastive_loss(style_global.float(), font_id)
-            style_batch_term = self.style_batch_supcon_lambda * loss_style_batch
+            style_batch_term = style_batch_weight * loss_style_batch
+        style_stats = style_similarity_stats(style_global.detach().float(), font_id)
         loss = flow_term + perceptual_term + style_term + style_batch_term + pixel_term
         metrics = {
             "loss": loss,
@@ -768,12 +770,14 @@ class FlowTrainer(_BaseTrainer):
             "loss_pixel_term": pixel_term,
             "perceptual_loss_weight": float(perceptual_weight),
             "style_loss_weight": float(style_weight),
+            "style_batch_loss_weight": float(style_batch_weight),
             "pixel_loss_weight": float(pixel_weight),
             "perceptual_loss_t_scale_mean": float(perceptual_t_scale.mean().item()),
             "style_loss_t_scale_mean": float(style_t_scale.mean().item()),
             "pixel_loss_t_scale_mean": float(pixel_t_scale.mean().item()),
             "t_mean": timesteps.mean(),
         }
+        metrics.update(style_stats)
         return metrics
 
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
@@ -831,7 +835,7 @@ class FlowTrainer(_BaseTrainer):
         with self._autocast_context():
             content_tokens = sample_model.encode_content_tokens(content)
             content_tokens = sample_model.content_proj(content_tokens)
-            style_global = sample_model.encode_style(
+            style_global = sample_model.encode_style_global(
                 style_img=style_img,
                 style_ref_mask=style_ref_mask,
             )

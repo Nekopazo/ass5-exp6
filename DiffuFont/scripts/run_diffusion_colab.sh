@@ -27,7 +27,7 @@ VAL_EVERY=100
 VAL_MAX_BATCHES=16
 LR="1e-4"
 LR_WARMUP_STEPS=0
-LR_DECAY_START_STEP="30000"
+LR_DECAY_START_STEP="40000"
 LR_MIN_SCALE="0.1"
 GRAD_CLIP_NORM="1.0"
 GRAD_CLIP_MIN_NORM="0.5"
@@ -45,10 +45,9 @@ ENCODER_HIDDEN_DIM=512
 DIT_HIDDEN_DIM=512
 DIT_DEPTH=12
 DIT_HEADS=8
-CONTENT_CROSS_ATTN_HEADS="4"
 DIT_MLP_RATIO="4.0"
-CONTENT_CROSS_ATTN_LAYERS="2,4,6,8,10"
-STYLE_MODULATION_LAYERS="5,7,9"
+CONTENT_INJECTION_LAYERS="2,4,6,8,10"
+STYLE_INJECTION_LAYERS="7,9,11"
 DETAILER_BASE_CHANNELS=32
 DETAILER_MAX_CHANNELS=256
 
@@ -123,10 +122,9 @@ while [[ $# -gt 0 ]]; do
     --dit-hidden-dim) DIT_HIDDEN_DIM="${2:?}"; shift 2 ;;
     --dit-depth) DIT_DEPTH="${2:?}"; shift 2 ;;
     --dit-heads) DIT_HEADS="${2:?}"; shift 2 ;;
-    --content-cross-attn-heads) CONTENT_CROSS_ATTN_HEADS="${2:?}"; shift 2 ;;
     --dit-mlp-ratio) DIT_MLP_RATIO="${2:?}"; shift 2 ;;
-    --content-cross-attn-layers) CONTENT_CROSS_ATTN_LAYERS="${2:?}"; shift 2 ;;
-    --style-modulation-layers) STYLE_MODULATION_LAYERS="${2:?}"; shift 2 ;;
+    --content-injection-layers) CONTENT_INJECTION_LAYERS="${2:?}"; shift 2 ;;
+    --style-injection-layers) STYLE_INJECTION_LAYERS="${2:?}"; shift 2 ;;
     --detailer-base-channels) DETAILER_BASE_CHANNELS="${2:?}"; shift 2 ;;
     --detailer-max-channels) DETAILER_MAX_CHANNELS="${2:?}"; shift 2 ;;
     --train-sampling) TRAIN_SAMPLING="${2:?}"; shift 2 ;;
@@ -139,9 +137,6 @@ done
 
 if [[ -z "${FONT_SPLIT_SEED}" ]]; then
   FONT_SPLIT_SEED="${SEED}"
-fi
-if [[ -z "${CONTENT_CROSS_ATTN_HEADS}" ]]; then
-  CONTENT_CROSS_ATTN_HEADS="${DIT_HEADS}"
 fi
 if [[ "${LR_DECAY_START_STEP}" == "-1" ]]; then
   LR_DECAY_START_STEP="$(( TARGET_STEPS * 8 / 10 ))"
@@ -205,10 +200,9 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --dit-hidden-dim "${DIT_HIDDEN_DIM}"
     --dit-depth "${DIT_DEPTH}"
     --dit-heads "${DIT_HEADS}"
-    --content-cross-attn-heads "${CONTENT_CROSS_ATTN_HEADS}"
     --dit-mlp-ratio "${DIT_MLP_RATIO}"
-    --content-cross-attn-layers "${CONTENT_CROSS_ATTN_LAYERS}"
-    --style-modulation-layers "${STYLE_MODULATION_LAYERS}"
+    --content-injection-layers "${CONTENT_INJECTION_LAYERS}"
+    --style-injection-layers "${STYLE_INJECTION_LAYERS}"
     --detailer-base-channels "${DETAILER_BASE_CHANNELS}"
     --detailer-max-channels "${DETAILER_MAX_CHANNELS}"
     --train-sampling "${TRAIN_SAMPLING}"
@@ -407,10 +401,9 @@ cmd_common=(
   --dit-hidden-dim "${DIT_HIDDEN_DIM}"
   --dit-depth "${DIT_DEPTH}"
   --dit-heads "${DIT_HEADS}"
-  --content-cross-attn-heads "${CONTENT_CROSS_ATTN_HEADS}"
   --dit-mlp-ratio "${DIT_MLP_RATIO}"
-  --content-cross-attn-layers "${CONTENT_CROSS_ATTN_LAYERS}"
-  --style-modulation-layers "${STYLE_MODULATION_LAYERS}"
+  --content-injection-layers "${CONTENT_INJECTION_LAYERS}"
+  --style-injection-layers "${STYLE_INJECTION_LAYERS}"
   --detailer-base-channels "${DETAILER_BASE_CHANNELS}"
   --detailer-max-channels "${DETAILER_MAX_CHANNELS}"
   --train-sampling "${TRAIN_SAMPLING}"
@@ -461,10 +454,10 @@ echo "[run_diffusion_colab] perceptor_checkpoint=${PERCEPTOR_CHECKPOINT:-<none>}
 echo "[run_diffusion_colab] batch=${BATCH_SIZE} lr=${LR} lr_warmup_steps=${LR_WARMUP_STEPS} lr_decay_start_step=${LR_DECAY_START_STEP} lr_min_scale=${LR_MIN_SCALE} grad_clip_norm=${GRAD_CLIP_NORM}"
 echo "[run_diffusion_colab] style_ref_count=${STYLE_REF_COUNT} style_ref_count_min=${STYLE_REF_COUNT_MIN} style_ref_count_max=${STYLE_REF_COUNT_MAX}"
 echo "[run_diffusion_colab] patch_size=${PATCH_SIZE} image_size=${IMAGE_SIZE} flow_sample_steps=${FLOW_SAMPLE_STEPS} flow_lambda=${FLOW_LAMBDA} ema_decay=${EMA_DECAY}"
-echo "[run_diffusion_colab] dit_heads=${DIT_HEADS} content_cross_attn_heads=${CONTENT_CROSS_ATTN_HEADS}"
+echo "[run_diffusion_colab] dit_heads=${DIT_HEADS}"
 echo "[run_diffusion_colab] perceptual_loss_lambda=${PERCEPTUAL_LOSS_LAMBDA} style_loss_lambda=${STYLE_LOSS_LAMBDA} style_batch_supcon_lambda=${STYLE_BATCH_SUPCON_LAMBDA} pixel_loss_lambda=${PIXEL_LOSS_LAMBDA} aux_loss_t_logistic_steepness=${AUX_LOSS_T_LOGISTIC_STEEPNESS} perceptual_loss_t_midpoint=${PERCEPTUAL_LOSS_T_MIDPOINT} style_loss_t_midpoint=${STYLE_LOSS_T_MIDPOINT} pixel_loss_t_midpoint=${PIXEL_LOSS_T_MIDPOINT}"
 echo "[run_diffusion_colab] detailer_base_channels=${DETAILER_BASE_CHANNELS} detailer_max_channels=${DETAILER_MAX_CHANNELS}"
-echo "[run_diffusion_colab] content_cross_attn_layers=${CONTENT_CROSS_ATTN_LAYERS} style_modulation_layers=${STYLE_MODULATION_LAYERS}"
+echo "[run_diffusion_colab] content_injection_layers=${CONTENT_INJECTION_LAYERS} style_injection_layers=${STYLE_INJECTION_LAYERS}"
 echo "[run_diffusion_colab] train_sampling=${TRAIN_SAMPLING} cartesian_fonts_per_batch=${CARTESIAN_FONTS_PER_BATCH} cartesian_chars_per_batch=${CARTESIAN_CHARS_PER_BATCH}"
 
 attempt=1

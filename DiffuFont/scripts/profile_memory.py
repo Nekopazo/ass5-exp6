@@ -96,10 +96,9 @@ def build_model_from_args(args: argparse.Namespace) -> SourcePartRefDiT:
         dit_hidden_dim=int(args.dit_hidden_dim),
         dit_depth=int(args.dit_depth),
         dit_heads=int(args.dit_heads),
-        content_cross_attn_heads=None if args.content_cross_attn_heads is None else int(args.content_cross_attn_heads),
         dit_mlp_ratio=float(args.dit_mlp_ratio),
-        content_cross_attn_layers=args.content_cross_attn_layers,
-        style_modulation_layers=args.style_modulation_layers,
+        content_injection_layers=args.content_injection_layers,
+        style_injection_layers=args.style_injection_layers,
         detailer_base_channels=int(args.detailer_base_channels),
         detailer_max_channels=int(args.detailer_max_channels),
     )
@@ -138,10 +137,9 @@ def main() -> None:
     parser.add_argument("--dit-hidden-dim", type=int, default=512)
     parser.add_argument("--dit-depth", type=int, default=12)
     parser.add_argument("--dit-heads", type=int, default=8)
-    parser.add_argument("--content-cross-attn-heads", type=int, default=None)
     parser.add_argument("--dit-mlp-ratio", type=float, default=4.0)
-    parser.add_argument("--content-cross-attn-layers", type=parse_layer_indices, default=(1, 2, 3, 4, 5, 6))
-    parser.add_argument("--style-modulation-layers", type=parse_layer_indices, default=(7, 8, 9, 10, 11, 12))
+    parser.add_argument("--content-injection-layers", type=parse_layer_indices, default=(1, 2, 3, 4, 5, 6))
+    parser.add_argument("--style-injection-layers", type=parse_layer_indices, default=(7, 8, 9, 10, 11, 12))
     parser.add_argument("--detailer-base-channels", type=int, default=32)
     parser.add_argument("--detailer-max-channels", type=int, default=256)
     parser.add_argument("--ema-decay", type=float, default=0.9999)
@@ -218,7 +216,7 @@ def main() -> None:
         style_global = stage_record(
             device,
             "style_encode",
-            lambda: trainer.model.encode_style(
+            lambda: trainer.model.encode_style_global(
                 style_img=style,
                 style_ref_mask=style_ref_mask,
             ),

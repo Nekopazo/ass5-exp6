@@ -285,10 +285,9 @@ class SourcePartRefDiT(nn.Module):
         dit_hidden_dim: int = 512,
         dit_depth: int = 12,
         dit_heads: int = 8,
-        content_cross_attn_heads: int | None = None,
         dit_mlp_ratio: float = 4.0,
-        content_cross_attn_layers: Sequence[int] | None = None,
-        style_modulation_layers: Sequence[int] | None = None,
+        content_injection_layers: Sequence[int] | None = None,
+        style_injection_layers: Sequence[int] | None = None,
         detailer_base_channels: int = 32,
         detailer_max_channels: int = 256,
         detailer_bottleneck_channels: int = 384,
@@ -308,24 +307,21 @@ class SourcePartRefDiT(nn.Module):
         self.dit_hidden_dim = int(dit_hidden_dim)
         self.dit_depth = int(dit_depth)
         self.dit_heads = int(dit_heads)
-        self.content_cross_attn_heads = (
-            self.dit_heads if content_cross_attn_heads is None else int(content_cross_attn_heads)
-        )
         self.dit_mlp_ratio = float(dit_mlp_ratio)
         self.detailer_base_channels = int(detailer_base_channels)
         self.detailer_max_channels = int(detailer_max_channels)
         self.detailer_bottleneck_channels = int(detailer_bottleneck_channels)
-        self.content_cross_attn_layers = DiffusionTransformerBackbone._normalize_layer_indices(
-            content_cross_attn_layers,
+        self.content_injection_layers = DiffusionTransformerBackbone._normalize_layer_indices(
+            content_injection_layers,
             default_layers=range(1, min(self.dit_depth, 6) + 1),
             depth=self.dit_depth,
-            field_name="content_cross_attn_layers",
+            field_name="content_injection_layers",
         )
-        self.style_modulation_layers = DiffusionTransformerBackbone._normalize_layer_indices(
-            style_modulation_layers,
+        self.style_injection_layers = DiffusionTransformerBackbone._normalize_layer_indices(
+            style_injection_layers,
             default_layers=range(max(1, self.dit_depth - 5), self.dit_depth + 1),
             depth=self.dit_depth,
-            field_name="style_modulation_layers",
+            field_name="style_injection_layers",
         )
 
         self.content_encoder = ContentEncoder(
@@ -337,6 +333,16 @@ class SourcePartRefDiT(nn.Module):
             in_channels=self.in_channels,
             hidden_dim=self.style_hidden_dim,
         )
+        self.style_std_scale = nn.Parameter(torch.ones(self.style_hidden_dim))
+        self.style_post_norm = nn.LayerNorm(self.style_hidden_dim, elementwise_affine=False, eps=1e-6)
+        style_post_mlp_hidden_dim = self.style_hidden_dim * 2
+        self.style_post_mlp = nn.Sequential(
+            nn.Linear(self.style_hidden_dim, style_post_mlp_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(style_post_mlp_hidden_dim, self.style_hidden_dim),
+        )
+        nn.init.zeros_(self.style_post_mlp[-1].weight)
+        nn.init.zeros_(self.style_post_mlp[-1].bias)
         self.backbone = DiffusionTransformerBackbone(
             in_channels=self.in_channels,
             image_size=self.image_size,
@@ -344,10 +350,9 @@ class SourcePartRefDiT(nn.Module):
             hidden_dim=self.dit_hidden_dim,
             depth=self.dit_depth,
             num_heads=self.dit_heads,
-            content_cross_attn_heads=self.content_cross_attn_heads,
             mlp_ratio=self.dit_mlp_ratio,
-            content_cross_attn_layers=self.content_cross_attn_layers,
-            style_modulation_layers=self.style_modulation_layers,
+            content_injection_layers=self.content_injection_layers,
+            style_injection_layers=self.style_injection_layers,
         )
         self.detailer = PatchDetailerHead(
             in_channels=self.in_channels,
@@ -363,9 +368,9 @@ class SourcePartRefDiT(nn.Module):
         else:
             self.content_proj = nn.Identity()
         if self.style_hidden_dim != self.dit_hidden_dim:
-            self.style_global_proj = nn.Linear(self.style_hidden_dim, self.dit_hidden_dim)
+            self.style_proj = nn.Linear(self.style_hidden_dim, self.dit_hidden_dim)
         else:
-            self.style_global_proj = nn.Identity()
+            self.style_proj = nn.Identity()
 
     def export_config(self) -> dict[str, int | float]:
         return {
@@ -377,10 +382,9 @@ class SourcePartRefDiT(nn.Module):
             "dit_hidden_dim": int(self.dit_hidden_dim),
             "dit_depth": int(self.dit_depth),
             "dit_heads": int(self.dit_heads),
-            "content_cross_attn_heads": int(self.content_cross_attn_heads),
             "dit_mlp_ratio": float(self.dit_mlp_ratio),
-            "content_cross_attn_layers": list(self.content_cross_attn_layers),
-            "style_modulation_layers": list(self.style_modulation_layers),
+            "content_injection_layers": list(self.content_injection_layers),
+            "style_injection_layers": list(self.style_injection_layers),
             "detailer_base_channels": int(self.detailer_base_channels),
             "detailer_max_channels": int(self.detailer_max_channels),
             "detailer_bottleneck_channels": int(self.detailer_bottleneck_channels),
@@ -390,7 +394,7 @@ class SourcePartRefDiT(nn.Module):
         content_features = self.content_encoder(content_img)
         return content_features.flatten(2).transpose(1, 2).contiguous()
 
-    def encode_style(
+    def encode_style_global(
         self,
         style_img: torch.Tensor,
         style_ref_mask: Optional[torch.Tensor] = None,
@@ -402,24 +406,25 @@ class SourcePartRefDiT(nn.Module):
 
         batch, refs, channels, height, width = style_img.shape
         flat_style = style_img.view(batch * refs, channels, height, width)
-        if style_ref_mask is None:
-            ref_valid_mask = torch.ones((batch, refs), device=style_img.device, dtype=torch.bool)
-        else:
-            ref_valid_mask = style_ref_mask.to(device=style_img.device) > 0.5
-        empty_rows = ~ref_valid_mask.any(dim=1)
-        if empty_rows.any():
-            ref_valid_mask = ref_valid_mask.clone()
-            ref_valid_mask[empty_rows, 0] = True
-
         style_features = self.style_encoder(flat_style)
-        style_vectors = F.adaptive_avg_pool2d(style_features, output_size=1).flatten(1)
-        style_vectors = style_vectors.view(batch, refs, style_vectors.size(-1))
-        ref_weights = ref_valid_mask.to(device=style_vectors.device, dtype=style_vectors.dtype)
-        ref_weight_sum = ref_weights.sum(dim=1, keepdim=True).clamp_min(1.0)
-        pooled_style = (style_vectors * ref_weights.unsqueeze(-1)).sum(dim=1) / ref_weight_sum
-        pooled_style = F.normalize(pooled_style, dim=-1, eps=1e-6)
-        style_global = self.style_global_proj(pooled_style)
-        return style_global
+        style_mean = style_features.float().mean(dim=(2, 3))
+        style_std = style_features.float().std(dim=(2, 3), unbiased=False)
+        style_vectors = style_mean + style_std * self.style_std_scale.float().view(1, -1)
+        style_vectors = style_vectors.to(dtype=style_features.dtype).view(batch, refs, self.style_hidden_dim)
+        if style_ref_mask is None:
+            ref_valid_mask = torch.ones((batch, refs), device=style_vectors.device, dtype=torch.bool)
+        else:
+            ref_valid_mask = style_ref_mask.to(device=style_vectors.device, dtype=torch.bool)
+        if ref_valid_mask.shape != (batch, refs):
+            raise RuntimeError(
+                f"style_ref_mask shape mismatch: expected {(batch, refs)}, got {tuple(ref_valid_mask.shape)}"
+            )
+        if bool((~ref_valid_mask).all(dim=1).any()):
+            raise RuntimeError("style_ref_mask must keep at least one reference per sample")
+        ref_weights = ref_valid_mask.to(dtype=style_vectors.dtype).unsqueeze(-1)
+        pooled_style = (style_vectors * ref_weights).sum(dim=1) / ref_weights.sum(dim=1).clamp_min(1.0)
+        pooled_style = pooled_style + self.style_post_mlp(self.style_post_norm(pooled_style))
+        return self.style_proj(pooled_style)
 
     def _patchify(self, x: torch.Tensor) -> torch.Tensor:
         patches = F.unfold(x, kernel_size=self.patch_size, stride=self.patch_size)
@@ -482,7 +487,7 @@ class SourcePartRefDiT(nn.Module):
     ) -> torch.Tensor:
         content_tokens = self.encode_content_tokens(content_img)
         content_tokens = self.content_proj(content_tokens)
-        style_global = self.encode_style(
+        style_global = self.encode_style_global(
             style_img,
             style_ref_mask=style_ref_mask,
         )
