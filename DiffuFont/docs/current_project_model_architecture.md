@@ -28,8 +28,8 @@ Core design:
 - content is encoded into one token per `16x16` image patch
 - style is encoded into one global vector per sample
 - each transformer block applies external content/style injection first, then a standard time-conditioned DiT block
-- content injection uses per-channel gated zero-linear residuals
-- style injection uses per-channel gated zero-linear residuals from the global style vector
+- content injection uses zero-linear residuals
+- style injection uses zero-linear residuals from the global style vector
 - style does not enter AdaLN
 - self-attention is performed inside the DiT block after content/style injection
 - patch-level transformer outputs are refined by a per-patch local detailer before unpatchifying to the final flow field
@@ -57,7 +57,8 @@ Current default constructor values:
 | `patch_grid_size` | `8` |
 | `num_patches` | `64` |
 | `encoder_hidden_dim` | `512` |
-| `style_hidden_dim` | `512` |
+| `style_hidden_dim` | `786` |
+| `style_pool_heads` | `6` |
 | `dit_hidden_dim` | `512` |
 | `dit_depth` | `12` |
 | `dit_heads` | `8` |
@@ -74,12 +75,12 @@ Current parameter counts from `inspect_flow_model.py`:
 | --- | ---: |
 | `content_encoder` | `7,823,488` |
 | `content_proj` | `0` |
-| `style_encoder` | `11,953,920` |
-| `style_stat_pooling` | `1,050,624` |
-| `style_proj` | `0` |
+| `style_encoder` | `19,304,518` |
+| `style_pool` | `2,475,114` |
+| `style_proj` | `402,944` |
 | `backbone` | `60,531,200` |
 | `detailer` | `4,852,737` |
-| total | `86,211,969` |
+| total | `95,390,001` |
 
 ## 3. Top-Level Forward Graph
 
@@ -138,7 +139,7 @@ Semantics:
 
 Implemented by `StyleEncoder` and `SourcePartRefDiT.encode_style_global`.
 
-For each sample, every style reference glyph is encoded independently to a `4x4x512` feature map, reduced by channel-wise `mu + alpha * std`, averaged across valid references by `style_ref_mask`, then refined by a residual MLP before `style_proj`.
+For each sample, every style reference glyph is encoded independently to a `4x4x786` feature map. The `4x4` spatial grid from all valid references is flattened and concatenated into `R*16` local tokens, pooled once by a single-query attention pool without positional embedding and with `style_ref_mask` expanded to token-level masking, then projected by `style_proj: 786 -> 512`.
 
 Shape trace for `B=1`, `R=6`:
 
@@ -154,38 +155,32 @@ Shape trace for `B=1`, `R=6`:
 | `resblock_2` | `(6, 256, 16, 16)` |
 | `downsample_3` | `(6, 384, 8, 8)` |
 | `resblock_3` | `(6, 384, 8, 8)` |
-| `downsample_4` | `(6, 512, 4, 4)` |
-| `resblock_4` | `(6, 512, 4, 4)` |
-| `channel mean over 4x4` | `(6, 512)` |
-| `channel std over 4x4` | `(6, 512)` |
-| `mu + style_std_scale * std` | `(6, 512)` |
-| `view(B,R,D)` | `(1, 6, 512)` |
-| `masked ref weights from style_ref_mask` | `(1, 6, 1)` |
-| `masked mean over R` | `(1, 512)` |
-| `style_post_norm` | `(1, 512)` |
-| `style_post_mlp delta` | `(1, 512)` |
-| `style_post_mlp residual` | `(1, 512)` |
+| `downsample_4` | `(6, 786, 4, 4)` |
+| `resblock_4` | `(6, 786, 4, 4)` |
+| `flatten(2).transpose(1,2)` | `(6, 16, 786)` |
+| `view(B, R*16, D)` | `(1, 96, 786)` |
+| `expand style_ref_mask to token mask` | `(1, 96)` |
+| `style_pool.query` | `(1, 1, 786)` |
+| `style_pool.attn` | `(1, 1, 786)` |
+| `squeeze(1)` | `(1, 786)` |
 | `style_proj` | `(1, 512)` |
 
 Exact aggregation:
 
 ```text
-style_features_r = style_encoder(style_refs_r)              # [B*R, 512, 4, 4]
-mu_r = mean_hw(style_features_r)                            # [B*R, 512]
-std_r = std_hw(style_features_r)                            # [B*R, 512]
-style_vectors = mu_r + style_std_scale * std_r              # [B, R, 512]
+style_features_r = style_encoder(style_refs_r)              # [B*R, 786, 4, 4]
+style_tokens_r = flatten_hw(style_features_r)               # [B*R, 16, 786]
+style_tokens = reshape(style_tokens_r)                      # [B, R*16, 786]
+token_mask = expand_ref_mask(style_ref_mask, 16)            # [B, R*16]
 
-w = style_ref_mask / sum_r(style_ref_mask)                  # [B, R, 1]
-m = sum_r(w[:, r] * style_vectors[:, r])                    # [B, 512]
-delta = style_post_mlp(LN(m))                               # [B, 512]
-style_global = style_proj(m + delta)
+pooled_style = style_pool(style_tokens, token_mask)         # [B, 786]
+style_global = style_proj(pooled_style)                     # [B, 512]
 ```
 
 Runtime constraint:
 
 - `style_ref_mask` must keep at least one valid reference per sample
-- `style_std_scale` is initialized to ones
-- `style_post_mlp = Linear(512, 1024) -> SiLU -> Linear(1024, 512)`, and its final linear layer is zero-initialized so `style_global ≈ m` at startup
+- `style_pool` uses one learned query and no positional embedding, so all valid `R*16` spatial tokens are pooled as an unordered set
 
 ## 6. Diffusion Transformer Backbone
 
@@ -228,12 +223,11 @@ Enabled only if layer `l` is in `content_injection_layers`.
 
 ```text
 delta_c = zero_linear_l(content_control_ln_l(c))     # [B, 64, 512]
-x_l = x_l + gate_c_l[None, None, :] * delta_c       # gate_c_l is per-channel, [512]
+x_l = x_l + delta_c
 ```
 
 Important details:
 
-- `gate_c_l` is a learned per-channel gate, not a per-token gate
 - `zero_linear_l` is zero-initialized, so this residual starts from zero contribution
 - `c.shape` must exactly match `x_l.shape`
 
@@ -243,14 +237,13 @@ Enabled only if layer `l` is in `style_injection_layers`.
 
 ```text
 delta_s = zero_linear_s_l(style_control_ln_l(s)).unsqueeze(1)  # [B, 1, 512]
-x_l = x_l + gate_s_l[None, None, :] * delta_s                 # gate_s_l is per-channel, [512]
+x_l = x_l + delta_s
 ```
 
 Important details:
 
 - style is a single global vector per sample
 - this residual is broadcast to all patch tokens
-- `gate_s_l` is a learned per-channel gate, initialized to 1
 - `zero_linear_s_l` is zero-initialized, so style injection starts from zero contribution
 - style does not modify AdaLN parameters
 
@@ -389,9 +382,25 @@ style_pos_cos, style_neg_cos, style_cos_margin, style_pos_pairs, style_neg_pairs
     = style_similarity_stats(style_global, font_id)
 ```
 
+Logged conditioning-injection diagnostics:
+
+```text
+block_{l}_content_ratio
+block_{l}_style_ratio
+```
+
+Where:
+
+```text
+block_{l}_content_ratio = rms(zero_linear_l(LN(content_tokens))) / rms(block_input_tokens_l)
+block_{l}_style_ratio   = rms(zero_linear_l(LN(style_global))) / rms(block_input_tokens_l)
+```
+
+These diagnostics are computed immediately before the DiT block and therefore do not require disabling Flash Attention or changing the attention backend.
+
 Runtime detail:
 
-- `style_similarity_stats` uses at most `64` samples from the current batch before building the cosine matrix, prioritizing up to `2` samples per `font_id`, so `style_pos_pairs` and `style_neg_pairs` are sampled pair counts rather than full-batch pair counts
+- `style_similarity_stats` no longer builds a cosine matrix; it linearly scans the batch and evaluates at most `64` positive pairs and `64` negative pairs, so `style_pos_pairs` and `style_neg_pairs` are sampled pair counts rather than full-batch pair counts
 
 Time-dependent auxiliary weights:
 

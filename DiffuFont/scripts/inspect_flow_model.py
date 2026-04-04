@@ -74,6 +74,7 @@ def print_model_summary(model: SourcePartRefDiT) -> None:
             f"num_patches: {model.num_patches}",
             f"encoder_hidden_dim: {model.encoder_hidden_dim}",
             f"style_hidden_dim: {model.style_hidden_dim}",
+            f"style_pool_heads: {model.style_pool_heads}",
             f"dit_hidden_dim: {model.dit_hidden_dim}",
             f"dit_depth: {model.dit_depth}",
             f"dit_heads: {model.dit_heads}",
@@ -97,14 +98,10 @@ def print_model_summary(model: SourcePartRefDiT) -> None:
         total, trainable = count_params(module)
         print(f"  - {name}: {module.__class__.__name__} total={total:,} trainable={trainable:,}")
         if name == "style_encoder":
-            stat_pool_params = (
-                int(model.style_std_scale.numel())
-                + sum(int(param.numel()) for param in model.style_post_norm.parameters())
-                + sum(int(param.numel()) for param in model.style_post_mlp.parameters())
-            )
+            style_pool_params = sum(int(param.numel()) for param in model.style_pool.parameters())
             print(
-                "  - style_stat_pooling: "
-                f"mu_std+masked_mean+residual_mlp total={stat_pool_params:,} trainable={stat_pool_params:,}"
+                "  - style_pool: "
+                f"attention_pool+masked_mean total={style_pool_params:,} trainable={style_pool_params:,}"
             )
 
     print()
@@ -164,27 +161,40 @@ def trace_style_path(
         print(f"style.downsample_{idx}: {shape_of(x)}")
         x = resblock(x)
         print(f"style.resblock_{idx}: {shape_of(x)}")
-    style_mean = x.float().mean(dim=(2, 3))
-    print(f"style.channel_mean: {shape_of(style_mean)}")
-    style_std = x.float().std(dim=(2, 3), unbiased=False)
-    print(f"style.channel_std: {shape_of(style_std)}")
-    style_vectors = style_mean + style_std * model.style_std_scale.float().view(1, -1)
-    print(f"style.mu_plus_scaled_std: {shape_of(style_vectors)}")
-    style_vectors = style_vectors.to(dtype=x.dtype).view(batch, refs, style_vectors.size(-1))
-    print(f"style.per_ref_vectors: {shape_of(style_vectors)}")
-    ref_valid_mask = style_ref_mask.to(device=style_vectors.device, dtype=torch.bool)
-    ref_weights = ref_valid_mask.to(dtype=style_vectors.dtype).unsqueeze(-1)
-    ref_weights = ref_weights / ref_weights.sum(dim=1, keepdim=True).clamp_min(1.0)
-    print(f"style.masked_ref_weights: {shape_of(ref_weights)}")
-    pooled_style = (style_vectors * ref_weights).sum(dim=1)
+    style_tokens = x.flatten(2).transpose(1, 2).contiguous()
+    print(f"style.per_ref_spatial_tokens: {shape_of(style_tokens)}")
+    tokens_per_ref = int(style_tokens.size(1))
+    style_tokens = style_tokens.view(batch, refs * tokens_per_ref, style_tokens.size(-1))
+    print(f"style.all_ref_spatial_tokens: {shape_of(style_tokens)}")
+    ref_valid_mask = style_ref_mask.to(device=style_tokens.device, dtype=torch.bool)
+    token_valid_mask = (
+        ref_valid_mask[:, :, None]
+        .expand(batch, refs, tokens_per_ref)
+        .reshape(batch, refs * tokens_per_ref)
+    )
+    print(f"style.all_ref_spatial_token_mask: {shape_of(token_valid_mask)}")
+    style_query = model.style_pool.query.expand(batch, -1, -1)
+    print(f"style.pool_query: {shape_of(style_query)}")
+    style_query = model.style_pool.query_norm(style_query)
+    print(f"style.pool_query_norm: {shape_of(style_query)}")
+    style_keys = model.style_pool.token_norm(style_tokens)
+    print(f"style.pool_token_norm: {shape_of(style_keys)}")
+    key_padding_mask = None
+    need_weights = False
+    if bool((~token_valid_mask).any().item()):
+        key_padding_mask = ~token_valid_mask
+        need_weights = True
+    style_vectors, _ = model.style_pool.attn(
+        style_query,
+        style_keys,
+        style_tokens,
+        key_padding_mask=key_padding_mask,
+        need_weights=need_weights,
+    )
+    print(f"style.attention_pool: {shape_of(style_vectors)}")
+    pooled_style = style_vectors.squeeze(1)
     print(f"style.pooled_style: {shape_of(pooled_style)}")
-    style_post_hidden = model.style_post_norm(pooled_style)
-    print(f"style.post_norm: {shape_of(style_post_hidden)}")
-    style_post_delta = model.style_post_mlp(style_post_hidden)
-    print(f"style.post_mlp_delta: {shape_of(style_post_delta)}")
-    style_residual = pooled_style + style_post_delta
-    print(f"style.post_mlp_residual: {shape_of(style_residual)}")
-    style_global = model.style_proj(style_residual)
+    style_global = model.style_proj(pooled_style)
     print(f"style.global: {shape_of(style_global)}")
     return style_global
 

@@ -236,8 +236,7 @@ def style_similarity_stats(
     style_embed: torch.Tensor,
     labels: torch.Tensor,
     *,
-    max_samples: int = 64,
-    max_samples_per_label: int = 2,
+    max_pairs: int = 64,
 ) -> Dict[str, float]:
     if labels.dim() != 1:
         labels = labels.view(-1)
@@ -247,42 +246,45 @@ def style_similarity_stats(
         raise ValueError(f"style_embed must be 2D, got {tuple(style_embed.shape)}")
 
     labels = labels.to(device=style_embed.device)
-    batch_size = int(style_embed.size(0))
-    sample_budget = max(2, int(max_samples))
-    per_label_budget = max(1, int(max_samples_per_label))
-    if batch_size > sample_budget:
-        unique_labels, counts = torch.unique(labels, sorted=True, return_counts=True)
-        prioritized_labels = torch.cat([unique_labels[counts > 1], unique_labels[counts <= 1]], dim=0)
-        sample_index_chunks = []
-        sample_count = 0
-        for label_value in prioritized_labels.tolist():
-            label_indices = torch.nonzero(labels.eq(label_value), as_tuple=False).flatten()
-            take_count = min(int(label_indices.numel()), per_label_budget, sample_budget - sample_count)
-            if take_count <= 0:
-                break
-            sample_index_chunks.append(label_indices[:take_count])
-            sample_count += take_count
-            if sample_count >= sample_budget:
-                break
-        sample_indices = torch.cat(sample_index_chunks, dim=0)
-        style_embed = style_embed.index_select(0, sample_indices)
-        labels = labels.index_select(0, sample_indices)
     style_embed = F.normalize(style_embed, dim=-1, eps=1e-6)
-    sim = torch.matmul(style_embed, style_embed.t())
-    identity_mask = torch.eye(style_embed.size(0), device=style_embed.device, dtype=torch.bool)
-    positive_mask = labels.unsqueeze(0).eq(labels.unsqueeze(1)) & (~identity_mask)
-    negative_mask = (~labels.unsqueeze(0).eq(labels.unsqueeze(1))) & (~identity_mask)
 
-    pos_values = sim[positive_mask]
-    neg_values = sim[negative_mask]
-    pos_mean = float(pos_values.mean().item()) if pos_values.numel() > 0 else 0.0
-    neg_mean = float(neg_values.mean().item()) if neg_values.numel() > 0 else 0.0
+    pair_budget = max(1, int(max_pairs))
+    first_index_by_label: dict[int, int] = {}
+    positive_pairs: list[tuple[int, int]] = []
+    label_ids = labels.detach().cpu().tolist()
+    for sample_idx, label_value in enumerate(label_ids):
+        label_value = int(label_value)
+        first_idx = first_index_by_label.get(label_value)
+        if first_idx is None:
+            first_index_by_label[label_value] = int(sample_idx)
+            continue
+        if len(positive_pairs) < pair_budget:
+            positive_pairs.append((first_idx, int(sample_idx)))
+
+    first_indices = list(first_index_by_label.values())
+    negative_pairs = [
+        (int(first_indices[idx]), int(first_indices[idx + 1]))
+        for idx in range(min(len(first_indices) - 1, pair_budget))
+    ]
+
+    def _pair_cos_mean(index_pairs: list[tuple[int, int]]) -> float:
+        if not index_pairs:
+            return 0.0
+        left_index = torch.tensor([pair[0] for pair in index_pairs], device=style_embed.device, dtype=torch.long)
+        right_index = torch.tensor([pair[1] for pair in index_pairs], device=style_embed.device, dtype=torch.long)
+        pair_cos = (
+            style_embed.index_select(0, left_index) * style_embed.index_select(0, right_index)
+        ).sum(dim=1)
+        return float(pair_cos.mean().item())
+
+    pos_mean = _pair_cos_mean(positive_pairs)
+    neg_mean = _pair_cos_mean(negative_pairs)
     return {
         "style_pos_cos": pos_mean,
         "style_neg_cos": neg_mean,
         "style_cos_margin": pos_mean - neg_mean,
-        "style_pos_pairs": float(pos_values.numel()),
-        "style_neg_pairs": float(neg_values.numel()),
+        "style_pos_pairs": float(len(positive_pairs)),
+        "style_neg_pairs": float(len(negative_pairs)),
     }
 
 

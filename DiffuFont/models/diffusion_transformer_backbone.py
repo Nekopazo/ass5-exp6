@@ -51,6 +51,10 @@ def modulate(hidden_states: torch.Tensor, shift: torch.Tensor, scale: torch.Tens
     return hidden_states * (1.0 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 
+def _tensor_rms(x: torch.Tensor) -> torch.Tensor:
+    return torch.sqrt(torch.mean(x.float().pow(2)) + 1e-12)
+
+
 class FeedForward(nn.Module):
     def __init__(self, hidden_dim: int, mlp_ratio: float) -> None:
         super().__init__()
@@ -124,14 +128,12 @@ class GlyphDiTBlock(nn.Module):
             else None
         )
         self.content_zero_linear = _build_zero_linear(hidden_dim) if self.use_content_injection else None
-        self.content_gate = nn.Parameter(torch.ones(hidden_dim)) if self.use_content_injection else None
         self.style_control_norm = (
             nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
             if self.use_style_injection
             else None
         )
         self.style_zero_linear = _build_zero_linear(hidden_dim) if self.use_style_injection else None
-        self.style_gate = nn.Parameter(torch.ones(hidden_dim)) if self.use_style_injection else None
         self.dit_block = DiTBlock(hidden_dim, num_heads, mlp_ratio)
 
     def forward(
@@ -141,14 +143,16 @@ class GlyphDiTBlock(nn.Module):
         time_cond: torch.Tensor,
         content_tokens: torch.Tensor | None,
         style_global: torch.Tensor | None,
-    ) -> torch.Tensor:
+        return_injection_stats: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
         x = patch_tokens
+        block_stats: dict[str, float] = {}
+        block_input_rms = None if not return_injection_stats else float(_tensor_rms(x.detach()).item())
         if self.use_content_injection:
             if (
                 content_tokens is None
                 or self.content_control_norm is None
                 or self.content_zero_linear is None
-                or self.content_gate is None
             ):
                 raise RuntimeError("content_tokens must be provided when content injection is enabled")
             if content_tokens.shape != x.shape:
@@ -157,14 +161,18 @@ class GlyphDiTBlock(nn.Module):
                     f"expected {tuple(x.shape)}, got {tuple(content_tokens.shape)}"
                 )
             content_delta = self.content_zero_linear(self.content_control_norm(content_tokens))
-            x = x + self.content_gate.view(1, 1, -1) * content_delta
+            content_injection = content_delta
+            if return_injection_stats and block_input_rms is not None:
+                block_stats["content_ratio"] = float(
+                    (_tensor_rms(content_injection.detach()) / max(block_input_rms, 1e-12)).item()
+                )
+            x = x + content_injection
 
         if self.use_style_injection:
             if (
                 style_global is None
                 or self.style_control_norm is None
                 or self.style_zero_linear is None
-                or self.style_gate is None
             ):
                 raise RuntimeError("style_global must be provided when style injection is enabled")
             expected_style_shape = (x.size(0), x.size(-1))
@@ -174,12 +182,19 @@ class GlyphDiTBlock(nn.Module):
                     f"expected {expected_style_shape}, got {tuple(style_global.shape)}"
                 )
             style_delta = self.style_zero_linear(self.style_control_norm(style_global)).unsqueeze(1)
-            x = x + self.style_gate.view(1, 1, -1) * style_delta
+            style_injection = style_delta
+            if return_injection_stats and block_input_rms is not None:
+                block_stats["style_ratio"] = float(
+                    (_tensor_rms(style_injection.detach()) / max(block_input_rms, 1e-12)).item()
+                )
+            x = x + style_injection
 
         x = self.dit_block(
             x,
             time_cond=time_cond,
         )
+        if return_injection_stats:
+            return x, block_stats
         return x
 
 
@@ -293,7 +308,8 @@ class DiffusionTransformerBackbone(nn.Module):
         *,
         content_tokens: torch.Tensor,
         style_global: torch.Tensor,
-    ) -> torch.Tensor:
+        return_injection_stats: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
         if image.dim() != 4:
             raise ValueError(f"image must be 4D, got {tuple(image.shape)}")
         expected_shape = (self.in_channels, self.image_size, self.image_size)
@@ -320,12 +336,28 @@ class DiffusionTransformerBackbone(nn.Module):
         else:
             style_global = None
 
-        for block in self.blocks:
-            x = block(
-                x,
-                time_cond=time_cond,
-                content_tokens=content_tokens if block.use_content_injection else None,
-                style_global=style_global if block.use_style_injection else None,
-            )
+        injection_stats: dict[str, float] = {}
+        for block_idx, block in enumerate(self.blocks):
+            if return_injection_stats:
+                x, block_stats = block(
+                    x,
+                    time_cond=time_cond,
+                    content_tokens=content_tokens if block.use_content_injection else None,
+                    style_global=style_global if block.use_style_injection else None,
+                    return_injection_stats=True,
+                )
+                block_prefix = f"block_{block_idx + 1:02d}"
+                for key, value in block_stats.items():
+                    injection_stats[f"{block_prefix}_{key}"] = float(value)
+            else:
+                x = block(
+                    x,
+                    time_cond=time_cond,
+                    content_tokens=content_tokens if block.use_content_injection else None,
+                    style_global=style_global if block.use_style_injection else None,
+                )
 
-        return self.final_norm(x)
+        x = self.final_norm(x)
+        if return_injection_stats:
+            return x, injection_stats
+        return x

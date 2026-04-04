@@ -225,6 +225,7 @@ def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
         image_size=int(args.image_size),
         patch_size=int(args.patch_size),
         encoder_hidden_dim=int(args.encoder_hidden_dim),
+        style_hidden_dim=int(args.style_hidden_dim),
         dit_hidden_dim=int(args.dit_hidden_dim),
         dit_depth=int(args.dit_depth),
         dit_heads=int(args.dit_heads),
@@ -268,6 +269,7 @@ def main() -> None:
 
     parser.add_argument("--patch-size", type=int, required=True)
     parser.add_argument("--encoder-hidden-dim", type=int, required=True)
+    parser.add_argument("--style-hidden-dim", type=int, default=680)
     parser.add_argument("--dit-hidden-dim", type=int, required=True)
     parser.add_argument("--dit-depth", type=int, required=True)
     parser.add_argument("--dit-heads", type=int, required=True)

@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .diffusion_transformer_backbone import DiffusionTransformerBackbone
+from .sdpa_attention import SDPAAttention
 
 
 def _group_count(channels: int) -> int:
@@ -163,6 +164,46 @@ class StyleEncoder(nn.Module):
         return x
 
 
+class StyleAttentionPool(nn.Module):
+    def __init__(self, hidden_dim: int, num_heads: int) -> None:
+        super().__init__()
+        self.hidden_dim = int(hidden_dim)
+        self.num_heads = int(num_heads)
+        if self.hidden_dim <= 0:
+            raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
+        if self.num_heads <= 0 or (self.hidden_dim % self.num_heads) != 0:
+            raise ValueError(f"invalid attention config hidden_dim={hidden_dim} num_heads={num_heads}")
+
+        self.query = nn.Parameter(torch.randn(1, 1, self.hidden_dim) / math.sqrt(float(self.hidden_dim)))
+        self.query_norm = nn.LayerNorm(self.hidden_dim, elementwise_affine=False, eps=1e-6)
+        self.token_norm = nn.LayerNorm(self.hidden_dim, elementwise_affine=False, eps=1e-6)
+        self.attn = SDPAAttention(self.hidden_dim, self.num_heads)
+
+    def forward(self, style_tokens: torch.Tensor, token_valid_mask: torch.Tensor) -> torch.Tensor:
+        if style_tokens.dim() != 3:
+            raise ValueError(f"style_tokens must be 3D, got {tuple(style_tokens.shape)}")
+        if token_valid_mask.shape != style_tokens.shape[:2]:
+            raise ValueError(
+                f"token_valid_mask shape mismatch: expected {tuple(style_tokens.shape[:2])}, "
+                f"got {tuple(token_valid_mask.shape)}"
+            )
+
+        query = self.query.to(device=style_tokens.device, dtype=style_tokens.dtype).expand(style_tokens.size(0), -1, -1)
+        key_padding_mask = None
+        need_weights = False
+        if bool((~token_valid_mask).any().item()):
+            key_padding_mask = ~token_valid_mask
+            need_weights = True
+        pooled_style, _ = self.attn(
+            self.query_norm(query),
+            self.token_norm(style_tokens),
+            style_tokens,
+            key_padding_mask=key_padding_mask,
+            need_weights=need_weights,
+        )
+        return pooled_style.squeeze(1)
+
+
 class PatchDetailerHead(nn.Module):
     """Per-patch local refiner conditioned on the final DiT token."""
 
@@ -281,7 +322,7 @@ class SourcePartRefDiT(nn.Module):
         image_size: int = 128,
         patch_size: int = 16,
         encoder_hidden_dim: int = 512,
-        style_hidden_dim: int = 512,
+        style_hidden_dim: int = 786,
         dit_hidden_dim: int = 512,
         dit_depth: int = 12,
         dit_heads: int = 8,
@@ -333,16 +374,11 @@ class SourcePartRefDiT(nn.Module):
             in_channels=self.in_channels,
             hidden_dim=self.style_hidden_dim,
         )
-        self.style_std_scale = nn.Parameter(torch.ones(self.style_hidden_dim))
-        self.style_post_norm = nn.LayerNorm(self.style_hidden_dim, elementwise_affine=False, eps=1e-6)
-        style_post_mlp_hidden_dim = self.style_hidden_dim * 2
-        self.style_post_mlp = nn.Sequential(
-            nn.Linear(self.style_hidden_dim, style_post_mlp_hidden_dim),
-            nn.SiLU(),
-            nn.Linear(style_post_mlp_hidden_dim, self.style_hidden_dim),
+        self.style_pool_heads = self._resolve_style_pool_heads(self.style_hidden_dim, self.dit_heads)
+        self.style_pool = StyleAttentionPool(
+            hidden_dim=self.style_hidden_dim,
+            num_heads=self.style_pool_heads,
         )
-        nn.init.zeros_(self.style_post_mlp[-1].weight)
-        nn.init.zeros_(self.style_post_mlp[-1].bias)
         self.backbone = DiffusionTransformerBackbone(
             in_channels=self.in_channels,
             image_size=self.image_size,
@@ -390,6 +426,15 @@ class SourcePartRefDiT(nn.Module):
             "detailer_bottleneck_channels": int(self.detailer_bottleneck_channels),
         }
 
+    @staticmethod
+    def _resolve_style_pool_heads(style_hidden_dim: int, max_heads: int) -> int:
+        style_hidden_dim = int(style_hidden_dim)
+        max_heads = max(1, int(max_heads))
+        for num_heads in range(min(style_hidden_dim, max_heads), 0, -1):
+            if style_hidden_dim % num_heads == 0:
+                return num_heads
+        return 1
+
     def encode_content_tokens(self, content_img: torch.Tensor) -> torch.Tensor:
         content_features = self.content_encoder(content_img)
         return content_features.flatten(2).transpose(1, 2).contiguous()
@@ -405,25 +450,29 @@ class SourcePartRefDiT(nn.Module):
             raise ValueError(f"style_img must be BCHW or BRCHW, got {tuple(style_img.shape)}")
 
         batch, refs, channels, height, width = style_img.shape
-        flat_style = style_img.view(batch * refs, channels, height, width)
-        style_features = self.style_encoder(flat_style)
-        style_mean = style_features.float().mean(dim=(2, 3))
-        style_std = style_features.float().std(dim=(2, 3), unbiased=False)
-        style_vectors = style_mean + style_std * self.style_std_scale.float().view(1, -1)
-        style_vectors = style_vectors.to(dtype=style_features.dtype).view(batch, refs, self.style_hidden_dim)
         if style_ref_mask is None:
-            ref_valid_mask = torch.ones((batch, refs), device=style_vectors.device, dtype=torch.bool)
+            ref_valid_mask = torch.ones((batch, refs), device=style_img.device, dtype=torch.bool)
         else:
-            ref_valid_mask = style_ref_mask.to(device=style_vectors.device, dtype=torch.bool)
+            ref_valid_mask = style_ref_mask.to(device=style_img.device, dtype=torch.bool)
         if ref_valid_mask.shape != (batch, refs):
             raise RuntimeError(
                 f"style_ref_mask shape mismatch: expected {(batch, refs)}, got {tuple(ref_valid_mask.shape)}"
             )
         if bool((~ref_valid_mask).all(dim=1).any()):
             raise RuntimeError("style_ref_mask must keep at least one reference per sample")
-        ref_weights = ref_valid_mask.to(dtype=style_vectors.dtype).unsqueeze(-1)
-        pooled_style = (style_vectors * ref_weights).sum(dim=1) / ref_weights.sum(dim=1).clamp_min(1.0)
-        pooled_style = pooled_style + self.style_post_mlp(self.style_post_norm(pooled_style))
+
+        flat_style = style_img.view(batch * refs, channels, height, width)
+        style_features = self.style_encoder(flat_style)
+        style_tokens = style_features.flatten(2).transpose(1, 2).contiguous()
+        tokens_per_ref = int(style_tokens.size(1))
+        style_tokens = style_tokens.view(batch, refs * tokens_per_ref, self.style_hidden_dim)
+        token_valid_mask = (
+            ref_valid_mask[:, :, None]
+            .expand(batch, refs, tokens_per_ref)
+            .reshape(batch, refs * tokens_per_ref)
+        )
+        pooled_style = self.style_pool(style_tokens, token_valid_mask=token_valid_mask)
+        pooled_style = pooled_style.to(dtype=style_features.dtype)
         return self.style_proj(pooled_style)
 
     def _patchify(self, x: torch.Tensor) -> torch.Tensor:
@@ -465,16 +514,26 @@ class SourcePartRefDiT(nn.Module):
         *,
         content_tokens: torch.Tensor,
         style_global: torch.Tensor,
-    ) -> torch.Tensor:
-        patch_tokens = self.backbone(
+        return_injection_stats: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
+        backbone_output = self.backbone(
             x_t_image,
             timesteps,
             content_tokens=content_tokens,
             style_global=style_global,
+            return_injection_stats=return_injection_stats,
         )
+        if return_injection_stats:
+            patch_tokens, injection_stats = backbone_output
+        else:
+            patch_tokens = backbone_output
+            injection_stats = {}
         noisy_patches = self._patchify(x_t_image)
         pred_patches = self.detailer(patch_tokens, noisy_patches)
-        return self._unpatchify(pred_patches)
+        pred_flow = self._unpatchify(pred_patches)
+        if return_injection_stats:
+            return pred_flow, injection_stats
+        return pred_flow
 
     def forward(
         self,

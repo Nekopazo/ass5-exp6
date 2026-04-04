@@ -49,8 +49,7 @@ def sample_style_refs(sample: Dict[str, torch.Tensor]) -> tuple[torch.Tensor, to
     max_refs = min(int(sample.get("style_ref_count_max", style_img.size(0))), int(style_img.size(0)))
     if max_refs < min_refs:
         raise RuntimeError(f"Invalid style ref bounds: min_refs={min_refs} max_refs={max_refs}")
-    ref_count = random.randint(min_refs, max_refs) if min_refs < max_refs else max_refs
-    return style_img[:ref_count], style_ref_mask[:ref_count]
+    return style_img[:max_refs], style_ref_mask[:max_refs]
 
 
 def tensor_to_pil(tensor: torch.Tensor, size: int = 128) -> Image.Image:

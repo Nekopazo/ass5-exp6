@@ -698,11 +698,12 @@ class FlowTrainer(_BaseTrainer):
                 style,
                 style_ref_mask,
             )
-            pred_flow = model.predict_flow(
+            pred_flow, injection_stats = model.predict_flow(
                 xt,
                 timesteps,
                 content_tokens=content_tokens,
                 style_global=style_global,
+                return_injection_stats=True,
             )
             loss_flow_per_sample = (pred_flow.float() - target_flow.float()).pow(2).reshape(target.size(0), -1).mean(dim=1)
             loss_flow = loss_flow_per_sample.mean()
@@ -778,6 +779,7 @@ class FlowTrainer(_BaseTrainer):
             "t_mean": timesteps.mean(),
         }
         metrics.update(style_stats)
+        metrics.update(injection_stats)
         return metrics
 
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
