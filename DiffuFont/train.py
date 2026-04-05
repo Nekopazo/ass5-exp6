@@ -269,7 +269,7 @@ def main() -> None:
 
     parser.add_argument("--patch-size", type=int, required=True)
     parser.add_argument("--encoder-hidden-dim", type=int, required=True)
-    parser.add_argument("--style-hidden-dim", type=int, default=680)
+    parser.add_argument("--style-hidden-dim", type=int, default=684)
     parser.add_argument("--dit-hidden-dim", type=int, required=True)
     parser.add_argument("--dit-depth", type=int, required=True)
     parser.add_argument("--dit-heads", type=int, required=True)

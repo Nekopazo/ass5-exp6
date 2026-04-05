@@ -322,7 +322,7 @@ class SourcePartRefDiT(nn.Module):
         image_size: int = 128,
         patch_size: int = 16,
         encoder_hidden_dim: int = 512,
-        style_hidden_dim: int = 786,
+        style_hidden_dim: int = 684,
         dit_hidden_dim: int = 512,
         dit_depth: int = 12,
         dit_heads: int = 8,

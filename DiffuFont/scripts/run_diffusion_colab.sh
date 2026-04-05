@@ -27,7 +27,7 @@ VAL_EVERY=100
 VAL_MAX_BATCHES=16
 LR="1e-4"
 LR_WARMUP_STEPS=0
-LR_DECAY_START_STEP="40000"
+LR_DECAY_START_STEP="35000"
 LR_MIN_SCALE="0.1"
 GRAD_CLIP_NORM="1.0"
 GRAD_CLIP_MIN_NORM="0.5"
@@ -42,12 +42,13 @@ IMAGE_SIZE=128
 
 PATCH_SIZE=16
 ENCODER_HIDDEN_DIM=512
+STYLE_HIDDEN_DIM=684
 DIT_HIDDEN_DIM=512
 DIT_DEPTH=12
 DIT_HEADS=8
 DIT_MLP_RATIO="4.0"
-CONTENT_INJECTION_LAYERS="2,4,6,8"
-STYLE_INJECTION_LAYERS="9,10,11,12"
+CONTENT_INJECTION_LAYERS="2,4,6,8,10"
+STYLE_INJECTION_LAYERS="1,2,3,4,5,6,7,8,9,10,11,12"
 DETAILER_BASE_CHANNELS=32
 DETAILER_MAX_CHANNELS=256
 
@@ -57,7 +58,7 @@ PERCEPTOR_CHECKPOINT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/f
 PERCEPTUAL_LOSS_LAMBDA="0.2"
 STYLE_LOSS_LAMBDA="0.05"
 STYLE_BATCH_SUPCON_LAMBDA="0.01"
-PIXEL_LOSS_LAMBDA="0.05"
+PIXEL_LOSS_LAMBDA="0.03"
 AUX_LOSS_T_LOGISTIC_STEEPNESS="8.0"
 PERCEPTUAL_LOSS_T_MIDPOINT="0.35"
 STYLE_LOSS_T_MIDPOINT="0.45"
@@ -119,6 +120,7 @@ while [[ $# -gt 0 ]]; do
     --image-size) IMAGE_SIZE="${2:?}"; shift 2 ;;
     --patch-size) PATCH_SIZE="${2:?}"; shift 2 ;;
     --encoder-hidden-dim) ENCODER_HIDDEN_DIM="${2:?}"; shift 2 ;;
+    --style-hidden-dim) STYLE_HIDDEN_DIM="${2:?}"; shift 2 ;;
     --dit-hidden-dim) DIT_HIDDEN_DIM="${2:?}"; shift 2 ;;
     --dit-depth) DIT_DEPTH="${2:?}"; shift 2 ;;
     --dit-heads) DIT_HEADS="${2:?}"; shift 2 ;;
@@ -197,6 +199,7 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --image-size "${IMAGE_SIZE}"
     --patch-size "${PATCH_SIZE}"
     --encoder-hidden-dim "${ENCODER_HIDDEN_DIM}"
+    --style-hidden-dim "${STYLE_HIDDEN_DIM}"
     --dit-hidden-dim "${DIT_HIDDEN_DIM}"
     --dit-depth "${DIT_DEPTH}"
     --dit-heads "${DIT_HEADS}"

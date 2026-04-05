@@ -128,12 +128,12 @@ class GlyphDiTBlock(nn.Module):
             else None
         )
         self.content_zero_linear = _build_zero_linear(hidden_dim) if self.use_content_injection else None
-        self.style_control_norm = (
+        self.style_cond_norm = (
             nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
             if self.use_style_injection
             else None
         )
-        self.style_zero_linear = _build_zero_linear(hidden_dim) if self.use_style_injection else None
+        self.style_to_time = _build_zero_linear(hidden_dim) if self.use_style_injection else None
         self.dit_block = DiTBlock(hidden_dim, num_heads, mlp_ratio)
 
     def forward(
@@ -148,6 +148,7 @@ class GlyphDiTBlock(nn.Module):
         x = patch_tokens
         block_stats: dict[str, float] = {}
         block_input_rms = None if not return_injection_stats else float(_tensor_rms(x.detach()).item())
+        merged_time_cond = time_cond
         if self.use_content_injection:
             if (
                 content_tokens is None
@@ -171,8 +172,8 @@ class GlyphDiTBlock(nn.Module):
         if self.use_style_injection:
             if (
                 style_global is None
-                or self.style_control_norm is None
-                or self.style_zero_linear is None
+                or self.style_cond_norm is None
+                or self.style_to_time is None
             ):
                 raise RuntimeError("style_global must be provided when style injection is enabled")
             expected_style_shape = (x.size(0), x.size(-1))
@@ -181,17 +182,11 @@ class GlyphDiTBlock(nn.Module):
                     "style_global shape mismatch: "
                     f"expected {expected_style_shape}, got {tuple(style_global.shape)}"
                 )
-            style_delta = self.style_zero_linear(self.style_control_norm(style_global)).unsqueeze(1)
-            style_injection = style_delta
-            if return_injection_stats and block_input_rms is not None:
-                block_stats["style_ratio"] = float(
-                    (_tensor_rms(style_injection.detach()) / max(block_input_rms, 1e-12)).item()
-                )
-            x = x + style_injection
+            merged_time_cond = merged_time_cond + self.style_to_time(self.style_cond_norm(style_global))
 
         x = self.dit_block(
             x,
-            time_cond=time_cond,
+            time_cond=merged_time_cond,
         )
         if return_injection_stats:
             return x, block_stats

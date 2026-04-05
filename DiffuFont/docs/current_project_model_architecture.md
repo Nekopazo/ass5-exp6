@@ -29,8 +29,8 @@ Core design:
 - style is encoded into one global vector per sample
 - each transformer block applies external content/style injection first, then a standard time-conditioned DiT block
 - content injection uses zero-linear residuals
-- style injection uses zero-linear residuals from the global style vector
-- style does not enter AdaLN
+- style is merged into each enabled block's time conditioning with a zero-init `style_to_time`
+- style does not have a separate residual token injection path
 - self-attention is performed inside the DiT block after content/style injection
 - patch-level transformer outputs are refined by a per-patch local detailer before unpatchifying to the final flow field
 
@@ -57,7 +57,7 @@ Current default constructor values:
 | `patch_grid_size` | `8` |
 | `num_patches` | `64` |
 | `encoder_hidden_dim` | `512` |
-| `style_hidden_dim` | `786` |
+| `style_hidden_dim` | `684` |
 | `style_pool_heads` | `6` |
 | `dit_hidden_dim` | `512` |
 | `dit_depth` | `12` |
@@ -75,12 +75,12 @@ Current parameter counts from `inspect_flow_model.py`:
 | --- | ---: |
 | `content_encoder` | `7,823,488` |
 | `content_proj` | `0` |
-| `style_encoder` | `19,304,518` |
-| `style_pool` | `2,475,114` |
-| `style_proj` | `402,944` |
-| `backbone` | `60,531,200` |
+| `style_encoder` | `16,252,372` |
+| `style_pool` | `1,874,844` |
+| `style_proj` | `350,720` |
+| `backbone` | `60,525,056` |
 | `detailer` | `4,852,737` |
-| total | `95,390,001` |
+| total | `91,679,217` |
 
 ## 3. Top-Level Forward Graph
 
@@ -139,7 +139,7 @@ Semantics:
 
 Implemented by `StyleEncoder` and `SourcePartRefDiT.encode_style_global`.
 
-For each sample, every style reference glyph is encoded independently to a `4x4x786` feature map. The `4x4` spatial grid from all valid references is flattened and concatenated into `R*16` local tokens, pooled once by a single-query attention pool without positional embedding and with `style_ref_mask` expanded to token-level masking, then projected by `style_proj: 786 -> 512`.
+For each sample, every style reference glyph is encoded independently to a `4x4x684` feature map. The `4x4` spatial grid from all valid references is flattened and concatenated into `R*16` local tokens, pooled once by a single-query attention pool without positional embedding and with `style_ref_mask` expanded to token-level masking, then projected by `style_proj: 684 -> 512`.
 
 Shape trace for `B=1`, `R=6`:
 
@@ -155,25 +155,25 @@ Shape trace for `B=1`, `R=6`:
 | `resblock_2` | `(6, 256, 16, 16)` |
 | `downsample_3` | `(6, 384, 8, 8)` |
 | `resblock_3` | `(6, 384, 8, 8)` |
-| `downsample_4` | `(6, 786, 4, 4)` |
-| `resblock_4` | `(6, 786, 4, 4)` |
-| `flatten(2).transpose(1,2)` | `(6, 16, 786)` |
-| `view(B, R*16, D)` | `(1, 96, 786)` |
+| `downsample_4` | `(6, 684, 4, 4)` |
+| `resblock_4` | `(6, 684, 4, 4)` |
+| `flatten(2).transpose(1,2)` | `(6, 16, 684)` |
+| `view(B, R*16, D)` | `(1, 96, 684)` |
 | `expand style_ref_mask to token mask` | `(1, 96)` |
-| `style_pool.query` | `(1, 1, 786)` |
-| `style_pool.attn` | `(1, 1, 786)` |
-| `squeeze(1)` | `(1, 786)` |
+| `style_pool.query` | `(1, 1, 684)` |
+| `style_pool.attn` | `(1, 1, 684)` |
+| `squeeze(1)` | `(1, 684)` |
 | `style_proj` | `(1, 512)` |
 
 Exact aggregation:
 
 ```text
-style_features_r = style_encoder(style_refs_r)              # [B*R, 786, 4, 4]
-style_tokens_r = flatten_hw(style_features_r)               # [B*R, 16, 786]
-style_tokens = reshape(style_tokens_r)                      # [B, R*16, 786]
+style_features_r = style_encoder(style_refs_r)              # [B*R, 684, 4, 4]
+style_tokens_r = flatten_hw(style_features_r)               # [B*R, 16, 684]
+style_tokens = reshape(style_tokens_r)                      # [B, R*16, 684]
 token_mask = expand_ref_mask(style_ref_mask, 16)            # [B, R*16]
 
-pooled_style = style_pool(style_tokens, token_mask)         # [B, 786]
+pooled_style = style_pool(style_tokens, token_mask)         # [B, 684]
 style_global = style_proj(pooled_style)                     # [B, 512]
 ```
 
@@ -231,29 +231,28 @@ Important details:
 - `zero_linear_l` is zero-initialized, so this residual starts from zero contribution
 - `c.shape` must exactly match `x_l.shape`
 
-#### 6.3.2 Style injection
+#### 6.3.2 Style-to-time merge
 
 Enabled only if layer `l` is in `style_injection_layers`.
 
 ```text
-delta_s = zero_linear_s_l(style_control_ln_l(s)).unsqueeze(1)  # [B, 1, 512]
-x_l = x_l + delta_s
+style_bias_l = style_to_time_l(style_cond_ln_l(s))             # [B, 512]
+t'_l = t + style_bias_l                                        # [B, 512]
 ```
 
 Important details:
 
 - style is a single global vector per sample
-- this residual is broadcast to all patch tokens
-- `zero_linear_s_l` is zero-initialized, so style injection starts from zero contribution
-- style does not modify AdaLN parameters
+- `style_to_time_l` is zero-initialized, so style starts as a no-op
+- style is merged into the same modulation path used by timestep conditioning
 
 #### 6.3.3 Standard time-conditioned DiT block
 
-After content/style injection, the block runs one self-attention sublayer and one MLP sublayer, both modulated only by `time_cond`.
+After content injection and optional style-to-time merge, the block runs one self-attention sublayer and one MLP sublayer, both modulated by the merged timestep condition.
 
 ```text
 shift_sa, scale_sa, gate_sa, shift_ffn, scale_ffn, gate_ffn =
-    time_modulation_l(time_mod_input_ln_l(time_cond))        # each [B, 512]
+    time_modulation_l(time_mod_input_ln_l(t'_l))               # each [B, 512]
 
 h = modulate(self_ln_l(x_l), shift_sa, scale_sa)             # [B, 64, 512]
 x_l = x_l + gate_sa[:, None, :] * self_attn_l(h, h, h)       # [B, 64, 512]
@@ -386,14 +385,12 @@ Logged conditioning-injection diagnostics:
 
 ```text
 block_{l}_content_ratio
-block_{l}_style_ratio
 ```
 
 Where:
 
 ```text
 block_{l}_content_ratio = rms(zero_linear_l(LN(content_tokens))) / rms(block_input_tokens_l)
-block_{l}_style_ratio   = rms(zero_linear_l(LN(style_global))) / rms(block_input_tokens_l)
 ```
 
 These diagnostics are computed immediately before the DiT block and therefore do not require disabling Flash Attention or changing the attention backend.
