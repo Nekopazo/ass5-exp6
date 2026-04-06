@@ -115,7 +115,9 @@ def run_inference(
             style_ref_mask = style_ref_mask.unsqueeze(0)
             generation = trainer.flow_sample(
                 content,
+                content_index=torch.tensor([0], dtype=torch.long),
                 style_img=style,
+                style_index=torch.tensor([0], dtype=torch.long),
                 style_ref_mask=style_ref_mask,
                 num_inference_steps=int(inference_steps),
             )

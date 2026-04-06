@@ -283,20 +283,26 @@ class FontImageDataset(Dataset):
         )
         return anchor_indices, positive_indices
 
-    def get_fixed_style_refs(
+    def list_style_candidate_indices(
         self,
         font_name: str,
-        target_index: int,
-        ref_count: int,
+        *,
+        excluded_indices: Optional[List[int]] = None,
+    ) -> List[int]:
+        excluded = set()
+        if excluded_indices is not None:
+            excluded.update(int(idx) for idx in excluded_indices)
+        return [int(idx) for idx in self.valid_indices_by_font[font_name] if int(idx) not in excluded]
+
+    def load_style_refs_by_indices(
+        self,
+        font_name: str,
+        style_indices: List[int],
     ) -> Tuple[torch.Tensor, torch.Tensor, List[str]]:
         self._ensure_txns()
-        target_index = int(target_index)
-        ref_count = max(1, int(ref_count))
-        candidates = [int(idx) for idx in self.valid_indices_by_font[font_name] if int(idx) != target_index]
-        if not candidates:
-            raise RuntimeError(f"Font '{font_name}' has no alternative glyph for fixed style reference.")
-        repeat = (ref_count + len(candidates) - 1) // len(candidates)
-        chosen = (candidates * repeat)[:ref_count]
+        if not style_indices:
+            raise RuntimeError(f"Font '{font_name}' has no style indices to load.")
+        chosen = [int(idx) for idx in style_indices]
         style_chars = [self.char_list[idx] for idx in chosen]
         style_imgs = [
             self._load_tensor(self._t_txn, f"{font_name}@{style_char}", style=True)
@@ -415,13 +421,12 @@ class UniqueFontBatchSampler(Sampler[List[int]]):
 
 
 class CartesianFontCharBatchSampler(Sampler[List[int]]):
-    """Yields cartesian-product batches over shuffled font groups and char groups.
+    """Yields full cartesian-product batches from a continuous shuffled sample stream.
 
-    Each epoch still traverses all available font-char samples once through the
-    base cartesian schedule. If a cartesian batch is smaller than the target
-    size because some font-char combinations are missing or the trailing font
-    group is smaller than fonts_per_batch, the sampler pads the batch with
-    extra characters drawn from the current font group only.
+    Raw cartesian batches are produced from shuffled font groups and char groups
+    without any duplicate padding. If a raw batch is smaller than the target
+    batch size, the sampler carries the remaining slots forward and fills them
+    with samples from subsequent shuffled cartesian passes.
     """
 
     def __init__(
@@ -439,7 +444,11 @@ class CartesianFontCharBatchSampler(Sampler[List[int]]):
         self.seed = int(seed)
         self.drop_last = bool(drop_last)
         self.sample_count = len(self.dataset.samples)
-        self._epoch = 0
+        self._stream_epoch = 0
+        self._stream_batch_pos = 0
+        self._carryover_samples: List[int] = []
+        self._cached_stream_epoch = -1
+        self._cached_stream_batches: List[List[int]] = []
 
     def __len__(self) -> int:
         font_groups = len(self._chunk_items(list(self.dataset.font_names), self.fonts_per_batch))
@@ -447,7 +456,33 @@ class CartesianFontCharBatchSampler(Sampler[List[int]]):
         return font_groups * char_groups
 
     def __iter__(self):
-        rng = random.Random(self.seed + self._epoch)
+        target_batch_size = self.fonts_per_batch * self.chars_per_batch
+        output_batch_count = len(self)
+        for _ in range(output_batch_count):
+            while len(self._carryover_samples) < target_batch_size:
+                self._carryover_samples.extend(self._next_raw_batch())
+            batch = self._carryover_samples[:target_batch_size]
+            self._carryover_samples = self._carryover_samples[target_batch_size:]
+            yield batch
+
+    def _next_raw_batch(self) -> List[int]:
+        while True:
+            raw_batches = self._raw_batches_for_stream_epoch(self._stream_epoch)
+            if self._stream_batch_pos >= len(raw_batches):
+                self._stream_epoch += 1
+                self._stream_batch_pos = 0
+                continue
+            batch = raw_batches[self._stream_batch_pos]
+            self._stream_batch_pos += 1
+            if batch:
+                return batch
+
+    def _raw_batches_for_stream_epoch(self, epoch: int) -> List[List[int]]:
+        epoch = int(epoch)
+        if epoch == self._cached_stream_epoch:
+            return self._cached_stream_batches
+
+        rng = random.Random(self.seed + epoch)
         font_names = list(self.dataset.font_names)
         char_indices = list(range(len(self.dataset.char_list)))
         rng.shuffle(font_names)
@@ -455,41 +490,21 @@ class CartesianFontCharBatchSampler(Sampler[List[int]]):
 
         font_groups = self._chunk_items(font_names, self.fonts_per_batch)
         char_groups = self._chunk_items(char_indices, self.chars_per_batch)
-        target_batch_size = self.fonts_per_batch * self.chars_per_batch
+        raw_batches: List[List[int]] = []
         for font_group in font_groups:
             for char_group in char_groups:
                 batch: List[int] = []
-                batch_set: set[int] = set()
                 for font_name in font_group:
                     lookup = self.dataset.sample_index_by_font_char[font_name]
                     for char_index in char_group:
                         sample_index = lookup.get(int(char_index))
                         if sample_index is not None:
-                            sample_index = int(sample_index)
-                            batch.append(sample_index)
-                            batch_set.add(sample_index)
-                if len(batch) < target_batch_size:
-                    pad_count = target_batch_size - len(batch)
-                    pad_candidates = [
-                        int(sample_index)
-                        for font_name in font_group
-                        for sample_index in self.dataset.sample_indices_by_font[font_name]
-                        if int(sample_index) not in batch_set
-                    ]
-                    rng.shuffle(pad_candidates)
-                    batch.extend(pad_candidates[:pad_count])
-                    if len(batch) < target_batch_size:
-                        fallback_candidates = [
-                            int(sample_index)
-                            for font_name in font_group
-                            for sample_index in self.dataset.sample_indices_by_font[font_name]
-                        ]
-                        if not fallback_candidates:
-                            raise RuntimeError("cartesian sampler cannot pad an empty font group")
-                        remaining = target_batch_size - len(batch)
-                        batch.extend(rng.choices(fallback_candidates, k=remaining))
-                yield batch
-        self._epoch += 1
+                            batch.append(int(sample_index))
+                raw_batches.append(batch)
+
+        self._cached_stream_epoch = epoch
+        self._cached_stream_batches = raw_batches
+        return raw_batches
 
     def _chunk_items(self, items: List[Any], chunk_size: int) -> List[List[Any]]:
         chunks: List[List[Any]] = []

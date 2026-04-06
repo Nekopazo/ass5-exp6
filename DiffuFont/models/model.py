@@ -548,7 +548,6 @@ class FlowTrainer(_BaseTrainer):
         perceptor_checkpoint: Optional[str | Path] = None,
         perceptual_loss_lambda: float = 0.0,
         style_loss_lambda: float = 0.0,
-        style_batch_supcon_lambda: float = 0.0,
         pixel_loss_lambda: float = 0.0,
         aux_loss_t_logistic_steepness: float = 8.0,
         perceptual_loss_t_midpoint: float = 0.35,
@@ -582,7 +581,6 @@ class FlowTrainer(_BaseTrainer):
         self.flow_sample_steps = max(1, int(flow_sample_steps))
         self.perceptual_loss_lambda = max(0.0, float(perceptual_loss_lambda))
         self.style_loss_lambda = max(0.0, float(style_loss_lambda))
-        self.style_batch_supcon_lambda = max(0.0, float(style_batch_supcon_lambda))
         self.pixel_loss_lambda = max(0.0, float(pixel_loss_lambda))
         self.aux_loss_t_logistic_steepness = max(1e-3, float(aux_loss_t_logistic_steepness))
         self.perceptual_loss_t_midpoint = min(max(float(perceptual_loss_t_midpoint), 0.0), 1.0)
@@ -657,11 +655,30 @@ class FlowTrainer(_BaseTrainer):
         model: nn.Module,
         style: torch.Tensor,
         style_ref_mask: Optional[torch.Tensor],
+        style_index: torch.Tensor,
     ) -> torch.Tensor:
-        return model.encode_style_global(
+        style_global = model.encode_style_global(
             style_img=style,
             style_ref_mask=style_ref_mask,
         )
+        return self._expand_condition_batch(style_global, style_index)
+
+    def _expand_condition_batch(
+        self,
+        condition: torch.Tensor,
+        condition_index: torch.Tensor,
+    ) -> torch.Tensor:
+        return condition.index_select(0, condition_index.to(device=condition.device, dtype=torch.long))
+
+    def _encode_content_conditions(
+        self,
+        model: nn.Module,
+        content: torch.Tensor,
+        content_index: torch.Tensor,
+    ) -> torch.Tensor:
+        content_tokens = model.encode_content_tokens(content)
+        content_tokens = model.content_proj(content_tokens)
+        return self._expand_condition_batch(content_tokens, content_index)
 
     def _compute_losses(
         self,
@@ -669,14 +686,15 @@ class FlowTrainer(_BaseTrainer):
         *,
         model: Optional[nn.Module] = None,
         step: Optional[int] = None,
-        include_style_batch: bool = True,
     ) -> Dict[str, torch.Tensor | float]:
         model = self.model if model is None else model
         if step is None:
             step = int(self.global_step)
         target = batch["target"].to(self.device)
         content = batch["content"].to(self.device)
+        content_index = batch["content_index"].to(self.device, dtype=torch.long)
         style = batch["style_img"].to(self.device)
+        style_index = batch["style_index"].to(self.device, dtype=torch.long)
         font_id = batch["font_id"].to(self.device)
         style_ref_mask = batch.get("style_ref_mask")
         if style_ref_mask is not None:
@@ -691,12 +709,12 @@ class FlowTrainer(_BaseTrainer):
             t_view = timesteps.view(-1, 1, 1, 1).to(dtype=x1.dtype)
             xt = (1.0 - t_view) * x0 + t_view * x1
             target_flow = x1 - x0
-            content_tokens = model.encode_content_tokens(content)
-            content_tokens = model.content_proj(content_tokens)
+            content_tokens = self._encode_content_conditions(model, content, content_index)
             style_global = self._encode_style_conditions(
                 model,
                 style,
                 style_ref_mask,
+                style_index,
             )
             pred_flow, injection_stats = model.predict_flow(
                 xt,
@@ -728,18 +746,15 @@ class FlowTrainer(_BaseTrainer):
         perceptual_weight_per_sample = self.perceptual_loss_lambda * perceptual_t_scale
         style_weight_per_sample = self.style_loss_lambda * style_t_scale
         pixel_weight_per_sample = self.pixel_loss_lambda * pixel_t_scale
-        style_batch_weight = self.style_batch_supcon_lambda
         perceptual_weight = float(perceptual_weight_per_sample.mean().item())
         style_weight = float(style_weight_per_sample.mean().item())
         pixel_weight = float(pixel_weight_per_sample.mean().item())
         loss_perceptual = target.new_tensor(0.0)
         loss_style_embed = target.new_tensor(0.0)
-        loss_style_batch = target.new_tensor(0.0)
         loss_pixel = pred_target_l1
         flow_term = self.lambda_flow * loss_flow
         perceptual_term = target.new_tensor(0.0)
         style_term = target.new_tensor(0.0)
-        style_batch_term = target.new_tensor(0.0)
         pixel_term = (pixel_weight_per_sample * pixel_loss_per_sample).mean()
         if self.use_cnn_perceptor and self.perceptor_guidance is not None and (
             self.perceptual_loss_lambda > 0.0 or self.style_loss_lambda > 0.0
@@ -751,27 +766,21 @@ class FlowTrainer(_BaseTrainer):
             loss_style_embed_per_sample = guidance_losses["loss_style_embed_per_sample"]
             perceptual_term = (perceptual_weight_per_sample * loss_perceptual_per_sample).mean()
             style_term = (style_weight_per_sample * loss_style_embed_per_sample).mean()
-        if include_style_batch and self.style_batch_supcon_lambda > 0.0:
-            loss_style_batch = supervised_contrastive_loss(style_global.float(), font_id)
-            style_batch_term = style_batch_weight * loss_style_batch
         style_stats = style_similarity_stats(style_global.detach().float(), font_id)
-        loss = flow_term + perceptual_term + style_term + style_batch_term + pixel_term
+        loss = flow_term + perceptual_term + style_term + pixel_term
         metrics = {
             "loss": loss,
             "loss_flow": loss_flow,
             "pred_target_l1": pred_target_l1,
             "loss_perceptual": loss_perceptual,
             "loss_style_embed": loss_style_embed,
-            "loss_style_batch": loss_style_batch,
             "loss_pixel": loss_pixel,
             "loss_flow_term": flow_term,
             "loss_perceptual_term": perceptual_term,
             "loss_style_term": style_term,
-            "loss_style_batch_term": style_batch_term,
             "loss_pixel_term": pixel_term,
             "perceptual_loss_weight": float(perceptual_weight),
             "style_loss_weight": float(style_weight),
-            "style_batch_loss_weight": float(style_batch_weight),
             "pixel_loss_weight": float(pixel_weight),
             "perceptual_loss_t_scale_mean": float(perceptual_t_scale.mean().item()),
             "style_loss_t_scale_mean": float(style_t_scale.mean().item()),
@@ -786,7 +795,7 @@ class FlowTrainer(_BaseTrainer):
         self.model.train()
         self._set_learning_rate_for_step(self.global_step + 1)
         self.optimizer.zero_grad(set_to_none=True)
-        metrics = self._compute_losses(batch, step=self.global_step + 1, include_style_batch=True)
+        metrics = self._compute_losses(batch, step=self.global_step + 1)
         metrics["loss"].backward()
         metrics.update(self._apply_grad_clip(step=self.global_step + 1))
         self.optimizer.step()
@@ -803,7 +812,6 @@ class FlowTrainer(_BaseTrainer):
                     batch,
                     model=self._inference_model(),
                     step=self.global_step,
-                    include_style_batch=False,
                 )
             )
 
@@ -812,7 +820,9 @@ class FlowTrainer(_BaseTrainer):
         self,
         content: torch.Tensor,
         *,
+        content_index: torch.Tensor,
         style_img: torch.Tensor,
+        style_index: torch.Tensor,
         style_ref_mask: Optional[torch.Tensor] = None,
         num_inference_steps: Optional[int] = None,
         use_ema: bool = True,
@@ -820,11 +830,13 @@ class FlowTrainer(_BaseTrainer):
         sample_model = self._inference_model() if use_ema else self.model
         sample_model.eval()
         content = content.to(self.device)
+        content_index = content_index.to(self.device, dtype=torch.long)
         style_img = style_img.to(self.device)
+        style_index = style_index.to(self.device, dtype=torch.long)
         if style_ref_mask is not None:
             style_ref_mask = style_ref_mask.to(self.device)
 
-        batch_size = content.size(0)
+        batch_size = int(content_index.size(0))
         sample = torch.randn(
             batch_size,
             self.model.in_channels,
@@ -835,11 +847,12 @@ class FlowTrainer(_BaseTrainer):
         step_count = self.flow_sample_steps if num_inference_steps is None else max(1, int(num_inference_steps))
         dt = 1.0 / float(step_count)
         with self._autocast_context():
-            content_tokens = sample_model.encode_content_tokens(content)
-            content_tokens = sample_model.content_proj(content_tokens)
-            style_global = sample_model.encode_style_global(
-                style_img=style_img,
-                style_ref_mask=style_ref_mask,
+            content_tokens = self._encode_content_conditions(sample_model, content, content_index)
+            style_global = self._encode_style_conditions(
+                sample_model,
+                style_img,
+                style_ref_mask,
+                style_index,
             )
             for step_idx in range(step_count):
                 t = torch.full(
@@ -877,7 +890,6 @@ class FlowTrainer(_BaseTrainer):
                     "perceptor_checkpoint": self.perceptor_checkpoint,
                     "perceptual_loss_lambda": float(self.perceptual_loss_lambda),
                     "style_loss_lambda": float(self.style_loss_lambda),
-                    "style_batch_supcon_lambda": float(self.style_batch_supcon_lambda),
                     "pixel_loss_lambda": float(self.pixel_loss_lambda),
                     "aux_loss_t_logistic_steepness": float(self.aux_loss_t_logistic_steepness),
                     "perceptual_loss_t_midpoint": float(self.perceptual_loss_t_midpoint),
@@ -923,8 +935,6 @@ class FlowTrainer(_BaseTrainer):
                 self.perceptual_loss_lambda = max(0.0, float(trainer_config["perceptual_loss_lambda"]))
             if "style_loss_lambda" in trainer_config:
                 self.style_loss_lambda = max(0.0, float(trainer_config["style_loss_lambda"]))
-            if "style_batch_supcon_lambda" in trainer_config:
-                self.style_batch_supcon_lambda = max(0.0, float(trainer_config["style_batch_supcon_lambda"]))
             if "pixel_loss_lambda" in trainer_config:
                 self.pixel_loss_lambda = max(0.0, float(trainer_config["pixel_loss_lambda"]))
             if "aux_loss_t_logistic_steepness" in trainer_config:
@@ -975,17 +985,23 @@ class FlowTrainer(_BaseTrainer):
     @torch.no_grad()
     def sample_and_save(self, batch: Dict[str, torch.Tensor], out_dir: Path) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
-        content = batch["content"][:8].to(self.device)
         target = batch["target"][:8].to(self.device)
-        style = batch["style_img"][:8].to(self.device)
+        content = batch["content"]
+        content_index = batch["content_index"][:8]
+        style = batch["style_img"]
+        style_index = batch["style_index"][:8]
         style_ref_mask = batch.get("style_ref_mask")
         if style_ref_mask is not None:
-            style_ref_mask = style_ref_mask[:8].to(self.device)
+            style_ref_mask = style_ref_mask.to(self.device)
         sample = self.flow_sample(
             content,
+            content_index=content_index,
             style_img=style,
+            style_index=style_index,
             style_ref_mask=style_ref_mask,
             num_inference_steps=self.flow_sample_steps,
         )
+        content = content.to(self.device)
+        content = self._expand_condition_batch(content, content_index.to(self.device, dtype=torch.long))
         vis = torch.cat([(content + 1.0) * 0.5, (target + 1.0) * 0.5, (sample + 1.0) * 0.5], dim=0)
         save_image(vis, out_dir / f"sample_step_{self.global_step}.png", nrow=content.size(0))

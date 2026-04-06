@@ -44,29 +44,121 @@ def resolve_device(raw_device: str) -> torch.device:
     return torch.device(raw_device)
 
 
-def _resolve_batch_ref_count(samples) -> int:
-    min_refs = max(int(sample.get("style_ref_count_min", sample["style_img"].size(0))) for sample in samples)
-    max_refs = min(int(sample.get("style_ref_count_max", sample["style_img"].size(0))) for sample in samples)
-    available_refs = min(int(sample["style_img"].size(0)) for sample in samples)
-    max_refs = min(max_refs, available_refs)
-    if max_refs < min_refs:
-        raise RuntimeError(f"Invalid style ref bounds in batch: min_refs={min_refs} max_refs={max_refs}")
-    return random.randint(min_refs, max_refs) if min_refs < max_refs else max_refs
+def _pack_unique_content(samples) -> tuple[torch.Tensor, torch.Tensor]:
+    unique_contents = []
+    content_index = []
+    content_slot_by_char_id: dict[int, int] = {}
+    for sample in samples:
+        char_id = int(sample["char_id"])
+        slot = content_slot_by_char_id.get(char_id)
+        if slot is None:
+            slot = len(unique_contents)
+            content_slot_by_char_id[char_id] = slot
+            unique_contents.append(sample["content"])
+        content_index.append(slot)
+    return torch.stack(unique_contents, dim=0), torch.tensor(content_index, dtype=torch.long)
 
 
-def collate_fn(samples) -> Dict[str, torch.Tensor]:
-    ref_count = _resolve_batch_ref_count(samples)
-    batch = {
-        "font": [sample["font"] for sample in samples],
-        "font_id": torch.tensor([sample["font_id"] for sample in samples], dtype=torch.long),
-        "char": [sample["char"] for sample in samples],
-        "char_id": torch.tensor([sample["char_id"] for sample in samples], dtype=torch.long),
-        "content": torch.stack([sample["content"] for sample in samples], dim=0),
-        "target": torch.stack([sample["target"] for sample in samples], dim=0),
-        "style_img": torch.stack([sample["style_img"][:ref_count] for sample in samples], dim=0),
-        "style_ref_mask": torch.stack([sample["style_ref_mask"][:ref_count] for sample in samples], dim=0),
-    }
-    return batch
+def _compact_unique_indices(sliced_index: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    if sliced_index.numel() == 0:
+        return sliced_index, sliced_index
+    unique_positions = []
+    remapped_indices = []
+    position_remap: dict[int, int] = {}
+    for old_position in sliced_index.tolist():
+        old_position = int(old_position)
+        new_position = position_remap.get(old_position)
+        if new_position is None:
+            new_position = len(unique_positions)
+            position_remap[old_position] = new_position
+            unique_positions.append(old_position)
+        remapped_indices.append(new_position)
+    return torch.tensor(unique_positions, dtype=torch.long), torch.tensor(remapped_indices, dtype=torch.long)
+
+
+class FlowBatchCollator:
+    def __init__(self, dataset: FontImageDataset) -> None:
+        self.dataset = dataset
+
+    def _build_excluded_style_indices(self, samples) -> dict[str, list[int]]:
+        excluded_by_font: dict[str, list[int]] = {}
+        for sample in samples:
+            font_name = str(sample["font"])
+            excluded_by_font.setdefault(font_name, []).append(int(sample["char_id"]))
+        return excluded_by_font
+
+    def _sample_shared_style_indices(self, excluded_by_font: dict[str, list[int]]) -> list[int]:
+        shared_candidates: set[int] | None = None
+        for font_name, excluded_indices in excluded_by_font.items():
+            candidates = set(self.dataset.list_style_candidate_indices(font_name, excluded_indices=excluded_indices))
+            shared_candidates = candidates if shared_candidates is None else shared_candidates & candidates
+        if not shared_candidates:
+            raise RuntimeError("Batch has no shared non-overlapping style references available across fonts.")
+        ordered_candidates = sorted(int(idx) for idx in shared_candidates)
+        max_refs = min(int(self.dataset.style_ref_count_max), len(ordered_candidates))
+        if max_refs < 1:
+            raise RuntimeError("Batch has no shared non-overlapping style references available across fonts.")
+        min_refs = min(int(self.dataset.style_ref_count_min), max_refs)
+        ref_count = random.randint(min_refs, max_refs) if min_refs < max_refs else max_refs
+        return random.sample(ordered_candidates, k=ref_count)
+
+    def _pack_unique_style(
+        self,
+        samples,
+        *,
+        shared_style_indices: list[int],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[str], torch.Tensor]:
+        unique_style_imgs = []
+        unique_style_masks = []
+        style_index = []
+        style_fonts = []
+        style_char_ids = []
+        style_slot_by_font: dict[str, int] = {}
+        for sample in samples:
+            font_name = str(sample["font"])
+            slot = style_slot_by_font.get(font_name)
+            if slot is None:
+                slot = len(unique_style_imgs)
+                style_slot_by_font[font_name] = slot
+                style_img, style_ref_mask, _ = self.dataset.load_style_refs_by_indices(
+                    font_name,
+                    shared_style_indices,
+                )
+                unique_style_imgs.append(style_img)
+                unique_style_masks.append(style_ref_mask)
+                style_fonts.append(font_name)
+                style_char_ids.append(int(sample["char_id"]))
+            style_index.append(slot)
+        return (
+            torch.stack(unique_style_imgs, dim=0),
+            torch.stack(unique_style_masks, dim=0),
+            torch.tensor(style_index, dtype=torch.long),
+            style_fonts,
+            torch.tensor(style_char_ids, dtype=torch.long),
+        )
+
+    def __call__(self, samples) -> Dict[str, torch.Tensor]:
+        excluded_by_font = self._build_excluded_style_indices(samples)
+        shared_style_indices = self._sample_shared_style_indices(excluded_by_font)
+        content, content_index = _pack_unique_content(samples)
+        style_img, style_ref_mask, style_index, style_font, style_char_id = self._pack_unique_style(
+            samples,
+            shared_style_indices=shared_style_indices,
+        )
+        return {
+            "font": [sample["font"] for sample in samples],
+            "font_id": torch.tensor([sample["font_id"] for sample in samples], dtype=torch.long),
+            "char": [sample["char"] for sample in samples],
+            "char_id": torch.tensor([sample["char_id"] for sample in samples], dtype=torch.long),
+            "content": content,
+            "content_index": content_index,
+            "target": torch.stack([sample["target"] for sample in samples], dim=0),
+            "style_img": style_img,
+            "style_ref_mask": style_ref_mask,
+            "style_index": style_index,
+            "style_font": style_font,
+            "style_char_id": style_char_id,
+        }
 
 
 def build_dataloader(
@@ -86,7 +178,7 @@ def build_dataloader(
         "dataset": dataset,
         "num_workers": int(num_workers),
         "pin_memory": (device.type == "cuda"),
-        "collate_fn": collate_fn,
+        "collate_fn": FlowBatchCollator(dataset),
         "worker_init_fn": seed_worker if int(num_workers) > 0 else None,
     }
     if use_unique_font_batches:
@@ -116,10 +208,21 @@ def build_dataloader(
 def slice_batch(batch: Dict[str, torch.Tensor], count: int) -> Dict[str, torch.Tensor]:
     output = {}
     for key, value in batch.items():
+        if key in {"content", "content_index", "style_img", "style_ref_mask", "style_index", "style_font", "style_char_id"}:
+            continue
         if isinstance(value, list):
             output[key] = value[:count]
         elif torch.is_tensor(value):
             output[key] = value[:count]
+    content_positions, content_index = _compact_unique_indices(batch["content_index"][:count])
+    style_positions, style_index = _compact_unique_indices(batch["style_index"][:count])
+    output["content"] = batch["content"][content_positions]
+    output["content_index"] = content_index
+    output["style_img"] = batch["style_img"][style_positions]
+    output["style_ref_mask"] = batch["style_ref_mask"][style_positions]
+    output["style_index"] = style_index
+    output["style_font"] = [batch["style_font"][idx] for idx in style_positions.tolist()]
+    output["style_char_id"] = batch["style_char_id"][style_positions]
     return output
 
 
@@ -127,6 +230,8 @@ def concat_batches(*batches: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]
     merged: Dict[str, torch.Tensor] = {}
     keys = batches[0].keys()
     for key in keys:
+        if key in {"content", "content_index", "style_img", "style_ref_mask", "style_index", "style_font", "style_char_id"}:
+            continue
         values = [batch[key] for batch in batches if key in batch]
         if not values:
             continue
@@ -134,10 +239,26 @@ def concat_batches(*batches: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]
         if isinstance(first, list):
             merged[key] = [item for value in values for item in value]
         elif torch.is_tensor(first):
-            if key in {"style_img", "style_ref_mask"}:
-                ref_count = min(int(value.size(1)) for value in values)
-                values = [value[:, :ref_count] for value in values]
             merged[key] = torch.cat(values, dim=0)
+    merged["content"] = torch.cat([batch["content"] for batch in batches], dim=0)
+    content_indices = []
+    content_offset = 0
+    for batch in batches:
+        content_indices.append(batch["content_index"] + content_offset)
+        content_offset += int(batch["content"].size(0))
+    merged["content_index"] = torch.cat(content_indices, dim=0)
+
+    ref_count = min(int(batch["style_img"].size(1)) for batch in batches)
+    merged["style_img"] = torch.cat([batch["style_img"][:, :ref_count] for batch in batches], dim=0)
+    merged["style_ref_mask"] = torch.cat([batch["style_ref_mask"][:, :ref_count] for batch in batches], dim=0)
+    style_indices = []
+    style_offset = 0
+    for batch in batches:
+        style_indices.append(batch["style_index"] + style_offset)
+        style_offset += int(batch["style_img"].size(0))
+    merged["style_index"] = torch.cat(style_indices, dim=0)
+    merged["style_font"] = [font_name for batch in batches for font_name in batch["style_font"]]
+    merged["style_char_id"] = torch.cat([batch["style_char_id"] for batch in batches], dim=0)
     return merged
 
 
@@ -148,27 +269,33 @@ def apply_fixed_style_refs(
     *,
     seen_count: int,
 ) -> Dict[str, torch.Tensor]:
-    if "style_img" not in batch or "style_ref_mask" not in batch:
-        return batch
     ref_count = int(batch["style_img"].size(1))
-    fixed_style_imgs = []
-    fixed_style_masks = []
-    fixed_style_chars = []
-    for idx, (font_name, char_id) in enumerate(zip(batch["font"], batch["char_id"].tolist(), strict=True)):
+    shared_candidates: set[int] | None = None
+    for idx, (font_name, char_id) in enumerate(zip(batch["style_font"], batch["style_char_id"].tolist(), strict=True)):
         dataset = train_dataset if idx < seen_count else val_dataset
         if dataset is None:
             raise RuntimeError("val dataset is required for unseen sample style references")
-        style_img, style_ref_mask, style_chars = dataset.get_fixed_style_refs(
+        candidates = set(dataset.list_style_candidate_indices(font_name, excluded_indices=[int(char_id)]))
+        shared_candidates = candidates if shared_candidates is None else shared_candidates & candidates
+    if shared_candidates is None or len(shared_candidates) < ref_count:
+        raise RuntimeError(
+            f"Sample batch needs {ref_count} shared fixed style refs, only found {0 if shared_candidates is None else len(shared_candidates)}."
+        )
+    shared_style_indices = sorted(int(idx) for idx in shared_candidates)[:ref_count]
+    fixed_style_imgs = []
+    fixed_style_masks = []
+    for idx, font_name in enumerate(batch["style_font"]):
+        dataset = train_dataset if idx < seen_count else val_dataset
+        if dataset is None:
+            raise RuntimeError("val dataset is required for unseen sample style references")
+        style_img, style_ref_mask, _ = dataset.load_style_refs_by_indices(
             font_name,
-            int(char_id),
-            ref_count,
+            shared_style_indices,
         )
         fixed_style_imgs.append(style_img)
         fixed_style_masks.append(style_ref_mask)
-        fixed_style_chars.append(style_chars)
     batch["style_img"] = torch.stack(fixed_style_imgs, dim=0)
     batch["style_ref_mask"] = torch.stack(fixed_style_masks, dim=0)
-    batch["style_chars"] = fixed_style_chars
     return batch
 
 
@@ -269,7 +396,7 @@ def main() -> None:
 
     parser.add_argument("--patch-size", type=int, required=True)
     parser.add_argument("--encoder-hidden-dim", type=int, required=True)
-    parser.add_argument("--style-hidden-dim", type=int, default=684)
+    parser.add_argument("--style-hidden-dim", type=int, default=768)
     parser.add_argument("--dit-hidden-dim", type=int, required=True)
     parser.add_argument("--dit-depth", type=int, required=True)
     parser.add_argument("--dit-heads", type=int, required=True)
@@ -302,7 +429,6 @@ def main() -> None:
     parser.add_argument("--perceptor-checkpoint", type=Path)
     parser.add_argument("--perceptual-loss-lambda", type=float, required=True)
     parser.add_argument("--style-loss-lambda", type=float, required=True)
-    parser.add_argument("--style-batch-supcon-lambda", type=float, default=0.0)
     parser.add_argument("--pixel-loss-lambda", type=float, default=0.05)
     parser.add_argument("--aux-loss-t-logistic-steepness", type=float, default=8.0)
     parser.add_argument("--perceptual-loss-t-midpoint", type=float, default=0.35)
@@ -352,6 +478,7 @@ def main() -> None:
         font_train_ratio=float(args.font_train_ratio),
         transform=glyph_transform,
         style_transform=glyph_transform,
+        load_style_refs=False,
     )
     val_dataset = None
     if str(args.font_split) == "train":
@@ -368,6 +495,7 @@ def main() -> None:
             font_train_ratio=float(args.font_train_ratio),
             transform=glyph_transform,
             style_transform=glyph_transform,
+            load_style_refs=False,
         )
 
     dataloader = build_dataloader(
@@ -402,7 +530,7 @@ def main() -> None:
             f"fonts_per_batch={int(args.cartesian_fonts_per_batch)} "
             f"chars_per_batch={int(args.cartesian_chars_per_batch)} "
             f"effective_batch={int(args.cartesian_fonts_per_batch) * int(args.cartesian_chars_per_batch)} "
-            "pad_missing_within_font_group=1"
+            "carry_over_partial_batches=1 duplicate_padding=0"
         )
 
     resolved_epochs = max(1, int(args.epochs))
@@ -412,7 +540,6 @@ def main() -> None:
     effective_perceptor_checkpoint = args.perceptor_checkpoint
     effective_perceptual_loss_lambda = float(args.perceptual_loss_lambda)
     effective_style_loss_lambda = float(args.style_loss_lambda)
-    effective_style_batch_supcon_lambda = max(0.0, float(args.style_batch_supcon_lambda))
     effective_pixel_loss_lambda = max(0.0, float(args.pixel_loss_lambda))
     if not bool(args.use_cnn_perceptor):
         if args.perceptor_checkpoint is not None or effective_perceptual_loss_lambda > 0.0 or effective_style_loss_lambda > 0.0:
@@ -420,8 +547,6 @@ def main() -> None:
         effective_perceptor_checkpoint = None
         effective_perceptual_loss_lambda = 0.0
         effective_style_loss_lambda = 0.0
-    if effective_style_batch_supcon_lambda > 0.0 and str(args.train_sampling) != "cartesian_font_char":
-        print("[train] warning: style_batch_supcon_lambda is most effective with train_sampling=cartesian_font_char")
 
     model = build_model(args)
     trainer = FlowTrainer(
@@ -437,7 +562,6 @@ def main() -> None:
         perceptor_checkpoint=effective_perceptor_checkpoint,
         perceptual_loss_lambda=effective_perceptual_loss_lambda,
         style_loss_lambda=effective_style_loss_lambda,
-        style_batch_supcon_lambda=effective_style_batch_supcon_lambda,
         pixel_loss_lambda=effective_pixel_loss_lambda,
         aux_loss_t_logistic_steepness=float(args.aux_loss_t_logistic_steepness),
         perceptual_loss_t_midpoint=float(args.perceptual_loss_t_midpoint),
@@ -491,7 +615,6 @@ def main() -> None:
     run_config["perceptor_checkpoint"] = None if effective_perceptor_checkpoint is None else str(effective_perceptor_checkpoint)
     run_config["perceptual_loss_lambda"] = float(effective_perceptual_loss_lambda)
     run_config["style_loss_lambda"] = float(effective_style_loss_lambda)
-    run_config["style_batch_supcon_lambda"] = float(effective_style_batch_supcon_lambda)
     run_config["pixel_loss_lambda"] = float(effective_pixel_loss_lambda)
     run_config["aux_loss_t_logistic_steepness"] = float(args.aux_loss_t_logistic_steepness)
     run_config["perceptual_loss_t_midpoint"] = float(args.perceptual_loss_t_midpoint)

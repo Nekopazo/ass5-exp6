@@ -22,6 +22,7 @@ from dataset import FontImageDataset, UniqueFontBatchSampler
 from models.model import FlowTrainer
 from models.source_part_ref_dit import SourcePartRefDiT
 from style_augment import build_base_glyph_transform
+from train import FlowBatchCollator
 
 
 def set_seed(seed: int) -> None:
@@ -30,27 +31,6 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-
-
-def _resolve_batch_ref_count(samples) -> int:
-    min_refs = max(int(sample.get("style_ref_count_min", sample["style_img"].size(0))) for sample in samples)
-    max_refs = min(int(sample.get("style_ref_count_max", sample["style_img"].size(0))) for sample in samples)
-    available_refs = min(int(sample["style_img"].size(0)) for sample in samples)
-    max_refs = min(max_refs, available_refs)
-    if max_refs < min_refs:
-        raise RuntimeError(f"Invalid style ref bounds in batch: min_refs={min_refs} max_refs={max_refs}")
-    return random.randint(min_refs, max_refs) if min_refs < max_refs else max_refs
-
-
-def collate_fn(samples):
-    ref_count = _resolve_batch_ref_count(samples)
-    return {
-        "font": [sample["font"] for sample in samples],
-        "content": torch.stack([sample["content"] for sample in samples], dim=0),
-        "target": torch.stack([sample["target"] for sample in samples], dim=0),
-        "style_img": torch.stack([sample["style_img"][:ref_count] for sample in samples], dim=0),
-        "style_ref_mask": torch.stack([sample["style_ref_mask"][:ref_count] for sample in samples], dim=0),
-    }
 
 
 def to_gb(value: int) -> float:
@@ -165,6 +145,7 @@ def main() -> None:
         font_train_ratio=float(args.font_train_ratio),
         transform=glyph_transform,
         style_transform=glyph_transform,
+        load_style_refs=False,
     )
     batch_sampler = UniqueFontBatchSampler(
         dataset,
@@ -177,7 +158,7 @@ def main() -> None:
         batch_sampler=batch_sampler,
         num_workers=int(args.num_workers),
         pin_memory=True,
-        collate_fn=collate_fn,
+        collate_fn=FlowBatchCollator(dataset),
     )
     batch = next(iter(dataloader))
 
@@ -199,7 +180,9 @@ def main() -> None:
 
     target = batch["target"].to(device)
     content = batch["content"].to(device)
+    content_index = batch["content_index"].to(device, dtype=torch.long)
     style = batch["style_img"].to(device)
+    style_index = batch["style_index"].to(device, dtype=torch.long)
     style_ref_mask = batch["style_ref_mask"].to(device)
 
     records: list[dict] = []
@@ -213,13 +196,25 @@ def main() -> None:
         target_flow = stage_record(device, "flow_target", lambda: x1 - x0, records)
         content_tokens = stage_record(device, "content_encode_tokens", lambda: trainer.model.encode_content_tokens(content), records)
         content_tokens = stage_record(device, "content_project", lambda: trainer.model.content_proj(content_tokens), records)
+        content_tokens = stage_record(
+            device,
+            "content_expand",
+            lambda: content_tokens.index_select(0, content_index),
+            records,
+        )
         style_global = stage_record(
             device,
-            "style_encode",
+            "style_encode_unique",
             lambda: trainer.model.encode_style_global(
                 style_img=style,
                 style_ref_mask=style_ref_mask,
             ),
+            records,
+        )
+        style_global = stage_record(
+            device,
+            "style_expand",
+            lambda: style_global.index_select(0, style_index),
             records,
         )
         pred_flow = stage_record(

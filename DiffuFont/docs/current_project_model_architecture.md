@@ -57,30 +57,30 @@ Current default constructor values:
 | `patch_grid_size` | `8` |
 | `num_patches` | `64` |
 | `encoder_hidden_dim` | `512` |
-| `style_hidden_dim` | `684` |
-| `style_pool_heads` | `6` |
+| `style_hidden_dim` | `768` |
+| `style_pool_heads` | `8` |
 | `dit_hidden_dim` | `512` |
 | `dit_depth` | `12` |
 | `dit_heads` | `8` |
 | `dit_mlp_ratio` | `4.0` |
 | `content_injection_layers` | `[1, 2, 3, 4, 5, 6]` |
 | `style_injection_layers` | `[7, 8, 9, 10, 11, 12]` |
-| `detailer_base_channels` | `32` |
-| `detailer_max_channels` | `256` |
-| `detailer_bottleneck_channels` | `384` |
+| `detailer_base_channels` | `64` |
+| `detailer_max_channels` | `512` |
+| `detailer_bottleneck_channels` | `512` |
 
 Current parameter counts from `inspect_flow_model.py`:
 
 | module | params |
 | --- | ---: |
-| `content_encoder` | `7,823,488` |
+| `content_encoder` | `7,822,464` |
 | `content_proj` | `0` |
-| `style_encoder` | `16,252,372` |
-| `style_pool` | `1,874,844` |
-| `style_proj` | `350,720` |
+| `style_encoder` | `21,983,616` |
+| `style_pool` | `2,363,136` |
+| `style_proj` | `393,728` |
 | `backbone` | `60,525,056` |
-| `detailer` | `4,852,737` |
-| total | `91,679,217` |
+| `detailer` | `8,965,249` |
+| total | `102,053,249` |
 
 ## 3. Top-Level Forward Graph
 
@@ -126,7 +126,6 @@ Shape trace for `B=1`:
 | `resblock_1` | `(1, 256, 16, 16)` |
 | `downsample_2` | `(1, 512, 8, 8)` |
 | `resblock_2` | `(1, 512, 8, 8)` |
-| `out_norm + SiLU` | `(1, 512, 8, 8)` |
 | `flatten(2).transpose(1,2)` | `(1, 64, 512)` |
 | `content_proj` | `(1, 64, 512)` |
 
@@ -139,7 +138,7 @@ Semantics:
 
 Implemented by `StyleEncoder` and `SourcePartRefDiT.encode_style_global`.
 
-For each sample, every style reference glyph is encoded independently to a `4x4x684` feature map. The `4x4` spatial grid from all valid references is flattened and concatenated into `R*16` local tokens, pooled once by a single-query attention pool without positional embedding and with `style_ref_mask` expanded to token-level masking, then projected by `style_proj: 684 -> 512`.
+For each sample, every style reference glyph is encoded independently to a `4x4x768` feature map. The `4x4` spatial grid from all valid references is flattened and concatenated into `R*16` local tokens, pooled once by a single-query attention pool without positional embedding and with `style_ref_mask` expanded to token-level masking, then projected by `style_proj: 768 -> 512`.
 
 Shape trace for `B=1`, `R=6`:
 
@@ -153,27 +152,27 @@ Shape trace for `B=1`, `R=6`:
 | `resblock_1` | `(6, 128, 32, 32)` |
 | `downsample_2` | `(6, 256, 16, 16)` |
 | `resblock_2` | `(6, 256, 16, 16)` |
-| `downsample_3` | `(6, 384, 8, 8)` |
-| `resblock_3` | `(6, 384, 8, 8)` |
-| `downsample_4` | `(6, 684, 4, 4)` |
-| `resblock_4` | `(6, 684, 4, 4)` |
-| `flatten(2).transpose(1,2)` | `(6, 16, 684)` |
-| `view(B, R*16, D)` | `(1, 96, 684)` |
+| `downsample_3` | `(6, 512, 8, 8)` |
+| `resblock_3` | `(6, 512, 8, 8)` |
+| `downsample_4` | `(6, 768, 4, 4)` |
+| `resblock_4` | `(6, 768, 4, 4)` |
+| `flatten(2).transpose(1,2)` | `(6, 16, 768)` |
+| `view(B, R*16, D)` | `(1, 96, 768)` |
 | `expand style_ref_mask to token mask` | `(1, 96)` |
-| `style_pool.query` | `(1, 1, 684)` |
-| `style_pool.attn` | `(1, 1, 684)` |
-| `squeeze(1)` | `(1, 684)` |
+| `style_pool.query` | `(1, 1, 768)` |
+| `style_pool.attn` | `(1, 1, 768)` |
+| `squeeze(1)` | `(1, 768)` |
 | `style_proj` | `(1, 512)` |
 
 Exact aggregation:
 
 ```text
-style_features_r = style_encoder(style_refs_r)              # [B*R, 684, 4, 4]
-style_tokens_r = flatten_hw(style_features_r)               # [B*R, 16, 684]
-style_tokens = reshape(style_tokens_r)                      # [B, R*16, 684]
+style_features_r = style_encoder(style_refs_r)              # [B*R, 768, 4, 4]
+style_tokens_r = flatten_hw(style_features_r)               # [B*R, 16, 768]
+style_tokens = reshape(style_tokens_r)                      # [B, R*16, 768]
 token_mask = expand_ref_mask(style_ref_mask, 16)            # [B, R*16]
 
-pooled_style = style_pool(style_tokens, token_mask)         # [B, 684]
+pooled_style = style_pool(style_tokens, token_mask)         # [B, 768]
 style_global = style_proj(pooled_style)                     # [B, 512]
 ```
 
@@ -294,21 +293,18 @@ Shape trace for `B=1`, `N=64`:
 | `patch_tokens` | `(1, 64, 512)` |
 | `flat_patches` | `(64, 1, 16, 16)` |
 | `flat_tokens` | `(64, 512)` |
-| `enc_block_0` | `(64, 32, 16, 16)` |
-| `downsample_0` | `(64, 32, 8, 8)` |
-| `enc_block_1` | `(64, 64, 8, 8)` |
-| `downsample_1` | `(64, 64, 4, 4)` |
-| `enc_block_2` | `(64, 128, 4, 4)` |
-| `downsample_2` | `(64, 128, 2, 2)` |
-| `enc_block_3` | `(64, 256, 2, 2)` |
-| `downsample_3` | `(64, 256, 1, 1)` |
-| `context_proj(flat_tokens).view(...,1,1)` | `(64, 384, 1, 1)` |
-| `concat_context` | `(64, 640, 1, 1)` |
-| `bottleneck` | `(64, 384, 1, 1)` |
+| `input_proj` | `(64, 64, 16, 16)` |
+| `downsample_block_0` | `(64, 64, 8, 8)` |
+| `downsample_block_1` | `(64, 128, 4, 4)` |
+| `downsample_block_2` | `(64, 256, 2, 2)` |
+| `downsample_block_3` | `(64, 512, 1, 1)` |
+| `context_proj(flat_tokens).view(...,1,1)` | `(64, 512, 1, 1)` |
+| `concat_context` | `(64, 1024, 1, 1)` |
+| `bottleneck` | `(64, 512, 1, 1)` |
 | `upsample_0 + concat_skip_0 + dec_block_0` | `(64, 256, 2, 2)` |
 | `upsample_1 + concat_skip_1 + dec_block_1` | `(64, 128, 4, 4)` |
 | `upsample_2 + concat_skip_2 + dec_block_2` | `(64, 64, 8, 8)` |
-| `upsample_3 + concat_skip_3 + dec_block_3` | `(64, 32, 16, 16)` |
+| `upsample_3 + concat_skip_3 + dec_block_3` | `(64, 64, 16, 16)` |
 | `out_proj` | `(64, 1, 16, 16)` |
 | `pred_patches` | `(1, 64, 1, 16, 16)` |
 
@@ -365,13 +361,6 @@ loss_style_embed_i = 1 - cosine(P_style(pred_target_i), P_style(target_i))
 
 perceptual_term = mean_i(perceptual_weight_i * loss_perceptual_i)
 style_term = mean_i(style_weight_i * loss_style_embed_i)
-```
-
-Style batch contrastive term:
-
-```text
-loss_style_batch = supervised_contrastive_loss(style_global, font_id)
-style_batch_term = style_batch_supcon_lambda * loss_style_batch
 ```
 
 Logged style-global similarity diagnostics:

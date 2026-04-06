@@ -134,8 +134,6 @@ def trace_content_path(model: SourcePartRefDiT, content: torch.Tensor) -> tuple[
             align_corners=False,
         )
         print(f"content.interpolate_to_grid: {shape_of(x)}")
-    x = F.silu(encoder.out_norm(x))
-    print(f"content.out_norm_silu: {shape_of(x)}")
     content_features = x
     content_tokens = content_features.flatten(2).transpose(1, 2).contiguous()
     print(f"content.tokens_before_proj: {shape_of(content_tokens)}")
@@ -253,14 +251,15 @@ def trace_detailer_path(
     print(f"detailer.flat_patches: {shape_of(flat_patches)}")
     print(f"detailer.flat_tokens: {shape_of(flat_tokens)}")
 
-    x = flat_patches
     skips: list[torch.Tensor] = []
-    for idx, (enc_block, downsample) in enumerate(zip(detailer.enc_blocks, detailer.downsample_layers)):
-        x = enc_block(x)
-        skips.append(x)
-        print(f"detailer.enc_block_{idx}: {shape_of(x)}")
+    x = detailer.input_proj(flat_patches)
+    skips.append(x)
+    print(f"detailer.input_proj: {shape_of(x)}")
+    for idx, downsample in enumerate(detailer.downsample_blocks):
         x = downsample(x)
-        print(f"detailer.downsample_{idx}: {shape_of(x)}")
+        print(f"detailer.downsample_block_{idx}: {shape_of(x)}")
+        if idx < len(detailer.downsample_blocks) - 1:
+            skips.append(x)
     context = detailer.context_proj(flat_tokens).view(flat_tokens.size(0), -1, 1, 1)
     print(f"detailer.context_proj: {shape_of(context)}")
     x = torch.cat([x, context], dim=1)

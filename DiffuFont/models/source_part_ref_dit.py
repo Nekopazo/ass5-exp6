@@ -43,13 +43,26 @@ class ResBlock(nn.Module):
         x = self.conv2(F.silu(self.norm2(x)))
         return x + residual
 
-
 class ConvSiLU(nn.Module):
     """Single convolution followed by SiLU, matching the paper's shallow U-Net blocks."""
 
-    def __init__(self, in_channels: int, out_channels: int, *, kernel_size: int = 3, padding: int = 1) -> None:
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        *,
+        kernel_size: int = 3,
+        padding: int = 1,
+        stride: int = 1,
+    ) -> None:
         super().__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=padding)
+        self.conv = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            padding=padding,
+            stride=stride,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.silu(self.conv(x))
@@ -119,8 +132,6 @@ class ContentEncoder(nn.Module):
                 self.resblocks.append(ResBlock(out_channels, out_channels))
                 in_channels = out_channels
 
-        self.out_norm = nn.GroupNorm(_group_count(self.hidden_dim), self.hidden_dim)
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() != 4:
             raise ValueError(f"expected BCHW tensor, got {tuple(x.shape)}")
@@ -137,14 +148,14 @@ class ContentEncoder(nn.Module):
                 mode="bilinear",
                 align_corners=False,
             )
-        return F.silu(self.out_norm(x))
+        return x
 
 
 class StyleEncoder(nn.Module):
-    def __init__(self, in_channels: int = 1, hidden_dim: int = 512) -> None:
+    def __init__(self, in_channels: int = 1, hidden_dim: int = 768) -> None:
         super().__init__()
         self.hidden_dim = int(hidden_dim)
-        stage_channels = [64, 128, 256, 384, self.hidden_dim]
+        stage_channels = [64, 128, 256, 512, self.hidden_dim]
         self.downsample_layers = nn.ModuleList()
         self.resblocks = nn.ModuleList()
         prev_channels = int(in_channels)
@@ -213,9 +224,9 @@ class PatchDetailerHead(nn.Module):
         in_channels: int = 1,
         patch_size: int = 16,
         context_dim: int = 512,
-        base_channels: int = 32,
-        max_channels: int = 256,
-        bottleneck_channels: int = 384,
+        base_channels: int = 64,
+        max_channels: int = 512,
+        bottleneck_channels: int = 512,
     ) -> None:
         super().__init__()
         if patch_size < 8:
@@ -235,13 +246,18 @@ class PatchDetailerHead(nn.Module):
             for idx in range(self.depth)
         ]
 
-        self.enc_blocks = nn.ModuleList()
-        self.downsample_layers = nn.ModuleList()
-        prev_channels = self.in_channels
-        for ch in self.stage_channels:
-            self.enc_blocks.append(ConvSiLU(prev_channels, ch, kernel_size=3, padding=1))
-            self.downsample_layers.append(nn.MaxPool2d(kernel_size=2, stride=2))
+        self.input_proj = ConvSiLU(self.in_channels, self.stage_channels[0], kernel_size=3, padding=1)
+
+        self.downsample_blocks = nn.ModuleList()
+        prev_channels = self.stage_channels[0]
+        for stage_idx, ch in enumerate(self.stage_channels):
+            in_ch = prev_channels if stage_idx > 0 else self.stage_channels[0]
+            self.downsample_blocks.append(
+                ConvSiLU(in_ch, ch, kernel_size=3, padding=1, stride=2)
+            )
             prev_channels = ch
+
+        self.skip_channels = [self.stage_channels[0], *self.stage_channels[:-1]]
 
         self.context_proj = nn.Sequential(
             nn.SiLU(),
@@ -257,7 +273,7 @@ class PatchDetailerHead(nn.Module):
         self.upsample_layers = nn.ModuleList()
         self.dec_blocks = nn.ModuleList()
         current_ch = self.bottleneck_channels
-        for skip_ch in reversed(self.stage_channels):
+        for skip_ch in reversed(self.skip_channels):
             self.upsample_layers.append(nn.Upsample(scale_factor=2, mode="nearest"))
             self.dec_blocks.append(
                 ConvSiLU(current_ch + skip_ch, skip_ch, kernel_size=3, padding=1)
@@ -293,11 +309,12 @@ class PatchDetailerHead(nn.Module):
         flat_tokens = patch_tokens.reshape(batch * patch_count, patch_tokens.size(-1))
 
         skips: list[torch.Tensor] = []
-        x = flat_patches
-        for enc_block, downsample in zip(self.enc_blocks, self.downsample_layers):
-            x = enc_block(x)
-            skips.append(x)
+        x = self.input_proj(flat_patches)
+        skips.append(x)
+        for stage_idx, downsample in enumerate(self.downsample_blocks):
             x = downsample(x)
+            if stage_idx < len(self.downsample_blocks) - 1:
+                skips.append(x)
 
         context = self.context_proj(flat_tokens).view(flat_tokens.size(0), -1, 1, 1)
         x = torch.cat([x, context], dim=1)
@@ -322,16 +339,16 @@ class SourcePartRefDiT(nn.Module):
         image_size: int = 128,
         patch_size: int = 16,
         encoder_hidden_dim: int = 512,
-        style_hidden_dim: int = 684,
+        style_hidden_dim: int = 768,
         dit_hidden_dim: int = 512,
         dit_depth: int = 12,
         dit_heads: int = 8,
         dit_mlp_ratio: float = 4.0,
         content_injection_layers: Sequence[int] | None = None,
         style_injection_layers: Sequence[int] | None = None,
-        detailer_base_channels: int = 32,
-        detailer_max_channels: int = 256,
-        detailer_bottleneck_channels: int = 384,
+        detailer_base_channels: int = 64,
+        detailer_max_channels: int = 512,
+        detailer_bottleneck_channels: int = 512,
     ) -> None:
         super().__init__()
         if int(in_channels) != 1:
