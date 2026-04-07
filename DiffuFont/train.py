@@ -161,6 +161,23 @@ class FlowBatchCollator:
         }
 
 
+class StyleEvalBatchCollator:
+    def __call__(self, samples) -> Dict[str, torch.Tensor]:
+        content, content_index = _pack_unique_content(samples)
+        return {
+            "font": [sample["font"] for sample in samples],
+            "font_id": torch.tensor([sample["font_id"] for sample in samples], dtype=torch.long),
+            "char": [sample["char"] for sample in samples],
+            "char_id": torch.tensor([sample["char_id"] for sample in samples], dtype=torch.long),
+            "content": content,
+            "content_index": content_index,
+            "target": torch.stack([sample["target"] for sample in samples], dim=0),
+            "style_img": torch.stack([sample["style_img"] for sample in samples], dim=0),
+            "style_ref_mask": torch.stack([sample["style_ref_mask"] for sample in samples], dim=0),
+            "style_index": torch.arange(len(samples), dtype=torch.long),
+        }
+
+
 def build_dataloader(
     dataset: FontImageDataset,
     *,
@@ -202,6 +219,32 @@ def build_dataloader(
         batch_size=int(batch_size),
         shuffle=bool(shuffle),
         **dataloader_kwargs,
+    )
+
+
+def build_style_eval_dataloader(
+    dataset: FontImageDataset,
+    *,
+    num_workers: int,
+    device: torch.device,
+    seed: int,
+    cartesian_fonts_per_batch: int,
+    cartesian_chars_per_batch: int,
+) -> DataLoader:
+    batch_sampler = CartesianFontCharBatchSampler(
+        dataset,
+        fonts_per_batch=int(cartesian_fonts_per_batch),
+        chars_per_batch=int(cartesian_chars_per_batch),
+        seed=int(seed),
+        drop_last=False,
+    )
+    return DataLoader(
+        dataset=dataset,
+        batch_sampler=batch_sampler,
+        num_workers=int(num_workers),
+        pin_memory=(device.type == "cuda"),
+        collate_fn=StyleEvalBatchCollator(),
+        worker_init_fn=seed_worker if int(num_workers) > 0 else None,
     )
 
 
@@ -396,7 +439,7 @@ def main() -> None:
 
     parser.add_argument("--patch-size", type=int, required=True)
     parser.add_argument("--encoder-hidden-dim", type=int, required=True)
-    parser.add_argument("--style-hidden-dim", type=int, default=768)
+    parser.add_argument("--style-hidden-dim", type=int, default=1024)
     parser.add_argument("--dit-hidden-dim", type=int, required=True)
     parser.add_argument("--dit-depth", type=int, required=True)
     parser.add_argument("--dit-heads", type=int, required=True)
@@ -428,14 +471,13 @@ def main() -> None:
     use_cnn_perceptor_group.add_argument("--no-use-cnn-perceptor", dest="use_cnn_perceptor", action="store_false")
     parser.add_argument("--perceptor-checkpoint", type=Path)
     parser.add_argument("--perceptual-loss-lambda", type=float, required=True)
-    parser.add_argument("--style-loss-lambda", type=float, required=True)
     parser.add_argument("--pixel-loss-lambda", type=float, default=0.05)
     parser.add_argument("--aux-loss-t-logistic-steepness", type=float, default=8.0)
     parser.add_argument("--perceptual-loss-t-midpoint", type=float, default=0.35)
-    parser.add_argument("--style-loss-t-midpoint", type=float, default=0.45)
     parser.add_argument("--pixel-loss-t-midpoint", type=float, default=0.55)
     parser.add_argument("--flow-sample-steps", type=int, required=True)
     parser.add_argument("--ema-decay", type=float, required=True)
+    parser.add_argument("--ema-start-step", type=int, default=-1)
     args = parser.parse_args()
 
     set_global_seed(int(args.seed))
@@ -495,7 +537,7 @@ def main() -> None:
             font_train_ratio=float(args.font_train_ratio),
             transform=glyph_transform,
             style_transform=glyph_transform,
-            load_style_refs=False,
+            load_style_refs=True,
         )
 
     dataloader = build_dataloader(
@@ -512,15 +554,11 @@ def main() -> None:
     )
     val_dataloader = None
     if val_dataset is not None:
-        val_dataloader = build_dataloader(
+        val_dataloader = build_style_eval_dataloader(
             val_dataset,
-            batch_size=int(args.batch),
             num_workers=int(args.num_workers),
             device=device,
             seed=int(args.seed) + 1,
-            use_unique_font_batches=False,
-            shuffle=False,
-            sampling_mode="shuffle",
             cartesian_fonts_per_batch=int(args.cartesian_fonts_per_batch),
             cartesian_chars_per_batch=int(args.cartesian_chars_per_batch),
         )
@@ -539,14 +577,12 @@ def main() -> None:
 
     effective_perceptor_checkpoint = args.perceptor_checkpoint
     effective_perceptual_loss_lambda = float(args.perceptual_loss_lambda)
-    effective_style_loss_lambda = float(args.style_loss_lambda)
     effective_pixel_loss_lambda = max(0.0, float(args.pixel_loss_lambda))
     if not bool(args.use_cnn_perceptor):
-        if args.perceptor_checkpoint is not None or effective_perceptual_loss_lambda > 0.0 or effective_style_loss_lambda > 0.0:
-            print("[train] use_cnn_perceptor=0, ignoring perceptor checkpoint and auxiliary loss weights")
+        if args.perceptor_checkpoint is not None or effective_perceptual_loss_lambda > 0.0:
+            print("[train] use_cnn_perceptor=0, ignoring perceptor checkpoint and perceptual loss weight")
         effective_perceptor_checkpoint = None
         effective_perceptual_loss_lambda = 0.0
-        effective_style_loss_lambda = 0.0
 
     model = build_model(args)
     trainer = FlowTrainer(
@@ -561,14 +597,13 @@ def main() -> None:
         use_cnn_perceptor=bool(args.use_cnn_perceptor),
         perceptor_checkpoint=effective_perceptor_checkpoint,
         perceptual_loss_lambda=effective_perceptual_loss_lambda,
-        style_loss_lambda=effective_style_loss_lambda,
         pixel_loss_lambda=effective_pixel_loss_lambda,
         aux_loss_t_logistic_steepness=float(args.aux_loss_t_logistic_steepness),
         perceptual_loss_t_midpoint=float(args.perceptual_loss_t_midpoint),
-        style_loss_t_midpoint=float(args.style_loss_t_midpoint),
         pixel_loss_t_midpoint=float(args.pixel_loss_t_midpoint),
         flow_sample_steps=int(args.flow_sample_steps),
         ema_decay=float(args.ema_decay),
+        ema_start_step=None if int(args.ema_start_step) < 0 else int(args.ema_start_step),
         log_every_steps=log_every_steps,
         save_every_steps=resolved_save_every_steps,
         val_every_steps=val_every_steps,
@@ -614,11 +649,9 @@ def main() -> None:
     run_config["use_cnn_perceptor"] = int(bool(args.use_cnn_perceptor))
     run_config["perceptor_checkpoint"] = None if effective_perceptor_checkpoint is None else str(effective_perceptor_checkpoint)
     run_config["perceptual_loss_lambda"] = float(effective_perceptual_loss_lambda)
-    run_config["style_loss_lambda"] = float(effective_style_loss_lambda)
     run_config["pixel_loss_lambda"] = float(effective_pixel_loss_lambda)
     run_config["aux_loss_t_logistic_steepness"] = float(args.aux_loss_t_logistic_steepness)
     run_config["perceptual_loss_t_midpoint"] = float(args.perceptual_loss_t_midpoint)
-    run_config["style_loss_t_midpoint"] = float(args.style_loss_t_midpoint)
     run_config["pixel_loss_t_midpoint"] = float(args.pixel_loss_t_midpoint)
     run_config["lr_warmup_steps"] = int(args.lr_warmup_steps)
     run_config["lr_decay_start_step"] = None if int(args.lr_decay_start_step) < 0 else int(args.lr_decay_start_step)

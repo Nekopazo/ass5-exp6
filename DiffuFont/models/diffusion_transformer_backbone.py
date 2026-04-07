@@ -47,8 +47,24 @@ def timestep_embedding(timesteps: torch.Tensor, dim: int, max_period: int = 10_0
     return embedding
 
 
+def _broadcast_modulation(
+    hidden_states: torch.Tensor,
+    modulation: torch.Tensor,
+) -> torch.Tensor:
+    if modulation.dim() == hidden_states.dim() - 1:
+        return modulation.unsqueeze(1)
+    if modulation.dim() != hidden_states.dim():
+        raise ValueError(
+            "modulation rank mismatch: "
+            f"hidden_states={tuple(hidden_states.shape)} modulation={tuple(modulation.shape)}"
+        )
+    return modulation
+
+
 def modulate(hidden_states: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    return hidden_states * (1.0 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+    shift = _broadcast_modulation(hidden_states, shift)
+    scale = _broadcast_modulation(hidden_states, scale)
+    return hidden_states * (1.0 + scale) + shift
 
 
 def _tensor_rms(x: torch.Tensor) -> torch.Tensor:
@@ -69,8 +85,9 @@ class FeedForward(nn.Module):
         return self.net(x)
 
 
-def _build_zero_linear(hidden_dim: int) -> nn.Linear:
-    layer = nn.Linear(hidden_dim, hidden_dim)
+def _build_zero_linear(hidden_dim: int, out_dim: int | None = None) -> nn.Linear:
+    out_dim = int(hidden_dim) if out_dim is None else int(out_dim)
+    layer = nn.Linear(hidden_dim, out_dim)
     nn.init.zeros_(layer.weight)
     nn.init.zeros_(layer.bias)
     return layer
@@ -83,27 +100,30 @@ class DiTBlock(nn.Module):
         self.norm_mlp = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
         self.self_attn = SDPAAttention(hidden_dim, num_heads)
         self.mlp = FeedForward(hidden_dim, mlp_ratio)
-        self.time_modulation = nn.Sequential(
+        self.ffn_time_modulation = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim * 6),
+            nn.Linear(hidden_dim, hidden_dim * 3),
         )
-        self.time_mod_input_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
-        nn.init.zeros_(self.time_modulation[-1].weight)
-        nn.init.zeros_(self.time_modulation[-1].bias)
+        self.ffn_time_mod_input_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
+        nn.init.zeros_(self.ffn_time_modulation[-1].weight)
+        nn.init.zeros_(self.ffn_time_modulation[-1].bias)
 
     def forward(
         self,
         patch_tokens: torch.Tensor,
         *,
-        time_cond: torch.Tensor,
+        self_attn_shift: torch.Tensor,
+        self_attn_scale: torch.Tensor,
+        self_attn_gate: torch.Tensor,
+        ffn_time_cond: torch.Tensor,
     ) -> torch.Tensor:
-        shift_self, scale_self, gate_self, shift_mlp, scale_mlp, gate_mlp = self.time_modulation(
-            self.time_mod_input_norm(time_cond)
-        ).chunk(6, dim=-1)
         x = patch_tokens
-        q = modulate(self.norm_self(x), shift_self, scale_self)
+        q = modulate(self.norm_self(x), self_attn_shift, self_attn_scale)
         self_out, _ = self.self_attn(q, q, q, need_weights=False)
-        x = x + gate_self.unsqueeze(1) * self_out
+        x = x + _broadcast_modulation(self_out, self_attn_gate) * self_out
+        shift_mlp, scale_mlp, gate_mlp = self.ffn_time_modulation(
+            self.ffn_time_mod_input_norm(ffn_time_cond)
+        ).chunk(3, dim=-1)
         mlp_out = self.mlp(modulate(self.norm_mlp(x), shift_mlp, scale_mlp))
         x = x + gate_mlp.unsqueeze(1) * mlp_out
         return x
@@ -116,10 +136,13 @@ class GlyphDiTBlock(nn.Module):
         num_heads: int,
         mlp_ratio: float,
         *,
+        style_cond_dim: int,
         use_content_injection: bool = True,
         use_style_injection: bool = True,
     ) -> None:
         super().__init__()
+        self.hidden_dim = int(hidden_dim)
+        self.style_cond_dim = int(style_cond_dim)
         self.use_content_injection = bool(use_content_injection)
         self.use_style_injection = bool(use_style_injection)
         self.content_control_norm = (
@@ -127,13 +150,24 @@ class GlyphDiTBlock(nn.Module):
             if self.use_content_injection
             else None
         )
-        self.content_zero_linear = _build_zero_linear(hidden_dim) if self.use_content_injection else None
+        self.attn_time_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
+        self.attn_time_to_token = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.attn_joint_mod = (
+            _build_zero_linear(hidden_dim, hidden_dim * 3)
+        )
         self.style_cond_norm = (
-            nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
+            nn.LayerNorm(self.style_cond_dim, elementwise_affine=False, eps=1e-6)
             if self.use_style_injection
             else None
         )
-        self.style_to_time = _build_zero_linear(hidden_dim) if self.use_style_injection else None
+        self.style_to_time = (
+            _build_zero_linear(self.style_cond_dim, hidden_dim)
+            if self.use_style_injection
+            else None
+        )
         self.dit_block = DiTBlock(hidden_dim, num_heads, mlp_ratio)
 
     def forward(
@@ -148,12 +182,12 @@ class GlyphDiTBlock(nn.Module):
         x = patch_tokens
         block_stats: dict[str, float] = {}
         block_input_rms = None if not return_injection_stats else float(_tensor_rms(x.detach()).item())
-        merged_time_cond = time_cond
+        attn_time_tokens = self.attn_time_to_token(self.attn_time_norm(time_cond)).unsqueeze(1).expand_as(x)
+        attn_joint_source = attn_time_tokens
         if self.use_content_injection:
             if (
                 content_tokens is None
                 or self.content_control_norm is None
-                or self.content_zero_linear is None
             ):
                 raise RuntimeError("content_tokens must be provided when content injection is enabled")
             if content_tokens.shape != x.shape:
@@ -161,14 +195,20 @@ class GlyphDiTBlock(nn.Module):
                     "content token shape mismatch: "
                     f"expected {tuple(x.shape)}, got {tuple(content_tokens.shape)}"
                 )
-            content_delta = self.content_zero_linear(self.content_control_norm(content_tokens))
-            content_injection = content_delta
+            content_source = self.content_control_norm(content_tokens)
+            attn_joint_source = attn_joint_source + content_source
             if return_injection_stats and block_input_rms is not None:
-                block_stats["content_ratio"] = float(
-                    (_tensor_rms(content_injection.detach()) / max(block_input_rms, 1e-12)).item()
-                )
-            x = x + content_injection
+                with torch.no_grad():
+                    normalized_tokens = self.dit_block.norm_self(x.detach())
+                    content_attn_shift, content_attn_scale, _ = self.attn_joint_mod(content_source.detach()).chunk(3, dim=-1)
+                    content_attn_delta = normalized_tokens * content_attn_scale + content_attn_shift
+                    block_stats["content_ratio"] = float(
+                        (_tensor_rms(content_attn_delta) / max(block_input_rms, 1e-12)).item()
+                    )
 
+        self_attn_shift, self_attn_scale, self_attn_gate = self.attn_joint_mod(attn_joint_source).chunk(3, dim=-1)
+
+        ffn_time_cond = time_cond
         if self.use_style_injection:
             if (
                 style_global is None
@@ -176,17 +216,20 @@ class GlyphDiTBlock(nn.Module):
                 or self.style_to_time is None
             ):
                 raise RuntimeError("style_global must be provided when style injection is enabled")
-            expected_style_shape = (x.size(0), x.size(-1))
+            expected_style_shape = (x.size(0), self.style_cond_dim)
             if tuple(style_global.shape) != expected_style_shape:
                 raise RuntimeError(
                     "style_global shape mismatch: "
                     f"expected {expected_style_shape}, got {tuple(style_global.shape)}"
                 )
-            merged_time_cond = merged_time_cond + self.style_to_time(self.style_cond_norm(style_global))
+            ffn_time_cond = ffn_time_cond + self.style_to_time(self.style_cond_norm(style_global))
 
         x = self.dit_block(
             x,
-            time_cond=merged_time_cond,
+            self_attn_shift=self_attn_shift,
+            self_attn_scale=self_attn_scale,
+            self_attn_gate=self_attn_gate,
+            ffn_time_cond=ffn_time_cond,
         )
         if return_injection_stats:
             return x, block_stats
@@ -201,6 +244,7 @@ class DiffusionTransformerBackbone(nn.Module):
         image_size: int = 128,
         patch_size: int = 16,
         hidden_dim: int = 512,
+        style_cond_dim: int = 768,
         depth: int = 16,
         num_heads: int = 8,
         mlp_ratio: float = 4.0,
@@ -214,19 +258,20 @@ class DiffusionTransformerBackbone(nn.Module):
         self.image_size = int(image_size)
         self.patch_size = int(patch_size)
         self.hidden_dim = int(hidden_dim)
+        self.style_cond_dim = int(style_cond_dim)
         self.depth = int(depth)
         self.num_heads = int(num_heads)
         self.grid_size = self.image_size // self.patch_size
         self.num_tokens = self.grid_size * self.grid_size
         self.content_injection_layers = self._normalize_layer_indices(
             content_injection_layers,
-            default_layers=range(1, min(self.depth, 6) + 1),
+            default_layers=range(1, self.depth + 1),
             depth=self.depth,
             field_name="content_injection_layers",
         )
         self.style_injection_layers = self._normalize_layer_indices(
             style_injection_layers,
-            default_layers=range(max(1, self.depth - 5), self.depth + 1),
+            default_layers=range(1, self.depth + 1),
             depth=self.depth,
             field_name="style_injection_layers",
         )
@@ -267,6 +312,7 @@ class DiffusionTransformerBackbone(nn.Module):
                     self.hidden_dim,
                     self.num_heads,
                     mlp_ratio,
+                    style_cond_dim=self.style_cond_dim,
                     use_content_injection=self.content_layer_mask[block_idx],
                     use_style_injection=self.style_layer_mask[block_idx],
                 )

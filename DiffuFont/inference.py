@@ -33,7 +33,6 @@ def load_trainer(checkpoint_path: Path, device: torch.device) -> FlowTrainer:
         ema_decay=float(trainer_config.get("ema_decay", 0.9999)),
         aux_loss_t_logistic_steepness=float(trainer_config.get("aux_loss_t_logistic_steepness", 8.0)),
         perceptual_loss_t_midpoint=float(trainer_config.get("perceptual_loss_t_midpoint", 0.35)),
-        style_loss_t_midpoint=float(trainer_config.get("style_loss_t_midpoint", 0.45)),
     )
     trainer.load(checkpoint_path)
     trainer.model.eval()

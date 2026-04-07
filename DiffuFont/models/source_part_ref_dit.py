@@ -152,7 +152,7 @@ class ContentEncoder(nn.Module):
 
 
 class StyleEncoder(nn.Module):
-    def __init__(self, in_channels: int = 1, hidden_dim: int = 768) -> None:
+    def __init__(self, in_channels: int = 1, hidden_dim: int = 1024) -> None:
         super().__init__()
         self.hidden_dim = int(hidden_dim)
         stage_channels = [64, 128, 256, 512, self.hidden_dim]
@@ -200,19 +200,32 @@ class StyleAttentionPool(nn.Module):
             )
 
         query = self.query.to(device=style_tokens.device, dtype=style_tokens.dtype).expand(style_tokens.size(0), -1, -1)
-        key_padding_mask = None
-        need_weights = False
         if bool((~token_valid_mask).any().item()):
-            key_padding_mask = ~token_valid_mask
-            need_weights = True
+            raise RuntimeError(
+                "StyleAttentionPool is configured for flash-only attention and requires all style refs to be valid."
+            )
         pooled_style, _ = self.attn(
             self.query_norm(query),
             self.token_norm(style_tokens),
             style_tokens,
-            key_padding_mask=key_padding_mask,
-            need_weights=need_weights,
+            key_padding_mask=None,
+            need_weights=False,
         )
         return pooled_style.squeeze(1)
+
+
+def _build_style_projection(in_dim: int, out_dim: int) -> nn.Module:
+    in_dim = int(in_dim)
+    out_dim = int(out_dim)
+    if in_dim == out_dim:
+        return nn.Identity()
+    hidden_dim = max(in_dim * 2, out_dim * 4)
+    return nn.Sequential(
+        nn.LayerNorm(in_dim, elementwise_affine=False, eps=1e-6),
+        nn.Linear(in_dim, hidden_dim),
+        nn.GELU(approximate="tanh"),
+        nn.Linear(hidden_dim, out_dim),
+    )
 
 
 class PatchDetailerHead(nn.Module):
@@ -339,9 +352,9 @@ class SourcePartRefDiT(nn.Module):
         image_size: int = 128,
         patch_size: int = 16,
         encoder_hidden_dim: int = 512,
-        style_hidden_dim: int = 768,
+        style_hidden_dim: int = 1024,
         dit_hidden_dim: int = 512,
-        dit_depth: int = 12,
+        dit_depth: int = 16,
         dit_heads: int = 8,
         dit_mlp_ratio: float = 4.0,
         content_injection_layers: Sequence[int] | None = None,
@@ -371,13 +384,13 @@ class SourcePartRefDiT(nn.Module):
         self.detailer_bottleneck_channels = int(detailer_bottleneck_channels)
         self.content_injection_layers = DiffusionTransformerBackbone._normalize_layer_indices(
             content_injection_layers,
-            default_layers=range(1, min(self.dit_depth, 6) + 1),
+            default_layers=range(1, self.dit_depth + 1),
             depth=self.dit_depth,
             field_name="content_injection_layers",
         )
         self.style_injection_layers = DiffusionTransformerBackbone._normalize_layer_indices(
             style_injection_layers,
-            default_layers=range(max(1, self.dit_depth - 5), self.dit_depth + 1),
+            default_layers=range(1, self.dit_depth + 1),
             depth=self.dit_depth,
             field_name="style_injection_layers",
         )
@@ -391,7 +404,7 @@ class SourcePartRefDiT(nn.Module):
             in_channels=self.in_channels,
             hidden_dim=self.style_hidden_dim,
         )
-        self.style_pool_heads = self._resolve_style_pool_heads(self.style_hidden_dim, self.dit_heads)
+        self.style_pool_heads = 4
         self.style_pool = StyleAttentionPool(
             hidden_dim=self.style_hidden_dim,
             num_heads=self.style_pool_heads,
@@ -401,6 +414,7 @@ class SourcePartRefDiT(nn.Module):
             image_size=self.image_size,
             patch_size=self.patch_size,
             hidden_dim=self.dit_hidden_dim,
+            style_cond_dim=self.dit_hidden_dim,
             depth=self.dit_depth,
             num_heads=self.dit_heads,
             mlp_ratio=self.dit_mlp_ratio,
@@ -420,10 +434,7 @@ class SourcePartRefDiT(nn.Module):
             self.content_proj = nn.Linear(self.encoder_hidden_dim, self.dit_hidden_dim)
         else:
             self.content_proj = nn.Identity()
-        if self.style_hidden_dim != self.dit_hidden_dim:
-            self.style_proj = nn.Linear(self.style_hidden_dim, self.dit_hidden_dim)
-        else:
-            self.style_proj = nn.Identity()
+        self.style_proj = _build_style_projection(self.style_hidden_dim, self.dit_hidden_dim)
 
     def export_config(self) -> dict[str, int | float]:
         return {
@@ -442,15 +453,6 @@ class SourcePartRefDiT(nn.Module):
             "detailer_max_channels": int(self.detailer_max_channels),
             "detailer_bottleneck_channels": int(self.detailer_bottleneck_channels),
         }
-
-    @staticmethod
-    def _resolve_style_pool_heads(style_hidden_dim: int, max_heads: int) -> int:
-        style_hidden_dim = int(style_hidden_dim)
-        max_heads = max(1, int(max_heads))
-        for num_heads in range(min(style_hidden_dim, max_heads), 0, -1):
-            if style_hidden_dim % num_heads == 0:
-                return num_heads
-        return 1
 
     def encode_content_tokens(self, content_img: torch.Tensor) -> torch.Tensor:
         content_features = self.content_encoder(content_img)

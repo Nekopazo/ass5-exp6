@@ -109,28 +109,20 @@ def build_qualification_report(
     *,
     save_dir: Path,
     min_char_acc: float,
-    min_style_margin: float,
 ) -> dict[str, Any]:
-    best_metrics_path = save_dir / "best_val_metrics.json"
-    val_log_path = save_dir / "val_step_metrics.jsonl"
+    best_metrics_path = save_dir / "best_train_metrics.json"
+    train_log_path = save_dir / "train_step_metrics.jsonl"
     best_metrics = json.loads(best_metrics_path.read_text(encoding="utf-8")) if best_metrics_path.is_file() else None
-    latest_val_metrics = _load_last_jsonl_row(val_log_path)
+    latest_train_metrics = _load_last_jsonl_row(train_log_path)
 
     reasons: list[str] = []
     qualified = False
     if best_metrics is None:
-        reasons.append("missing_best_val_metrics")
+        reasons.append("missing_best_train_metrics")
     else:
         char_acc = float(best_metrics.get("char_acc", 0.0))
-        style_margin = float(best_metrics.get("style_cos_margin", 0.0))
-        pos_pairs = float(best_metrics.get("style_pos_pairs", 0.0))
-        neg_pairs = float(best_metrics.get("style_neg_pairs", 0.0))
         if char_acc < float(min_char_acc):
             reasons.append("char_acc_below_threshold")
-        if style_margin < float(min_style_margin):
-            reasons.append("style_margin_below_threshold")
-        if pos_pairs <= 0.0 or neg_pairs <= 0.0:
-            reasons.append("insufficient_style_pairs")
         qualified = len(reasons) == 0
 
     best_checkpoint = save_dir / "best.pt"
@@ -141,13 +133,12 @@ def build_qualification_report(
         "can_integrate_directly": bool(qualified and best_checkpoint.is_file()),
         "criteria": {
             "min_char_acc": float(min_char_acc),
-            "min_style_margin": float(min_style_margin),
         },
         "reason_codes": reasons,
         "best_checkpoint": str(best_checkpoint) if best_checkpoint.is_file() else None,
         "last_checkpoint": str(last_checkpoint) if last_checkpoint.is_file() else None,
-        "best_val_metrics": best_metrics,
-        "latest_val_metrics": latest_val_metrics,
+        "best_train_metrics": best_metrics,
+        "latest_train_metrics": latest_train_metrics,
     }
     (save_dir / "qualification_report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True),
@@ -176,7 +167,6 @@ def main() -> None:
     parser.add_argument("--image-size", type=int, required=True)
 
     parser.add_argument("--base-channels", type=int, required=True)
-    parser.add_argument("--style-proj-dim", type=int, required=True)
     parser.add_argument("--dropout", type=float, required=True)
     parser.add_argument("--feature-stages", type=str, required=True)
 
@@ -185,17 +175,16 @@ def main() -> None:
     parser.add_argument("--cartesian-chars-per-batch", type=int, required=True)
 
     parser.add_argument("--lr", type=float, required=True)
+    parser.add_argument("--font-loss-lambda-start", type=float, default=0.2)
+    parser.add_argument("--font-loss-lambda-end", type=float, default=0.05)
+    parser.add_argument("--font-label-smoothing", type=float, default=0.05)
+    parser.add_argument("--char-label-smoothing", type=float, default=0.0)
     parser.add_argument("--total-steps", type=int, required=True)
     parser.add_argument("--log-every-steps", type=int, required=True)
-    parser.add_argument("--val-every-steps", type=int, required=True)
-    parser.add_argument("--val-max-batches", type=int, required=True)
     parser.add_argument("--save-every-steps", type=int, required=True)
     parser.add_argument("--grad-clip-norm", type=float, required=True)
 
-    parser.add_argument("--style-supcon-lambda", type=float, required=True)
-    parser.add_argument("--style-temperature", type=float, required=True)
     parser.add_argument("--qualify-min-char-acc", type=float, required=True)
-    parser.add_argument("--qualify-min-style-margin", type=float, required=True)
     args = parser.parse_args()
 
     set_global_seed(int(args.seed))
@@ -204,16 +193,25 @@ def main() -> None:
 
     font_split_seed = int(args.font_split_seed)
     log_every_steps = int(args.log_every_steps)
-    val_every_steps = int(args.val_every_steps)
     save_every_steps = int(args.save_every_steps)
     resolved_save_every_steps = None if save_every_steps == 0 else save_every_steps
     total_steps = int(args.total_steps)
-    if log_every_steps <= 0 or val_every_steps <= 0:
-        raise ValueError("log_every_steps and val_every_steps must be > 0.")
+    if log_every_steps <= 0:
+        raise ValueError("log_every_steps must be > 0.")
     if save_every_steps < 0:
         raise ValueError("save_every_steps must be >= 0.")
     if total_steps <= 0:
         raise ValueError("total_steps must be > 0.")
+    if float(args.font_loss_lambda_start) < 0.0:
+        raise ValueError("font_loss_lambda_start must be >= 0.")
+    if float(args.font_loss_lambda_end) < 0.0:
+        raise ValueError("font_loss_lambda_end must be >= 0.")
+    if float(args.font_loss_lambda_end) > float(args.font_loss_lambda_start):
+        raise ValueError("font_loss_lambda_end must be <= font_loss_lambda_start.")
+    if not (0.0 <= float(args.font_label_smoothing) <= 0.2):
+        raise ValueError("font_label_smoothing must be in [0, 0.2].")
+    if not (0.0 <= float(args.char_label_smoothing) <= 0.2):
+        raise ValueError("char_label_smoothing must be in [0, 0.2].")
 
     glyph_transform = build_base_glyph_transform(image_size=int(args.image_size))
     dataset = FontImageDataset(
@@ -227,19 +225,6 @@ def main() -> None:
         style_transform=glyph_transform,
         load_style_refs=False,
     )
-    val_dataset = None
-    if str(args.font_split) == "train":
-        val_dataset = FontImageDataset(
-            project_root=args.data_root,
-            max_fonts=int(args.max_fonts),
-            random_seed=int(args.seed),
-            font_split="test",
-            font_split_seed=font_split_seed,
-            font_train_ratio=float(args.font_train_ratio),
-            transform=glyph_transform,
-            style_transform=glyph_transform,
-            load_style_refs=False,
-        )
 
     dataloader = build_dataloader(
         dataset,
@@ -252,19 +237,6 @@ def main() -> None:
         cartesian_chars_per_batch=int(args.cartesian_chars_per_batch),
         shuffle=(str(args.train_sampling) == "shuffle"),
     )
-    val_dataloader = None
-    if val_dataset is not None:
-        val_dataloader = build_dataloader(
-            val_dataset,
-            batch_size=int(args.batch),
-            num_workers=int(args.num_workers),
-            device=device,
-            seed=int(args.seed) + 1,
-            sampling_mode=str(args.train_sampling),
-            cartesian_fonts_per_batch=int(args.cartesian_fonts_per_batch),
-            cartesian_chars_per_batch=int(args.cartesian_chars_per_batch),
-            shuffle=False,
-        )
 
     resolved_epochs = max(1, int(args.epochs))
     if len(dataloader) > 0:
@@ -273,7 +245,7 @@ def main() -> None:
     model = FontPerceptor(
         in_channels=1,
         base_channels=int(args.base_channels),
-        proj_dim=int(args.style_proj_dim),
+        num_fonts=len(dataset.font_names),
         num_chars=len(dataset.char_list),
         dropout=float(args.dropout),
         feature_stage_names=parse_feature_stage_names(args.feature_stages),
@@ -283,14 +255,15 @@ def main() -> None:
         device,
         lr=float(args.lr),
         total_steps=total_steps,
-        style_supcon_lambda=float(args.style_supcon_lambda),
-        style_temperature=float(args.style_temperature),
+        font_loss_lambda_start=float(args.font_loss_lambda_start),
+        font_loss_lambda_end=float(args.font_loss_lambda_end),
+        font_label_smoothing=float(args.font_label_smoothing),
+        char_label_smoothing=float(args.char_label_smoothing),
         qualify_min_char_acc=float(args.qualify_min_char_acc),
-        qualify_min_style_margin=float(args.qualify_min_style_margin),
         log_every_steps=log_every_steps,
         save_every_steps=resolved_save_every_steps,
-        val_every_steps=val_every_steps,
-        val_max_batches=int(args.val_max_batches),
+        val_every_steps=None,
+        val_max_batches=None,
         grad_clip_norm=float(args.grad_clip_norm),
     )
 
@@ -303,13 +276,17 @@ def main() -> None:
     run_config["resolved_font_split_seed"] = int(font_split_seed)
     run_config["resolved_epochs"] = int(resolved_epochs)
     run_config["resolved_log_every_steps"] = int(log_every_steps)
-    run_config["resolved_val_every_steps"] = int(val_every_steps)
     run_config["resolved_save_every_steps"] = None if resolved_save_every_steps is None else int(resolved_save_every_steps)
     run_config["computed_total_steps"] = int(total_steps)
+    run_config["lr_schedule"] = "cosine"
+    run_config["optimizer"] = "AdamW"
+    run_config["optimizer_weight_decay"] = 1e-4
+    run_config["font_loss_lambda_schedule"] = "cosine"
     run_config["train_fonts"] = int(len(dataset.font_names))
     run_config["train_samples"] = int(len(dataset.samples))
-    run_config["val_fonts"] = 0 if val_dataset is None else int(len(val_dataset.font_names))
-    run_config["val_samples"] = 0 if val_dataset is None else int(len(val_dataset.samples))
+    run_config["val_fonts"] = 0
+    run_config["val_samples"] = 0
+    run_config["num_fonts"] = int(len(dataset.font_names))
     run_config["num_chars"] = int(len(dataset.char_list))
     run_config["model_type"] = "font_perceptor"
 
@@ -319,12 +296,11 @@ def main() -> None:
         encoding="utf-8",
     )
 
-    trainer.fit(dataloader, epochs=resolved_epochs, save_dir=args.save_dir, val_dataloader=val_dataloader)
+    trainer.fit(dataloader, epochs=resolved_epochs, save_dir=args.save_dir, val_dataloader=None)
     trainer.save(args.save_dir / "last.pt")
     report = build_qualification_report(
         save_dir=args.save_dir,
         min_char_acc=float(args.qualify_min_char_acc),
-        min_style_margin=float(args.qualify_min_style_margin),
     )
     print(
         "[font_perceptor_train] "

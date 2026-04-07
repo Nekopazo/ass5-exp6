@@ -9,7 +9,6 @@ from pathlib import Path
 import sys
 
 import torch
-import torch.nn.functional as F
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -69,7 +68,7 @@ def trace_model(model: FontPerceptor, batch_size: int, image_size: int, device: 
         "stage3",
         "stage4",
         "global_proj",
-        "style_proj_head",
+        "font_head",
         "char_head",
     ]:
         module = getattr(model, name)
@@ -95,8 +94,8 @@ def trace_model(model: FontPerceptor, batch_size: int, image_size: int, device: 
     print(f"global_pool_flatten: {shape_of(pooled)}")
     global_feat = model.global_proj(pooled)
     print(f"global_feat: {shape_of(global_feat)}")
-    style_embed = F.normalize(model.style_proj_head(global_feat), dim=-1, eps=1e-6)
-    print(f"style_embed: {shape_of(style_embed)}")
+    font_logits = model.font_head(global_feat)
+    print(f"font_logits: {shape_of(font_logits)}")
     char_logits = model.char_head(global_feat)
     print(f"char_logits: {shape_of(char_logits)}")
 

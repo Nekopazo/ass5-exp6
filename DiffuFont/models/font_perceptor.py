@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Custom grayscale font perceptor and related losses."""
+"""Custom grayscale font perceptor."""
 
 from __future__ import annotations
 
@@ -88,14 +88,14 @@ class DepthwiseSeparableBlock(nn.Module):
 
 
 class FontPerceptor(nn.Module):
-    """Lightweight grayscale CNN for font perceptual/style supervision."""
+    """Lightweight grayscale CNN for font/char perceptual supervision."""
 
     def __init__(
         self,
         *,
         in_channels: int = 1,
         base_channels: int = 32,
-        proj_dim: int = 128,
+        num_fonts: int = 512,
         num_chars: int = 1000,
         dropout: float = 0.0,
         feature_stage_names: Sequence[str] | None = None,
@@ -105,7 +105,7 @@ class FontPerceptor(nn.Module):
             raise ValueError(f"FontPerceptor expects grayscale input, got in_channels={in_channels}")
         self.in_channels = int(in_channels)
         self.base_channels = int(base_channels)
-        self.proj_dim = int(proj_dim)
+        self.num_fonts = int(num_fonts)
         self.num_chars = int(num_chars)
         self.dropout = max(0.0, float(dropout))
         self.feature_stage_names = _parse_stage_names(feature_stage_names)
@@ -144,11 +144,11 @@ class FontPerceptor(nn.Module):
             nn.SiLU(inplace=True),
             nn.Dropout(p=self.dropout),
         )
-        self.style_proj_head = nn.Sequential(
+        self.font_head = nn.Sequential(
             nn.Linear(c6, c6),
             nn.SiLU(inplace=True),
             nn.Dropout(p=self.dropout),
-            nn.Linear(c6, self.proj_dim),
+            nn.Linear(c6, self.num_fonts),
         )
         self.char_head = nn.Sequential(
             nn.Linear(c6, c6),
@@ -161,7 +161,7 @@ class FontPerceptor(nn.Module):
         return {
             "in_channels": int(self.in_channels),
             "base_channels": int(self.base_channels),
-            "proj_dim": int(self.proj_dim),
+            "num_fonts": int(self.num_fonts),
             "num_chars": int(self.num_chars),
             "dropout": float(self.dropout),
             "feature_stage_names": list(self.feature_stage_names),
@@ -187,49 +187,14 @@ class FontPerceptor(nn.Module):
         final_feature = stage_features["stage4"]
         pooled = self.global_pool(final_feature).flatten(1)
         global_feat = self.global_proj(pooled)
-        style_embed = F.normalize(self.style_proj_head(global_feat), dim=-1, eps=1e-6)
+        font_logits = self.font_head(global_feat)
         char_logits = self.char_head(global_feat)
         return {
             "feature_maps": [stage_features[name] for name in self.feature_stage_names],
             "global_feat": global_feat,
-            "style_embed": style_embed,
+            "font_logits": font_logits,
             "char_logits": char_logits,
         }
-
-
-def supervised_contrastive_loss(
-    features: torch.Tensor,
-    labels: torch.Tensor,
-    *,
-    temperature: float = 0.07,
-) -> torch.Tensor:
-    if features.dim() != 2:
-        raise ValueError(f"features must be 2D, got {tuple(features.shape)}")
-    if labels.dim() != 1:
-        labels = labels.view(-1)
-    if features.size(0) != labels.size(0):
-        raise ValueError(f"features/labels batch mismatch: {tuple(features.shape)} vs {tuple(labels.shape)}")
-
-    features = F.normalize(features, dim=-1, eps=1e-6)
-    labels = labels.to(device=features.device)
-    logits = torch.matmul(features, features.t()) / max(float(temperature), 1e-6)
-    logits = logits - logits.max(dim=1, keepdim=True).values.detach()
-
-    batch_size = features.size(0)
-    identity_mask = torch.eye(batch_size, device=features.device, dtype=torch.bool)
-    positive_mask = labels.unsqueeze(0).eq(labels.unsqueeze(1)) & (~identity_mask)
-    logits_mask = (~identity_mask).to(dtype=features.dtype)
-
-    exp_logits = torch.exp(logits) * logits_mask
-    log_prob = logits - torch.log(exp_logits.sum(dim=1, keepdim=True).clamp_min(1e-12))
-
-    positive_count = positive_mask.sum(dim=1)
-    valid_rows = positive_count > 0
-    if not valid_rows.any():
-        return features.new_tensor(0.0)
-
-    mean_log_prob_pos = (log_prob * positive_mask.to(dtype=log_prob.dtype)).sum(dim=1) / positive_count.clamp_min(1)
-    return -mean_log_prob_pos[valid_rows].mean()
 
 
 def style_similarity_stats(
@@ -341,17 +306,8 @@ class FrozenFontPerceptorGuidance(nn.Module):
             perceptual_per_sample = pred.new_zeros(pred.size(0))
             for pred_feat, target_feat in zip(pred_feature_maps, target_feature_maps):
                 perceptual_per_sample = perceptual_per_sample + (pred_feat - target_feat).abs().flatten(1).mean(dim=1)
-            style_per_sample = 1.0 - F.cosine_similarity(
-                pred_outputs["style_embed"],
-                target_outputs["style_embed"],
-                dim=-1,
-                eps=1e-6,
-            )
             perceptual = perceptual_per_sample.mean()
-            style = style_per_sample.mean()
         return {
             "loss_perceptual": perceptual,
             "loss_perceptual_per_sample": perceptual_per_sample,
-            "loss_style_embed": style,
-            "loss_style_embed_per_sample": style_per_sample,
         }

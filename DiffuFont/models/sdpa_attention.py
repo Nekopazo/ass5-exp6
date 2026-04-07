@@ -89,33 +89,27 @@ class SDPAAttention(nn.Module):
             )
 
         if need_weights:
-            logits = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-            if key_padding_mask is not None:
-                logits = logits.masked_fill(key_padding_mask.unsqueeze(1).unsqueeze(2).bool(), float("-inf"))
-            attn = torch.softmax(logits, dim=-1)
-            out = torch.matmul(attn, v)
-            weights = attn.mean(dim=1)
-        else:
-            attn_mask = None
-            if key_padding_mask is not None:
-                key_padding_mask = key_padding_mask.bool()
-                if key_padding_mask.any():
-                    attn_mask = (~key_padding_mask).unsqueeze(1).unsqueeze(2)
-            if attn_mask is not None:
-                raise RuntimeError(
-                    "Flash-only SDPA does not support non-null attn_mask in this project. "
-                    "Current training pipeline assumes all style refs are valid."
-                )
-            with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-                out = F.scaled_dot_product_attention(
-                    q,
-                    k,
-                    v,
-                    attn_mask=None,
-                    dropout_p=0.0,
-                    is_causal=False,
-                )
-            weights = None
+            raise RuntimeError("Flash-only SDPA does not support returning attention weights in this project.")
+        attn_mask = None
+        if key_padding_mask is not None:
+            key_padding_mask = key_padding_mask.bool()
+            if key_padding_mask.any():
+                attn_mask = (~key_padding_mask).unsqueeze(1).unsqueeze(2)
+        if attn_mask is not None:
+            raise RuntimeError(
+                "Flash-only SDPA does not support non-null attn_mask in this project. "
+                "Current training pipeline assumes all style refs are valid."
+            )
+        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+            out = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=None,
+                dropout_p=0.0,
+                is_causal=False,
+            )
+        weights = None
 
         out = out.transpose(1, 2).contiguous().view(bsz, q_len, self.embed_dim)
         out = self.out_proj(out)

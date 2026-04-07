@@ -219,6 +219,8 @@ def trace_backbone_path(
     print(f"backbone.timestep_embedding: {shape_of(time_cond)}")
     time_cond = backbone.time_mlp(time_cond)
     print(f"backbone.time_mlp: {shape_of(time_cond)}")
+    time_cond = backbone.time_cond_norm(time_cond)
+    print(f"backbone.time_cond_norm: {shape_of(time_cond)}")
     for idx, block in enumerate(backbone.blocks):
         x = block(
             x,

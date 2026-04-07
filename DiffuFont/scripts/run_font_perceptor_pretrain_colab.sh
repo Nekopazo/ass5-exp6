@@ -14,7 +14,7 @@ SAVE_DIR="checkpoints/font_perceptor_$(date '+%Y%m%d_%H%M%S')"
 RESUME_CKPT=""
 DEVICE_ARG="auto"
 SEED=42
-FONT_SPLIT="train"
+FONT_SPLIT="all"
 FONT_SPLIT_SEED=""
 FONT_TRAIN_RATIO="0.95"
 
@@ -22,29 +22,27 @@ EPOCHS=1000000
 TARGET_STEPS=50000
 SAVE_EVERY=5000
 LOG_EVERY=100
-VAL_EVERY=100
-VAL_MAX_BATCHES=16
 LR="3e-4"
+FONT_LOSS_LAMBDA_START="0.2"
+FONT_LOSS_LAMBDA_END="0.05"
+FONT_LABEL_SMOOTHING="0.05"
+CHAR_LABEL_SMOOTHING="0.0"
 GRAD_CLIP_NORM="1.0"
 
 BATCH_SIZE=256
-NUM_WORKERS=8
+NUM_WORKERS=2
 MAX_FONTS=0
 IMAGE_SIZE=128
 
 BASE_CHANNELS=32
-STYLE_PROJ_DIM=128
 DROPOUT="0.0"
 FEATURE_STAGES="stage1,stage2,stage3,stage4"
 
-TRAIN_SAMPLING="cartesian_font_char"
+TRAIN_SAMPLING="shuffle"
 CARTESIAN_FONTS_PER_BATCH=16
 CARTESIAN_CHARS_PER_BATCH=16
 
-STYLE_SUPCON_LAMBDA="0.2"
-STYLE_TEMPERATURE="0.07"
 QUALIFY_MIN_CHAR_ACC="0.70"
-QUALIFY_MIN_STYLE_MARGIN="0.10"
 
 EXTRA_ARGS=()
 
@@ -65,25 +63,23 @@ while [[ $# -gt 0 ]]; do
     --target-steps) TARGET_STEPS="${2:?}"; shift 2 ;;
     --save-every-steps) SAVE_EVERY="${2:?}"; shift 2 ;;
     --log-every-steps) LOG_EVERY="${2:?}"; shift 2 ;;
-    --val-every-steps) VAL_EVERY="${2:?}"; shift 2 ;;
-    --val-max-batches) VAL_MAX_BATCHES="${2:?}"; shift 2 ;;
     --lr) LR="${2:?}"; shift 2 ;;
+    --font-loss-lambda-start) FONT_LOSS_LAMBDA_START="${2:?}"; shift 2 ;;
+    --font-loss-lambda-end) FONT_LOSS_LAMBDA_END="${2:?}"; shift 2 ;;
+    --font-label-smoothing) FONT_LABEL_SMOOTHING="${2:?}"; shift 2 ;;
+    --char-label-smoothing) CHAR_LABEL_SMOOTHING="${2:?}"; shift 2 ;;
     --grad-clip-norm) GRAD_CLIP_NORM="${2:?}"; shift 2 ;;
     --batch) BATCH_SIZE="${2:?}"; shift 2 ;;
     --num-workers) NUM_WORKERS="${2:?}"; shift 2 ;;
     --max-fonts) MAX_FONTS="${2:?}"; shift 2 ;;
     --image-size) IMAGE_SIZE="${2:?}"; shift 2 ;;
     --base-channels) BASE_CHANNELS="${2:?}"; shift 2 ;;
-    --style-proj-dim) STYLE_PROJ_DIM="${2:?}"; shift 2 ;;
     --dropout) DROPOUT="${2:?}"; shift 2 ;;
     --feature-stages) FEATURE_STAGES="${2:?}"; shift 2 ;;
     --train-sampling) TRAIN_SAMPLING="${2:?}"; shift 2 ;;
     --cartesian-fonts-per-batch) CARTESIAN_FONTS_PER_BATCH="${2:?}"; shift 2 ;;
     --cartesian-chars-per-batch) CARTESIAN_CHARS_PER_BATCH="${2:?}"; shift 2 ;;
-    --style-supcon-lambda) STYLE_SUPCON_LAMBDA="${2:?}"; shift 2 ;;
-    --style-temperature) STYLE_TEMPERATURE="${2:?}"; shift 2 ;;
     --qualify-min-char-acc) QUALIFY_MIN_CHAR_ACC="${2:?}"; shift 2 ;;
-    --qualify-min-style-margin) QUALIFY_MIN_STYLE_MARGIN="${2:?}"; shift 2 ;;
     --) shift; EXTRA_ARGS+=("$@"); break ;;
     *) EXTRA_ARGS+=("$1"); shift ;;
   esac
@@ -120,25 +116,23 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --target-steps "${TARGET_STEPS}"
     --save-every-steps "${SAVE_EVERY}"
     --log-every-steps "${LOG_EVERY}"
-    --val-every-steps "${VAL_EVERY}"
-    --val-max-batches "${VAL_MAX_BATCHES}"
     --lr "${LR}"
+    --font-loss-lambda-start "${FONT_LOSS_LAMBDA_START}"
+    --font-loss-lambda-end "${FONT_LOSS_LAMBDA_END}"
+    --font-label-smoothing "${FONT_LABEL_SMOOTHING}"
+    --char-label-smoothing "${CHAR_LABEL_SMOOTHING}"
     --grad-clip-norm "${GRAD_CLIP_NORM}"
     --batch "${BATCH_SIZE}"
     --num-workers "${NUM_WORKERS}"
     --max-fonts "${MAX_FONTS}"
     --image-size "${IMAGE_SIZE}"
     --base-channels "${BASE_CHANNELS}"
-    --style-proj-dim "${STYLE_PROJ_DIM}"
     --dropout "${DROPOUT}"
     --feature-stages "${FEATURE_STAGES}"
     --train-sampling "${TRAIN_SAMPLING}"
     --cartesian-fonts-per-batch "${CARTESIAN_FONTS_PER_BATCH}"
     --cartesian-chars-per-batch "${CARTESIAN_CHARS_PER_BATCH}"
-    --style-supcon-lambda "${STYLE_SUPCON_LAMBDA}"
-    --style-temperature "${STYLE_TEMPERATURE}"
     --qualify-min-char-acc "${QUALIFY_MIN_CHAR_ACC}"
-    --qualify-min-style-margin "${QUALIFY_MIN_STYLE_MARGIN}"
   )
   if [[ -n "${RESUME_CKPT}" ]]; then
     daemon_args+=(--resume "${RESUME_CKPT}")
@@ -304,27 +298,25 @@ cmd_common=(
   --font-split-seed "${FONT_SPLIT_SEED}"
   --font-train-ratio "${FONT_TRAIN_RATIO}"
   --lr "${LR}"
+  --font-loss-lambda-start "${FONT_LOSS_LAMBDA_START}"
+  --font-loss-lambda-end "${FONT_LOSS_LAMBDA_END}"
+  --font-label-smoothing "${FONT_LABEL_SMOOTHING}"
+  --char-label-smoothing "${CHAR_LABEL_SMOOTHING}"
   --grad-clip-norm "${GRAD_CLIP_NORM}"
   --batch "${BATCH_SIZE}"
   --num-workers "${NUM_WORKERS}"
   --max-fonts "${MAX_FONTS}"
   --image-size "${IMAGE_SIZE}"
   --base-channels "${BASE_CHANNELS}"
-  --style-proj-dim "${STYLE_PROJ_DIM}"
   --dropout "${DROPOUT}"
   --feature-stages "${FEATURE_STAGES}"
   --train-sampling "${TRAIN_SAMPLING}"
   --cartesian-fonts-per-batch "${CARTESIAN_FONTS_PER_BATCH}"
   --cartesian-chars-per-batch "${CARTESIAN_CHARS_PER_BATCH}"
-  --style-supcon-lambda "${STYLE_SUPCON_LAMBDA}"
-  --style-temperature "${STYLE_TEMPERATURE}"
   --qualify-min-char-acc "${QUALIFY_MIN_CHAR_ACC}"
-  --qualify-min-style-margin "${QUALIFY_MIN_STYLE_MARGIN}"
   --epochs "${EPOCHS}"
   --total-steps "${TARGET_STEPS}"
   --log-every-steps "${LOG_EVERY}"
-  --val-every-steps "${VAL_EVERY}"
-  --val-max-batches "${VAL_MAX_BATCHES}"
   --save-every-steps "${SAVE_EVERY}"
 )
 
@@ -344,11 +336,14 @@ echo "[run_font_perceptor_pretrain_colab] log_file=${LOG_FILE}"
 echo "[run_font_perceptor_pretrain_colab] requested_device=${DEVICE_ARG} seed=${SEED}"
 echo "[run_font_perceptor_pretrain_colab] resume=${RESUME_CKPT:-<none>}"
 echo "[run_font_perceptor_pretrain_colab] batch=${BATCH_SIZE} lr=${LR} grad_clip_norm=${GRAD_CLIP_NORM}"
-echo "[run_font_perceptor_pretrain_colab] base_channels=${BASE_CHANNELS} style_proj_dim=${STYLE_PROJ_DIM} dropout=${DROPOUT}"
+echo "[run_font_perceptor_pretrain_colab] lr_schedule=cosine"
+echo "[run_font_perceptor_pretrain_colab] optimizer=AdamW weight_decay=1e-4"
+echo "[run_font_perceptor_pretrain_colab] font_loss_lambda_schedule=cosine start=${FONT_LOSS_LAMBDA_START} end=${FONT_LOSS_LAMBDA_END}"
+echo "[run_font_perceptor_pretrain_colab] font_label_smoothing=${FONT_LABEL_SMOOTHING} char_label_smoothing=${CHAR_LABEL_SMOOTHING}"
+echo "[run_font_perceptor_pretrain_colab] base_channels=${BASE_CHANNELS} dropout=${DROPOUT}"
 echo "[run_font_perceptor_pretrain_colab] feature_stages=${FEATURE_STAGES}"
 echo "[run_font_perceptor_pretrain_colab] train_sampling=${TRAIN_SAMPLING} cartesian_fonts_per_batch=${CARTESIAN_FONTS_PER_BATCH} cartesian_chars_per_batch=${CARTESIAN_CHARS_PER_BATCH}"
-echo "[run_font_perceptor_pretrain_colab] style_supcon_lambda=${STYLE_SUPCON_LAMBDA} style_temperature=${STYLE_TEMPERATURE}"
-echo "[run_font_perceptor_pretrain_colab] qualify_min_char_acc=${QUALIFY_MIN_CHAR_ACC} qualify_min_style_margin=${QUALIFY_MIN_STYLE_MARGIN}"
+echo "[run_font_perceptor_pretrain_colab] qualify_min_char_acc=${QUALIFY_MIN_CHAR_ACC}"
 
 attempt=1
 while true; do

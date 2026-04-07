@@ -1,6 +1,6 @@
 # Current Project Model Architecture
 
-Generated on `2026-04-03` from the current repository state in `/scratch/yangximing/code/ass5-exp6/DiffuFont`.
+Generated on `2026-04-07` from the current repository state in `/scratch/yangximing/code/ass5-exp6/DiffuFont`.
 
 This document records the current runnable architecture after the DiT conditioning refactor:
 
@@ -27,9 +27,9 @@ Core design:
 
 - content is encoded into one token per `16x16` image patch
 - style is encoded into one global vector per sample
-- each transformer block applies external content/style injection first, then a standard time-conditioned DiT block
-- content injection uses zero-linear residuals
-- style is merged into each enabled block's time conditioning with a zero-init `style_to_time`
+- each transformer block splits conditioning by sublayer: self-attention uses timestep plus optional content tokens, and the MLP uses timestep plus optional style
+- content injection is merged into the self-attention adaLN modulation with zero-init token-wise shift/scale/gate
+- style is encoded to a pooled `1024`-dim vector, then compressed to `512` by a transformer-style MLP projector before entering each enabled block's FFN conditioning through a zero-init `style_to_time: 512 -> 512`
 - style does not have a separate residual token injection path
 - self-attention is performed inside the DiT block after content/style injection
 - patch-level transformer outputs are refined by a per-patch local detailer before unpatchifying to the final flow field
@@ -57,14 +57,14 @@ Current default constructor values:
 | `patch_grid_size` | `8` |
 | `num_patches` | `64` |
 | `encoder_hidden_dim` | `512` |
-| `style_hidden_dim` | `768` |
-| `style_pool_heads` | `8` |
+| `style_hidden_dim` | `1024` |
+| `style_pool_heads` | `4` |
 | `dit_hidden_dim` | `512` |
-| `dit_depth` | `12` |
+| `dit_depth` | `16` |
 | `dit_heads` | `8` |
 | `dit_mlp_ratio` | `4.0` |
-| `content_injection_layers` | `[1, 2, 3, 4, 5, 6]` |
-| `style_injection_layers` | `[7, 8, 9, 10, 11, 12]` |
+| `content_injection_layers` | `[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]` |
+| `style_injection_layers` | `[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]` |
 | `detailer_base_channels` | `64` |
 | `detailer_max_channels` | `512` |
 | `detailer_bottleneck_channels` | `512` |
@@ -75,16 +75,16 @@ Current parameter counts from `inspect_flow_model.py`:
 | --- | ---: |
 | `content_encoder` | `7,822,464` |
 | `content_proj` | `0` |
-| `style_encoder` | `21,983,616` |
-| `style_pool` | `2,363,136` |
-| `style_proj` | `393,728` |
-| `backbone` | `60,525,056` |
+| `style_encoder` | `31,422,592` |
+| `style_pool` | `4,199,424` |
+| `style_proj` | `3,148,288` |
+| `backbone` | `84,683,264` |
 | `detailer` | `8,965,249` |
-| total | `102,053,249` |
+| total | `140,241,281` |
 
 ## 3. Top-Level Forward Graph
 
-Let `B` be batch size, `R` be style reference count, `H=W=128`, `P=16`, `N=(H/P)^2=64`, `D=512`.
+Let `B` be batch size, `R` be style reference count, `H=W=128`, `P=16`, `N=(H/P)^2=64`, `D=512`, and `S=1024`.
 
 Inputs:
 
@@ -138,7 +138,7 @@ Semantics:
 
 Implemented by `StyleEncoder` and `SourcePartRefDiT.encode_style_global`.
 
-For each sample, every style reference glyph is encoded independently to a `4x4x768` feature map. The `4x4` spatial grid from all valid references is flattened and concatenated into `R*16` local tokens, pooled once by a single-query attention pool without positional embedding and with `style_ref_mask` expanded to token-level masking, then projected by `style_proj: 768 -> 512`.
+For each sample, every style reference glyph is encoded independently to a `4x4x1024` feature map. The `4x4` spatial grid from all valid references is flattened and concatenated into `R*16` local tokens, then pooled once by a single-query attention pool without positional embedding and with `style_ref_mask` expanded to token-level masking. The pooled style vector is then compressed from `1024 -> 512` by a two-layer MLP projector with LayerNorm and GELU before entering the backbone.
 
 Shape trace for `B=1`, `R=6`:
 
@@ -154,32 +154,33 @@ Shape trace for `B=1`, `R=6`:
 | `resblock_2` | `(6, 256, 16, 16)` |
 | `downsample_3` | `(6, 512, 8, 8)` |
 | `resblock_3` | `(6, 512, 8, 8)` |
-| `downsample_4` | `(6, 768, 4, 4)` |
-| `resblock_4` | `(6, 768, 4, 4)` |
-| `flatten(2).transpose(1,2)` | `(6, 16, 768)` |
-| `view(B, R*16, D)` | `(1, 96, 768)` |
+| `downsample_4` | `(6, 1024, 4, 4)` |
+| `resblock_4` | `(6, 1024, 4, 4)` |
+| `flatten(2).transpose(1,2)` | `(6, 16, 1024)` |
+| `view(B, R*16, S)` | `(1, 96, 1024)` |
 | `expand style_ref_mask to token mask` | `(1, 96)` |
-| `style_pool.query` | `(1, 1, 768)` |
-| `style_pool.attn` | `(1, 1, 768)` |
-| `squeeze(1)` | `(1, 768)` |
-| `style_proj` | `(1, 512)` |
+| `style_pool.query` | `(1, 1, 1024)` |
+| `style_pool.attn` | `(1, 1, 1024)` |
+| `squeeze(1)` | `(1, 1024)` |
+| `style_proj` | MLP projector, `(1, 512)` |
 
 Exact aggregation:
 
 ```text
-style_features_r = style_encoder(style_refs_r)              # [B*R, 768, 4, 4]
-style_tokens_r = flatten_hw(style_features_r)               # [B*R, 16, 768]
-style_tokens = reshape(style_tokens_r)                      # [B, R*16, 768]
+style_features_r = style_encoder(style_refs_r)              # [B*R, 1024, 4, 4]
+style_tokens_r = flatten_hw(style_features_r)               # [B*R, 16, 1024]
+style_tokens = reshape(style_tokens_r)                      # [B, R*16, 1024]
 token_mask = expand_ref_mask(style_ref_mask, 16)            # [B, R*16]
 
-pooled_style = style_pool(style_tokens, token_mask)         # [B, 768]
+pooled_style = style_pool(style_tokens, token_mask)         # [B, 1024]
 style_global = style_proj(pooled_style)                     # [B, 512]
 ```
 
 Runtime constraint:
 
-- `style_ref_mask` must keep at least one valid reference per sample
+- current flash-only style pooling requires every `style_ref_mask` entry to be valid; masked/padded refs are not supported
 - `style_pool` uses one learned query and no positional embedding, so all valid `R*16` spatial tokens are pooled as an unordered set
+- `style_proj` is `LayerNorm(1024) -> Linear(1024, 2048) -> GELU -> Linear(2048, 512)`
 
 ## 6. Diffusion Transformer Backbone
 
@@ -216,57 +217,76 @@ Current default block usage:
 
 For one block `l`, input `x_l: [B, 64, 512]`, content tokens `c: [B, 64, 512]`, style global `s: [B, 512]`, timestep condition `t: [B, 512]`.
 
-#### 6.3.1 Content injection
+#### 6.3.1 Self-attention conditioning from timestep and optional content
 
-Enabled only if layer `l` is in `content_injection_layers`.
+The timestep term is always present; the content term is enabled only if layer `l` is in `content_injection_layers`.
 
 ```text
-delta_c = zero_linear_l(content_control_ln_l(c))     # [B, 64, 512]
-x_l = x_l + delta_c
+t_attn_l = attn_time_to_token_l(attn_time_ln_l(t))[:, None, :]      # [B, 1, 512]
+t_attn_l = expand_to_64_tokens(t_attn_l)                            # [B, 64, 512]
+
+attn_joint_l = t_attn_l + content_control_ln_l(c)                   # [B, 64, 512]
+shift_sa, scale_sa, gate_sa =
+    attn_joint_mod_l(attn_joint_l)                                  # each [B, 64, 512]
 ```
 
 Important details:
 
-- `zero_linear_l` is zero-initialized, so this residual starts from zero contribution
+- `attn_joint_mod_l` is zero-initialized, so the attention conditioning path starts as a no-op
+- `attn_time_to_token_l` broadcasts timestep information to every patch token
 - `c.shape` must exactly match `x_l.shape`
 
-#### 6.3.2 Style-to-time merge
+If content injection is disabled for a block, then:
+
+```text
+attn_joint_l = t_attn_l
+```
+
+#### 6.3.2 FFN conditioning from timestep and optional style
 
 Enabled only if layer `l` is in `style_injection_layers`.
 
 ```text
-style_bias_l = style_to_time_l(style_cond_ln_l(s))             # [B, 512]
-t'_l = t + style_bias_l                                        # [B, 512]
+style_bias_l = style_to_time_l(style_cond_ln_l(s))            # [B, 512]
+ffn_t_l = t + style_bias_l                                    # [B, 512]
 ```
 
 Important details:
 
 - style is a single global vector per sample
-- `style_to_time_l` is zero-initialized, so style starts as a no-op
-- style is merged into the same modulation path used by timestep conditioning
+- style is already projected to backbone width before entering the block
+- `style_to_time_l` is zero-initialized, so style starts as a no-op relative to the base timestep path
+- style is merged only into the FFN modulation path
 
-#### 6.3.3 Standard time-conditioned DiT block
-
-After content injection and optional style-to-time merge, the block runs one self-attention sublayer and one MLP sublayer, both modulated by the merged timestep condition.
+If style injection is disabled for a block, then:
 
 ```text
-shift_sa, scale_sa, gate_sa, shift_ffn, scale_ffn, gate_ffn =
-    time_modulation_l(time_mod_input_ln_l(t'_l))               # each [B, 512]
+ffn_t_l = t
+```
 
-h = modulate(self_ln_l(x_l), shift_sa, scale_sa)             # [B, 64, 512]
-x_l = x_l + gate_sa[:, None, :] * self_attn_l(h, h, h)       # [B, 64, 512]
+#### 6.3.3 Split-conditioned DiT block
 
-h = modulate(mlp_ln_l(x_l), shift_ffn, scale_ffn)            # [B, 64, 512]
-x_{l+1} = x_l + gate_ffn[:, None, :] * mlp_l(h)             # [B, 64, 512]
+After building `attn_joint_l` and `ffn_t_l`, the block runs one self-attention sublayer and one MLP sublayer. Content only affects the self-attention adaLN path; style only affects the MLP adaLN path.
+
+```text
+self_h = modulate(self_ln_l(x_l), shift_sa, scale_sa)         # [B, 64, 512]
+self_out = self_attn_l(self_h, self_h, self_h)                # [B, 64, 512]
+x_l = x_l + gate_sa * self_out                                # [B, 64, 512]
+
+shift_ffn, scale_ffn, gate_ffn =
+    ffn_time_modulation_l(ffn_time_mod_input_ln_l(ffn_t_l))   # each [B, 512]
+
+mlp_h = modulate(mlp_ln_l(x_l), shift_ffn, scale_ffn)         # [B, 64, 512]
+x_{l+1} = x_l + gate_ffn[:, None, :] * mlp_l(mlp_h)           # [B, 64, 512]
 ```
 
 Where:
 
 ```text
-modulate(x, shift, scale) = x * (1 + scale[:, None, :]) + shift[:, None, :]
+modulate(x, shift, scale) = x * (1 + scale) + shift
 ```
 
-`time_modulation_l` is zero-initialized on its final linear layer.
+`attn_joint_mod_l`, `ffn_time_modulation_l`, and `style_to_time_l` are zero-initialized on their final linear layers.
 
 ### 6.4 Backbone output
 
@@ -338,7 +358,6 @@ loss =
     flow_term
   + perceptual_term
   + style_term
-  + style_batch_term
   + pixel_term
 ```
 
@@ -379,10 +398,12 @@ block_{l}_content_ratio
 Where:
 
 ```text
-block_{l}_content_ratio = rms(zero_linear_l(LN(content_tokens))) / rms(block_input_tokens_l)
+block_{l}_content_ratio =
+    rms(self_ln_l(block_input_tokens_l) * content_attn_scale_l + content_attn_shift_l)
+    / rms(block_input_tokens_l)
 ```
 
-These diagnostics are computed immediately before the DiT block and therefore do not require disabling Flash Attention or changing the attention backend.
+`content_ratio` is a cheap pre-attention modulation proxy. An exact decomposition of the final attention residual into `t` and `content` parts would require an extra baseline attention pass, so the logged metric intentionally stays in modulation space.
 
 Runtime detail:
 
@@ -447,9 +468,9 @@ Parameter counts from `inspect_font_perceptor.py`:
 | `stage3` | `238,464` |
 | `stage4` | `446,848` |
 | `global_proj` | `66,304` |
-| `style_proj_head` | `98,688` |
+| `font_head` | `197,376` |
 | `char_head` | `322,792` |
-| total | `1,271,816` |
+| total | `1,370,504` |
 
 Forward shape trace for `B=2`:
 
@@ -463,14 +484,14 @@ Forward shape trace for `B=2`:
 | `stage4` | `(2, 256, 4, 4)` |
 | `global_pool_flatten` | `(2, 256)` |
 | `global_feat` | `(2, 256)` |
-| `style_embed` | `(2, 128)` |
+| `font_logits` | `(2, 512)` |
 | `char_logits` | `(2, 1000)` |
 
 Outputs:
 
 - `feature_maps`: selected intermediate CNN stages for perceptual loss
 - `global_feat`: pooled feature before heads
-- `style_embed`: normalized style embedding
+- `font_logits`: font classifier logits
 - `char_logits`: character classifier logits
 
 ## 10. Font Perceptor Pretraining Objective
@@ -480,17 +501,16 @@ Implemented by `FontPerceptorTrainer._compute_losses`.
 ```text
 outputs = FontPerceptor(target)
 loss_char_ce = CrossEntropy(outputs["char_logits"], char_id)
-loss_style_supcon = supervised_contrastive_loss(outputs["style_embed"], font_id, temperature=style_temperature)
-loss = loss_char_ce + style_supcon_lambda * loss_style_supcon
+loss_font_ce = CrossEntropy(outputs["font_logits"], font_id)
+loss = loss_char_ce + font_loss_lambda(step) * loss_font_ce
 ```
 
-Validation additionally reports:
+Training metrics additionally report:
 
 ```text
+font_acc
 char_acc
-style_pos_cos
-style_neg_cos
-style_cos_margin = style_pos_cos - style_neg_cos
+qualified_now = (char_acc >= qualify_min_char_acc)
 ```
 
 `train_font_perceptor.py` writes `qualification_report.json` and stamps the same qualification payload into `best.pt` and `last.pt`.
@@ -502,8 +522,8 @@ style_cos_margin = style_pos_cos - style_neg_cos
 `train.py` now accepts the current conditioning layer controls:
 
 ```bash
---content-injection-layers 1,2,3,4,5,6
---style-injection-layers 7,8,9,10,11,12
+--content-injection-layers 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16
+--style-injection-layers 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16
 ```
 
 Old runtime parameters removed from the runnable model path:

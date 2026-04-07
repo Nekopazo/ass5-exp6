@@ -19,7 +19,7 @@ FONT_SPLIT_SEED=""
 FONT_TRAIN_RATIO="0.95"
 
 EPOCHS=10000000
-TARGET_STEPS=100000
+TARGET_STEPS=200000
 SAVE_EVERY=5000
 SAMPLE_EVERY=300
 LOG_EVERY=100
@@ -27,7 +27,7 @@ VAL_EVERY=100
 VAL_MAX_BATCHES=16
 LR="1e-4"
 LR_WARMUP_STEPS=0
-LR_DECAY_START_STEP="35000"
+LR_DECAY_START_STEP="50000"
 LR_MIN_SCALE="0.1"
 GRAD_CLIP_NORM="1.0"
 GRAD_CLIP_MIN_NORM="0.5"
@@ -42,28 +42,27 @@ IMAGE_SIZE=128
 
 PATCH_SIZE=16
 ENCODER_HIDDEN_DIM=512
-STYLE_HIDDEN_DIM=768
+STYLE_HIDDEN_DIM=1024
 DIT_HIDDEN_DIM=512
-DIT_DEPTH=12
+DIT_DEPTH=16
 DIT_HEADS=8
 DIT_MLP_RATIO="4.0"
-CONTENT_INJECTION_LAYERS="2,4,6,8,10"
-STYLE_INJECTION_LAYERS="1,2,3,4,5,6,7,8,9,10,11,12"
+CONTENT_INJECTION_LAYERS="1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16"
+STYLE_INJECTION_LAYERS="1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16"
 DETAILER_BASE_CHANNELS=64
 DETAILER_MAX_CHANNELS=512
 
 FLOW_LAMBDA="1.0"
 USE_CNN_PERCEPTOR="1"
-PERCEPTOR_CHECKPOINT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/font_perceptor_20260328_123942/best.pt"
-PERCEPTUAL_LOSS_LAMBDA="0.2"
-STYLE_LOSS_LAMBDA="0.05"
+PERCEPTOR_CHECKPOINT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/font_perceptor_20260407_135124/best.pt"
+PERCEPTUAL_LOSS_LAMBDA="0.1"
 PIXEL_LOSS_LAMBDA="0.03"
 AUX_LOSS_T_LOGISTIC_STEEPNESS="8.0"
 PERCEPTUAL_LOSS_T_MIDPOINT="0.35"
-STYLE_LOSS_T_MIDPOINT="0.45"
 PIXEL_LOSS_T_MIDPOINT="0.55"
 FLOW_SAMPLE_STEPS=20
-EMA_DECAY="0"
+EMA_DECAY="0.999"
+EMA_START_STEP="70000"
 TRAIN_SAMPLING="cartesian_font_char"
 CARTESIAN_FONTS_PER_BATCH=64
 CARTESIAN_CHARS_PER_BATCH=4
@@ -101,14 +100,13 @@ while [[ $# -gt 0 ]]; do
     --no-use-cnn-perceptor) USE_CNN_PERCEPTOR="0"; shift ;;
     --perceptor-checkpoint) PERCEPTOR_CHECKPOINT="${2:?}"; shift 2 ;;
     --perceptual-loss-lambda) PERCEPTUAL_LOSS_LAMBDA="${2:?}"; shift 2 ;;
-    --style-loss-lambda) STYLE_LOSS_LAMBDA="${2:?}"; shift 2 ;;
     --pixel-loss-lambda) PIXEL_LOSS_LAMBDA="${2:?}"; shift 2 ;;
     --aux-loss-t-logistic-steepness) AUX_LOSS_T_LOGISTIC_STEEPNESS="${2:?}"; shift 2 ;;
     --perceptual-loss-t-midpoint) PERCEPTUAL_LOSS_T_MIDPOINT="${2:?}"; shift 2 ;;
-    --style-loss-t-midpoint) STYLE_LOSS_T_MIDPOINT="${2:?}"; shift 2 ;;
     --pixel-loss-t-midpoint) PIXEL_LOSS_T_MIDPOINT="${2:?}"; shift 2 ;;
     --flow-sample-steps) FLOW_SAMPLE_STEPS="${2:?}"; shift 2 ;;
     --ema-decay) EMA_DECAY="${2:?}"; shift 2 ;;
+    --ema-start-step) EMA_START_STEP="${2:?}"; shift 2 ;;
     --style-ref-count) STYLE_REF_COUNT="${2:?}"; shift 2 ;;
     --style-ref-count-min) STYLE_REF_COUNT_MIN="${2:?}"; shift 2 ;;
     --style-ref-count-max) STYLE_REF_COUNT_MAX="${2:?}"; shift 2 ;;
@@ -140,6 +138,9 @@ if [[ -z "${FONT_SPLIT_SEED}" ]]; then
 fi
 if [[ "${LR_DECAY_START_STEP}" == "-1" ]]; then
   LR_DECAY_START_STEP="$(( TARGET_STEPS * 8 / 10 ))"
+fi
+if [[ -z "${EMA_START_STEP}" ]]; then
+  EMA_START_STEP="$(( TARGET_STEPS / 2 + 1 ))"
 fi
 
 cd "${ROOT}"
@@ -184,9 +185,9 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --grad-clip-min-norm "${GRAD_CLIP_MIN_NORM}"
     --flow-lambda "${FLOW_LAMBDA}"
     --perceptual-loss-lambda "${PERCEPTUAL_LOSS_LAMBDA}"
-    --style-loss-lambda "${STYLE_LOSS_LAMBDA}"
     --flow-sample-steps "${FLOW_SAMPLE_STEPS}"
     --ema-decay "${EMA_DECAY}"
+    --ema-start-step "${EMA_START_STEP}"
     --style-ref-count "${STYLE_REF_COUNT}"
     --style-ref-count-min "${STYLE_REF_COUNT_MIN}"
     --style-ref-count-max "${STYLE_REF_COUNT_MAX}"
@@ -411,14 +412,13 @@ cmd_common=(
   --cartesian-chars-per-batch "${CARTESIAN_CHARS_PER_BATCH}"
   --flow-lambda "${FLOW_LAMBDA}"
   --perceptual-loss-lambda "${PERCEPTUAL_LOSS_LAMBDA}"
-  --style-loss-lambda "${STYLE_LOSS_LAMBDA}"
   --pixel-loss-lambda "${PIXEL_LOSS_LAMBDA}"
   --aux-loss-t-logistic-steepness "${AUX_LOSS_T_LOGISTIC_STEEPNESS}"
   --perceptual-loss-t-midpoint "${PERCEPTUAL_LOSS_T_MIDPOINT}"
-  --style-loss-t-midpoint "${STYLE_LOSS_T_MIDPOINT}"
   --pixel-loss-t-midpoint "${PIXEL_LOSS_T_MIDPOINT}"
   --flow-sample-steps "${FLOW_SAMPLE_STEPS}"
   --ema-decay "${EMA_DECAY}"
+  --ema-start-step "${EMA_START_STEP}"
   --epochs "${EPOCHS}"
   --total-steps "${TARGET_STEPS}"
   --log-every-steps "${LOG_EVERY}"
@@ -452,9 +452,9 @@ echo "[run_diffusion_colab] use_cnn_perceptor=${USE_CNN_PERCEPTOR}"
 echo "[run_diffusion_colab] perceptor_checkpoint=${PERCEPTOR_CHECKPOINT:-<none>}"
 echo "[run_diffusion_colab] batch=${BATCH_SIZE} lr=${LR} lr_warmup_steps=${LR_WARMUP_STEPS} lr_decay_start_step=${LR_DECAY_START_STEP} lr_min_scale=${LR_MIN_SCALE} grad_clip_norm=${GRAD_CLIP_NORM}"
 echo "[run_diffusion_colab] style_ref_count=${STYLE_REF_COUNT} style_ref_count_min=${STYLE_REF_COUNT_MIN} style_ref_count_max=${STYLE_REF_COUNT_MAX}"
-echo "[run_diffusion_colab] patch_size=${PATCH_SIZE} image_size=${IMAGE_SIZE} flow_sample_steps=${FLOW_SAMPLE_STEPS} flow_lambda=${FLOW_LAMBDA} ema_decay=${EMA_DECAY}"
+echo "[run_diffusion_colab] patch_size=${PATCH_SIZE} image_size=${IMAGE_SIZE} flow_sample_steps=${FLOW_SAMPLE_STEPS} flow_lambda=${FLOW_LAMBDA} ema_decay=${EMA_DECAY} ema_start_step=${EMA_START_STEP}"
 echo "[run_diffusion_colab] dit_heads=${DIT_HEADS}"
-echo "[run_diffusion_colab] perceptual_loss_lambda=${PERCEPTUAL_LOSS_LAMBDA} style_loss_lambda=${STYLE_LOSS_LAMBDA} pixel_loss_lambda=${PIXEL_LOSS_LAMBDA} aux_loss_t_logistic_steepness=${AUX_LOSS_T_LOGISTIC_STEEPNESS} perceptual_loss_t_midpoint=${PERCEPTUAL_LOSS_T_MIDPOINT} style_loss_t_midpoint=${STYLE_LOSS_T_MIDPOINT} pixel_loss_t_midpoint=${PIXEL_LOSS_T_MIDPOINT}"
+echo "[run_diffusion_colab] perceptual_loss_lambda=${PERCEPTUAL_LOSS_LAMBDA} pixel_loss_lambda=${PIXEL_LOSS_LAMBDA} aux_loss_t_logistic_steepness=${AUX_LOSS_T_LOGISTIC_STEEPNESS} perceptual_loss_t_midpoint=${PERCEPTUAL_LOSS_T_MIDPOINT} pixel_loss_t_midpoint=${PIXEL_LOSS_T_MIDPOINT}"
 echo "[run_diffusion_colab] detailer_base_channels=${DETAILER_BASE_CHANNELS} detailer_max_channels=${DETAILER_MAX_CHANNELS}"
 echo "[run_diffusion_colab] content_injection_layers=${CONTENT_INJECTION_LAYERS} style_injection_layers=${STYLE_INJECTION_LAYERS}"
 echo "[run_diffusion_colab] train_sampling=${TRAIN_SAMPLING} cartesian_fonts_per_batch=${CARTESIAN_FONTS_PER_BATCH} cartesian_chars_per_batch=${CARTESIAN_CHARS_PER_BATCH}"
