@@ -27,9 +27,9 @@ Core design:
 
 - content is encoded into one token per `16x16` image patch
 - style is encoded into one global vector per sample
-- each transformer block splits conditioning by sublayer: self-attention uses timestep plus optional content tokens, and the MLP uses timestep plus optional style
-- content injection is merged into the self-attention adaLN modulation with zero-init token-wise shift/scale/gate
-- style is encoded to a pooled `1024`-dim vector, then compressed to `512` by a transformer-style MLP projector before entering each enabled block's FFN conditioning through a zero-init `style_to_time: 512 -> 512`
+- each transformer block now builds one joint token-wise conditioning source from timestep tokens, optional content tokens, and an optional repeated style vector
+- the joint conditioning source is sent through one zero-init modulation head that directly emits six token-wise adaLN tensors: self-attention `shift/scale/gate` and MLP `shift/scale/gate`
+- style is encoded to a pooled `1024`-dim vector, then compressed to `512` by a transformer-style MLP projector before being repeated across all `64` patch tokens
 - style does not have a separate residual token injection path
 - self-attention is performed inside the DiT block after content/style injection
 - patch-level transformer outputs are refined by a per-patch local detailer before unpatchifying to the final flow field
@@ -217,67 +217,42 @@ Current default block usage:
 
 For one block `l`, input `x_l: [B, 64, 512]`, content tokens `c: [B, 64, 512]`, style global `s: [B, 512]`, timestep condition `t: [B, 512]`.
 
-#### 6.3.1 Self-attention conditioning from timestep and optional content
+#### 6.3.1 Unified token-wise conditioning from timestep, content, and style
 
-The timestep term is always present; the content term is enabled only if layer `l` is in `content_injection_layers`.
+The timestep term is always present. Content is added only if layer `l` is in `content_injection_layers`. Style is added only if layer `l` is in `style_injection_layers`.
 
 ```text
 t_attn_l = attn_time_to_token_l(attn_time_ln_l(t))[:, None, :]      # [B, 1, 512]
 t_attn_l = expand_to_64_tokens(t_attn_l)                            # [B, 64, 512]
 
-attn_joint_l = t_attn_l + content_control_ln_l(c)                   # [B, 64, 512]
-shift_sa, scale_sa, gate_sa =
-    attn_joint_mod_l(attn_joint_l)                                  # each [B, 64, 512]
+style_tokens_l = repeat(style_cond_ln_l(s), 64)                       # [B, 64, 512]
+
+joint_l = t_attn_l                                                    # [B, 64, 512]
+joint_l = joint_l + content_control_ln_l(c)        if content enabled
+joint_l = joint_l + style_tokens_l                  if style enabled
+
+shift_sa, scale_sa, gate_sa, shift_ffn, scale_ffn, gate_ffn =
+    joint_mod_l(joint_l)                                              # each [B, 64, 512]
 ```
 
 Important details:
 
-- `attn_joint_mod_l` is zero-initialized, so the attention conditioning path starts as a no-op
+- `joint_mod_l` is zero-initialized, so both attention and MLP conditioning start as a no-op
 - `attn_time_to_token_l` broadcasts timestep information to every patch token
 - `c.shape` must exactly match `x_l.shape`
+- style remains a single global vector per sample, but is repeated across the `64` patch positions before fusion
 
-If content injection is disabled for a block, then:
+#### 6.3.2 Unified-conditioned DiT block
 
-```text
-attn_joint_l = t_attn_l
-```
-
-#### 6.3.2 FFN conditioning from timestep and optional style
-
-Enabled only if layer `l` is in `style_injection_layers`.
-
-```text
-style_bias_l = style_to_time_l(style_cond_ln_l(s))            # [B, 512]
-ffn_t_l = t + style_bias_l                                    # [B, 512]
-```
-
-Important details:
-
-- style is a single global vector per sample
-- style is already projected to backbone width before entering the block
-- `style_to_time_l` is zero-initialized, so style starts as a no-op relative to the base timestep path
-- style is merged only into the FFN modulation path
-
-If style injection is disabled for a block, then:
-
-```text
-ffn_t_l = t
-```
-
-#### 6.3.3 Split-conditioned DiT block
-
-After building `attn_joint_l` and `ffn_t_l`, the block runs one self-attention sublayer and one MLP sublayer. Content only affects the self-attention adaLN path; style only affects the MLP adaLN path.
+After building `joint_l`, the block runs one self-attention sublayer and one MLP sublayer using the six token-wise modulation tensors.
 
 ```text
 self_h = modulate(self_ln_l(x_l), shift_sa, scale_sa)         # [B, 64, 512]
 self_out = self_attn_l(self_h, self_h, self_h)                # [B, 64, 512]
 x_l = x_l + gate_sa * self_out                                # [B, 64, 512]
 
-shift_ffn, scale_ffn, gate_ffn =
-    ffn_time_modulation_l(ffn_time_mod_input_ln_l(ffn_t_l))   # each [B, 512]
-
 mlp_h = modulate(mlp_ln_l(x_l), shift_ffn, scale_ffn)         # [B, 64, 512]
-x_{l+1} = x_l + gate_ffn[:, None, :] * mlp_l(mlp_h)           # [B, 64, 512]
+x_{l+1} = x_l + gate_ffn * mlp_l(mlp_h)                       # [B, 64, 512]
 ```
 
 Where:
@@ -286,7 +261,7 @@ Where:
 modulate(x, shift, scale) = x * (1 + scale) + shift
 ```
 
-`attn_joint_mod_l`, `ffn_time_modulation_l`, and `style_to_time_l` are zero-initialized on their final linear layers.
+`joint_mod_l` is zero-initialized on its final linear layer.
 
 ### 6.4 Backbone output
 

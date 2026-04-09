@@ -100,13 +100,6 @@ class DiTBlock(nn.Module):
         self.norm_mlp = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
         self.self_attn = SDPAAttention(hidden_dim, num_heads)
         self.mlp = FeedForward(hidden_dim, mlp_ratio)
-        self.ffn_time_modulation = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim * 3),
-        )
-        self.ffn_time_mod_input_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
-        nn.init.zeros_(self.ffn_time_modulation[-1].weight)
-        nn.init.zeros_(self.ffn_time_modulation[-1].bias)
 
     def forward(
         self,
@@ -115,17 +108,16 @@ class DiTBlock(nn.Module):
         self_attn_shift: torch.Tensor,
         self_attn_scale: torch.Tensor,
         self_attn_gate: torch.Tensor,
-        ffn_time_cond: torch.Tensor,
+        ffn_shift: torch.Tensor,
+        ffn_scale: torch.Tensor,
+        ffn_gate: torch.Tensor,
     ) -> torch.Tensor:
         x = patch_tokens
         q = modulate(self.norm_self(x), self_attn_shift, self_attn_scale)
         self_out, _ = self.self_attn(q, q, q, need_weights=False)
         x = x + _broadcast_modulation(self_out, self_attn_gate) * self_out
-        shift_mlp, scale_mlp, gate_mlp = self.ffn_time_modulation(
-            self.ffn_time_mod_input_norm(ffn_time_cond)
-        ).chunk(3, dim=-1)
-        mlp_out = self.mlp(modulate(self.norm_mlp(x), shift_mlp, scale_mlp))
-        x = x + gate_mlp.unsqueeze(1) * mlp_out
+        mlp_out = self.mlp(modulate(self.norm_mlp(x), ffn_shift, ffn_scale))
+        x = x + _broadcast_modulation(mlp_out, ffn_gate) * mlp_out
         return x
 
 
@@ -155,16 +147,11 @@ class GlyphDiTBlock(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
         )
-        self.attn_joint_mod = (
-            _build_zero_linear(hidden_dim, hidden_dim * 3)
+        self.joint_mod = (
+            _build_zero_linear(hidden_dim, hidden_dim * 6)
         )
         self.style_cond_norm = (
             nn.LayerNorm(self.style_cond_dim, elementwise_affine=False, eps=1e-6)
-            if self.use_style_injection
-            else None
-        )
-        self.style_to_time = (
-            _build_zero_linear(self.style_cond_dim, hidden_dim)
             if self.use_style_injection
             else None
         )
@@ -183,7 +170,7 @@ class GlyphDiTBlock(nn.Module):
         block_stats: dict[str, float] = {}
         block_input_rms = None if not return_injection_stats else float(_tensor_rms(x.detach()).item())
         attn_time_tokens = self.attn_time_to_token(self.attn_time_norm(time_cond)).unsqueeze(1).expand_as(x)
-        attn_joint_source = attn_time_tokens
+        joint_source = attn_time_tokens
         if self.use_content_injection:
             if (
                 content_tokens is None
@@ -196,24 +183,20 @@ class GlyphDiTBlock(nn.Module):
                     f"expected {tuple(x.shape)}, got {tuple(content_tokens.shape)}"
                 )
             content_source = self.content_control_norm(content_tokens)
-            attn_joint_source = attn_joint_source + content_source
+            joint_source = joint_source + content_source
             if return_injection_stats and block_input_rms is not None:
                 with torch.no_grad():
                     normalized_tokens = self.dit_block.norm_self(x.detach())
-                    content_attn_shift, content_attn_scale, _ = self.attn_joint_mod(content_source.detach()).chunk(3, dim=-1)
+                    content_attn_shift, content_attn_scale, _, _, _, _ = self.joint_mod(content_source.detach()).chunk(6, dim=-1)
                     content_attn_delta = normalized_tokens * content_attn_scale + content_attn_shift
                     block_stats["content_ratio"] = float(
                         (_tensor_rms(content_attn_delta) / max(block_input_rms, 1e-12)).item()
                     )
 
-        self_attn_shift, self_attn_scale, self_attn_gate = self.attn_joint_mod(attn_joint_source).chunk(3, dim=-1)
-
-        ffn_time_cond = time_cond
         if self.use_style_injection:
             if (
                 style_global is None
                 or self.style_cond_norm is None
-                or self.style_to_time is None
             ):
                 raise RuntimeError("style_global must be provided when style injection is enabled")
             expected_style_shape = (x.size(0), self.style_cond_dim)
@@ -222,14 +205,26 @@ class GlyphDiTBlock(nn.Module):
                     "style_global shape mismatch: "
                     f"expected {expected_style_shape}, got {tuple(style_global.shape)}"
                 )
-            ffn_time_cond = ffn_time_cond + self.style_to_time(self.style_cond_norm(style_global))
+            style_source = self.style_cond_norm(style_global).unsqueeze(1).expand_as(x)
+            joint_source = joint_source + style_source
+
+        (
+            self_attn_shift,
+            self_attn_scale,
+            self_attn_gate,
+            ffn_shift,
+            ffn_scale,
+            ffn_gate,
+        ) = self.joint_mod(joint_source).chunk(6, dim=-1)
 
         x = self.dit_block(
             x,
             self_attn_shift=self_attn_shift,
             self_attn_scale=self_attn_scale,
             self_attn_gate=self_attn_gate,
-            ffn_time_cond=ffn_time_cond,
+            ffn_shift=ffn_shift,
+            ffn_scale=ffn_scale,
+            ffn_gate=ffn_gate,
         )
         if return_injection_stats:
             return x, block_stats
