@@ -197,62 +197,6 @@ class FontPerceptor(nn.Module):
         }
 
 
-def style_similarity_stats(
-    style_embed: torch.Tensor,
-    labels: torch.Tensor,
-    *,
-    max_pairs: int = 64,
-) -> Dict[str, float]:
-    if labels.dim() != 1:
-        labels = labels.view(-1)
-    if style_embed.size(0) != labels.size(0):
-        raise ValueError(f"style_embed/labels batch mismatch: {tuple(style_embed.shape)} vs {tuple(labels.shape)}")
-    if style_embed.dim() != 2:
-        raise ValueError(f"style_embed must be 2D, got {tuple(style_embed.shape)}")
-
-    labels = labels.to(device=style_embed.device)
-    style_embed = F.normalize(style_embed, dim=-1, eps=1e-6)
-
-    pair_budget = max(1, int(max_pairs))
-    first_index_by_label: dict[int, int] = {}
-    positive_pairs: list[tuple[int, int]] = []
-    label_ids = labels.detach().cpu().tolist()
-    for sample_idx, label_value in enumerate(label_ids):
-        label_value = int(label_value)
-        first_idx = first_index_by_label.get(label_value)
-        if first_idx is None:
-            first_index_by_label[label_value] = int(sample_idx)
-            continue
-        if len(positive_pairs) < pair_budget:
-            positive_pairs.append((first_idx, int(sample_idx)))
-
-    first_indices = list(first_index_by_label.values())
-    negative_pairs = [
-        (int(first_indices[idx]), int(first_indices[idx + 1]))
-        for idx in range(min(len(first_indices) - 1, pair_budget))
-    ]
-
-    def _pair_cos_mean(index_pairs: list[tuple[int, int]]) -> float:
-        if not index_pairs:
-            return 0.0
-        left_index = torch.tensor([pair[0] for pair in index_pairs], device=style_embed.device, dtype=torch.long)
-        right_index = torch.tensor([pair[1] for pair in index_pairs], device=style_embed.device, dtype=torch.long)
-        pair_cos = (
-            style_embed.index_select(0, left_index) * style_embed.index_select(0, right_index)
-        ).sum(dim=1)
-        return float(pair_cos.mean().item())
-
-    pos_mean = _pair_cos_mean(positive_pairs)
-    neg_mean = _pair_cos_mean(negative_pairs)
-    return {
-        "style_pos_cos": pos_mean,
-        "style_neg_cos": neg_mean,
-        "style_cos_margin": pos_mean - neg_mean,
-        "style_pos_pairs": float(len(positive_pairs)),
-        "style_neg_pairs": float(len(negative_pairs)),
-    }
-
-
 def load_font_perceptor_from_checkpoint(
     checkpoint_path: str | Path,
     *,

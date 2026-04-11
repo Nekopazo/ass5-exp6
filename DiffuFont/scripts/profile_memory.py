@@ -77,8 +77,15 @@ def build_model_from_args(args: argparse.Namespace) -> SourcePartRefDiT:
         dit_depth=int(args.dit_depth),
         dit_heads=int(args.dit_heads),
         dit_mlp_ratio=float(args.dit_mlp_ratio),
+        ffn_activation=str(args.ffn_activation),
+        norm_variant=str(args.norm_variant),
         content_injection_layers=args.content_injection_layers,
         style_injection_layers=args.style_injection_layers,
+        conditioning_injection_mode=str(args.conditioning_injection_mode),
+        content_style_fusion=str(args.content_style_fusion),
+        content_style_fusion_heads=int(args.content_style_fusion_heads),
+        style_pool_mode=str(args.style_pool_mode),
+        style_proj_mode=str(args.style_proj_mode),
         detailer_base_channels=int(args.detailer_base_channels),
         detailer_max_channels=int(args.detailer_max_channels),
     )
@@ -92,6 +99,14 @@ def parse_layer_indices(value: str) -> tuple[int, ...]:
         return tuple(int(part) for part in parts)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(f"invalid layer list: {value}") from exc
+
+
+def resolve_norm_configuration(args: argparse.Namespace) -> None:
+    variant = str(args.norm_variant).strip().lower()
+    if variant not in {"ln", "rms"}:
+        supported = "ln, rms"
+        raise ValueError(f"norm_variant must be one of {{{supported}}}, got {args.norm_variant!r}")
+    args.norm_variant = variant
 
 
 def main() -> None:
@@ -118,12 +133,58 @@ def main() -> None:
     parser.add_argument("--dit-depth", type=int, default=12)
     parser.add_argument("--dit-heads", type=int, default=8)
     parser.add_argument("--dit-mlp-ratio", type=float, default=4.0)
+    parser.add_argument(
+        "--ffn-activation",
+        type=str,
+        default="gelu",
+        choices=["gelu", "swiglu"],
+    )
+    parser.add_argument(
+        "--norm-variant",
+        type=str,
+        default="ln",
+        choices=["ln", "rms"],
+        help="Select the normalization/modulation bundle: "
+             "ln -> LayerNorm + shift/scale/gate; "
+             "rms -> RMSNorm + scale/gate.",
+    )
     parser.add_argument("--content-injection-layers", type=parse_layer_indices, default=(1, 2, 3, 4, 5, 6))
     parser.add_argument("--style-injection-layers", type=parse_layer_indices, default=(7, 8, 9, 10, 11, 12))
+    parser.add_argument(
+        "--conditioning-injection-mode",
+        type=str,
+        default="all",
+        choices=[
+            "all",
+            "content_sa_style_ffn",
+            "content_style_sa_style_ffn",
+            "content_style_sa_t_ffn",
+        ],
+    )
+    parser.add_argument(
+        "--content-style-fusion",
+        type=str,
+        default="cross_attn",
+        choices=["none", "cross_attn"],
+    )
+    parser.add_argument("--content-style-fusion-heads", type=int, default=4)
+    parser.add_argument(
+        "--style-pool-mode",
+        type=str,
+        default="attention",
+        choices=["attention", "mean"],
+    )
+    parser.add_argument(
+        "--style-proj-mode",
+        type=str,
+        default="mlp",
+        choices=["mlp", "linear"],
+    )
     parser.add_argument("--detailer-base-channels", type=int, default=32)
     parser.add_argument("--detailer-max-channels", type=int, default=256)
     parser.add_argument("--ema-decay", type=float, default=0.9999)
     args = parser.parse_args()
+    resolve_norm_configuration(args)
 
     set_seed(int(args.seed))
     device = torch.device(args.device)

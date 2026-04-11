@@ -19,7 +19,6 @@ from torchvision.utils import save_image
 from .font_perceptor import (
     FontPerceptor,
     FrozenFontPerceptorGuidance,
-    style_similarity_stats,
 )
 
 
@@ -803,19 +802,6 @@ class FlowTrainer(_BaseTrainer):
             return self.ema_model
         return self.model
 
-    def _encode_style_conditions(
-        self,
-        model: nn.Module,
-        style: torch.Tensor,
-        style_ref_mask: Optional[torch.Tensor],
-        style_index: torch.Tensor,
-    ) -> torch.Tensor:
-        style_global = model.encode_style_global(
-            style_img=style,
-            style_ref_mask=style_ref_mask,
-        )
-        return self._expand_condition_batch(style_global, style_index)
-
     def _expand_condition_batch(
         self,
         condition: torch.Tensor,
@@ -823,15 +809,44 @@ class FlowTrainer(_BaseTrainer):
     ) -> torch.Tensor:
         return condition.index_select(0, condition_index.to(device=condition.device, dtype=torch.long))
 
-    def _encode_content_conditions(
+    def _encode_conditions(
         self,
         model: nn.Module,
         content: torch.Tensor,
         content_index: torch.Tensor,
-    ) -> torch.Tensor:
-        content_tokens = model.encode_content_tokens(content)
-        content_tokens = model.content_proj(content_tokens)
-        return self._expand_condition_batch(content_tokens, content_index)
+        style: torch.Tensor,
+        style_ref_mask: Optional[torch.Tensor],
+        style_index: torch.Tensor,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        unique_content_tokens = model.encode_content_tokens(content)
+        unique_content_tokens = model.content_proj(unique_content_tokens)
+        content_tokens = self._expand_condition_batch(unique_content_tokens, content_index)
+
+        style_global = None
+        style_embedding_for_stats = None
+        style_token_bank = None
+        style_token_valid_mask = None
+        if model.backbone.has_style_injection or model.content_style_attn is not None:
+            style_global_bank, style_token_bank, style_token_valid_mask = model.encode_style_condition_bank(
+                style_img=style,
+                style_ref_mask=style_ref_mask,
+            )
+            style_embedding_for_stats = self._expand_condition_batch(style_global_bank, style_index)
+        if model.backbone.has_style_injection:
+            if style_global_bank is None:
+                raise RuntimeError("style_global_bank must exist when backbone style injection is enabled")
+            style_global = style_embedding_for_stats
+        if style_token_bank is not None:
+            expanded_style_tokens = self._expand_condition_batch(style_token_bank, style_index)
+            if style_token_valid_mask is None:
+                raise RuntimeError("style_token_valid_mask must exist when style token bank is enabled")
+            expanded_style_token_valid_mask = self._expand_condition_batch(style_token_valid_mask, style_index)
+            content_tokens = model.fuse_content_style_tokens(
+                content_tokens,
+                expanded_style_tokens,
+                token_valid_mask=expanded_style_token_valid_mask,
+            )
+        return content_tokens, style_global, style_embedding_for_stats
 
     def _compute_losses(
         self,
@@ -839,8 +854,6 @@ class FlowTrainer(_BaseTrainer):
         *,
         model: Optional[nn.Module] = None,
         step: Optional[int] = None,
-        include_injection_stats: bool = True,
-        include_style_stats: bool = False,
     ) -> Dict[str, torch.Tensor | float]:
         model = self.model if model is None else model
         if step is None:
@@ -864,30 +877,20 @@ class FlowTrainer(_BaseTrainer):
             t_view = timesteps.view(-1, 1, 1, 1).to(dtype=x1.dtype)
             xt = (1.0 - t_view) * x0 + t_view * x1
             target_flow = x1 - x0
-            content_tokens = self._encode_content_conditions(model, content, content_index)
-            style_global = self._encode_style_conditions(
+            content_tokens, style_global, _ = self._encode_conditions(
                 model,
+                content,
+                content_index,
                 style,
                 style_ref_mask,
                 style_index,
             )
-            if include_injection_stats:
-                pred_flow, injection_stats = model.predict_flow(
-                    xt,
-                    timesteps,
-                    content_tokens=content_tokens,
-                    style_global=style_global,
-                    return_injection_stats=True,
-                )
-            else:
-                pred_flow = model.predict_flow(
-                    xt,
-                    timesteps,
-                    content_tokens=content_tokens,
-                    style_global=style_global,
-                    return_injection_stats=False,
-                )
-                injection_stats = {}
+            pred_flow = model.predict_flow(
+                xt,
+                timesteps,
+                content_tokens=content_tokens,
+                style_global=style_global,
+            )
             loss_flow_per_sample = (pred_flow.float() - target_flow.float()).pow(2).reshape(target.size(0), -1).mean(dim=1)
             loss_flow = loss_flow_per_sample.mean()
             pred_target = xt + (1.0 - t_view) * pred_flow
@@ -933,9 +936,6 @@ class FlowTrainer(_BaseTrainer):
             "pixel_loss_t_scale_mean": float(pixel_t_scale.mean().item()),
             "t_mean": timesteps.mean(),
         }
-        if include_style_stats:
-            metrics.update(style_similarity_stats(style_global.detach().float(), font_id))
-        metrics.update(injection_stats)
         return metrics
 
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
@@ -946,8 +946,6 @@ class FlowTrainer(_BaseTrainer):
         metrics = self._compute_losses(
             batch,
             step=next_step,
-            include_injection_stats=(next_step % self.log_every_steps == 0),
-            include_style_stats=False,
         )
         metrics["loss"].backward()
         metrics.update(self._apply_grad_clip(step=next_step))
@@ -965,8 +963,6 @@ class FlowTrainer(_BaseTrainer):
                     batch,
                     model=self._inference_model(),
                     step=self.global_step,
-                    include_injection_stats=True,
-                    include_style_stats=True,
                 )
             )
 
@@ -1002,9 +998,10 @@ class FlowTrainer(_BaseTrainer):
         step_count = self.flow_sample_steps if num_inference_steps is None else max(1, int(num_inference_steps))
         dt = 1.0 / float(step_count)
         with self._autocast_context():
-            content_tokens = self._encode_content_conditions(sample_model, content, content_index)
-            style_global = self._encode_style_conditions(
+            content_tokens, style_global, _ = self._encode_conditions(
                 sample_model,
+                content,
+                content_index,
                 style_img,
                 style_ref_mask,
                 style_index,

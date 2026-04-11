@@ -156,6 +156,7 @@ class StyleEncoder(nn.Module):
         super().__init__()
         self.hidden_dim = int(hidden_dim)
         stage_channels = [64, 128, 256, 512, self.hidden_dim]
+        self.local_hidden_dim = int(stage_channels[-2])
         self.downsample_layers = nn.ModuleList()
         self.resblocks = nn.ModuleList()
         prev_channels = int(in_channels)
@@ -166,13 +167,22 @@ class StyleEncoder(nn.Module):
             self.resblocks.append(ResBlock(out_channels, out_channels))
             prev_channels = out_channels
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_features(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if x.dim() != 4:
             raise ValueError(f"expected BCHW tensor, got {tuple(x.shape)}")
-        for downsample, resblock in zip(self.downsample_layers, self.resblocks):
+        local_features = None
+        for stage_idx, (downsample, resblock) in enumerate(zip(self.downsample_layers, self.resblocks)):
             x = downsample(x)
             x = resblock(x)
-        return x
+            if stage_idx == len(self.downsample_layers) - 2:
+                local_features = x
+        if local_features is None:
+            raise RuntimeError("StyleEncoder failed to capture local features before final downsampling stage.")
+        return local_features, x
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        _, global_features = self.forward_features(x)
+        return global_features
 
 
 class StyleAttentionPool(nn.Module):
@@ -214,11 +224,98 @@ class StyleAttentionPool(nn.Module):
         return pooled_style.squeeze(1)
 
 
-def _build_style_projection(in_dim: int, out_dim: int) -> nn.Module:
+class StyleMeanPool(nn.Module):
+    def forward(self, style_tokens: torch.Tensor, token_valid_mask: torch.Tensor) -> torch.Tensor:
+        if style_tokens.dim() != 3:
+            raise ValueError(f"style_tokens must be 3D, got {tuple(style_tokens.shape)}")
+        if token_valid_mask.shape != style_tokens.shape[:2]:
+            raise ValueError(
+                f"token_valid_mask shape mismatch: expected {tuple(style_tokens.shape[:2])}, "
+                f"got {tuple(token_valid_mask.shape)}"
+            )
+        weights = token_valid_mask.to(device=style_tokens.device, dtype=style_tokens.dtype).unsqueeze(-1)
+        denom = weights.sum(dim=1).clamp_min(1.0)
+        return (style_tokens * weights).sum(dim=1) / denom
+
+
+class ContentStyleCrossAttention(nn.Module):
+    def __init__(self, embed_dim: int, num_heads: int) -> None:
+        super().__init__()
+        self.embed_dim = int(embed_dim)
+        self.num_heads = int(num_heads)
+        if self.embed_dim <= 0:
+            raise ValueError(f"embed_dim must be positive, got {embed_dim}")
+        if self.num_heads <= 0 or (self.embed_dim % self.num_heads) != 0:
+            raise ValueError(f"invalid attention config embed_dim={embed_dim} num_heads={num_heads}")
+
+        self.query_norm = nn.LayerNorm(self.embed_dim, elementwise_affine=False, eps=1e-6)
+        self.token_norm = nn.LayerNorm(self.embed_dim, elementwise_affine=False, eps=1e-6)
+        self.attn = SDPAAttention(self.embed_dim, self.num_heads)
+
+    def forward(
+        self,
+        content_tokens: torch.Tensor,
+        style_tokens: torch.Tensor,
+        *,
+        token_valid_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if content_tokens.dim() != 3:
+            raise ValueError(f"content_tokens must be 3D, got {tuple(content_tokens.shape)}")
+        if style_tokens.dim() != 3:
+            raise ValueError(f"style_tokens must be 3D, got {tuple(style_tokens.shape)}")
+        if content_tokens.size(0) != style_tokens.size(0):
+            raise ValueError(
+                "content_tokens/style_tokens batch mismatch: "
+                f"{tuple(content_tokens.shape)} vs {tuple(style_tokens.shape)}"
+            )
+        if token_valid_mask is not None:
+            if token_valid_mask.shape != style_tokens.shape[:2]:
+                raise ValueError(
+                    f"token_valid_mask shape mismatch: expected {tuple(style_tokens.shape[:2])}, "
+                    f"got {tuple(token_valid_mask.shape)}"
+                )
+            if bool((~token_valid_mask).any().item()):
+                raise RuntimeError(
+                    "ContentStyleCrossAttention is configured for flash-only attention and requires all style refs to be valid."
+                )
+
+        style_context, _ = self.attn(
+            self.query_norm(content_tokens),
+            self.token_norm(style_tokens),
+            style_tokens,
+            key_padding_mask=None,
+            need_weights=False,
+        )
+        return content_tokens + style_context
+
+
+class StyleTokenDownsample(nn.Module):
+    def __init__(self, hidden_dim: int) -> None:
+        super().__init__()
+        self.hidden_dim = int(hidden_dim)
+        self.proj = nn.Conv2d(self.hidden_dim, self.hidden_dim, kernel_size=3, stride=2, padding=1)
+
+    def forward(self, local_style_features: torch.Tensor) -> torch.Tensor:
+        if local_style_features.dim() != 4:
+            raise ValueError(f"local_style_features must be 4D, got {tuple(local_style_features.shape)}")
+        if tuple(local_style_features.shape[-2:]) != (8, 8):
+            raise ValueError(
+                "local_style_features must have shape (*, *, 8, 8) before cross-attention downsampling, "
+                f"got {tuple(local_style_features.shape)}"
+            )
+        return self.proj(local_style_features)
+
+
+def _build_style_projection(in_dim: int, out_dim: int, *, mode: str = "mlp") -> nn.Module:
     in_dim = int(in_dim)
     out_dim = int(out_dim)
+    mode = str(mode)
+    if mode not in {"mlp", "linear"}:
+        raise ValueError(f"style projection mode must be 'mlp' or 'linear', got {mode!r}")
     if in_dim == out_dim:
         return nn.Identity()
+    if mode == "linear":
+        return nn.Linear(in_dim, out_dim)
     hidden_dim = max(in_dim * 2, out_dim * 4)
     return nn.Sequential(
         nn.LayerNorm(in_dim, elementwise_affine=False, eps=1e-6),
@@ -357,8 +454,15 @@ class SourcePartRefDiT(nn.Module):
         dit_depth: int = 16,
         dit_heads: int = 8,
         dit_mlp_ratio: float = 4.0,
+        ffn_activation: str = "gelu",
+        norm_variant: str = "ln",
         content_injection_layers: Sequence[int] | None = None,
         style_injection_layers: Sequence[int] | None = None,
+        conditioning_injection_mode: str = "all",
+        content_style_fusion: str = "none",
+        content_style_fusion_heads: int = 4,
+        style_pool_mode: str = "attention",
+        style_proj_mode: str = "mlp",
         detailer_base_channels: int = 64,
         detailer_max_channels: int = 512,
         detailer_bottleneck_channels: int = 512,
@@ -379,6 +483,40 @@ class SourcePartRefDiT(nn.Module):
         self.dit_depth = int(dit_depth)
         self.dit_heads = int(dit_heads)
         self.dit_mlp_ratio = float(dit_mlp_ratio)
+        self.ffn_activation = str(ffn_activation)
+        self.norm_variant = str(norm_variant)
+        if self.ffn_activation not in {"gelu", "swiglu"}:
+            raise ValueError(
+                "ffn_activation must be one of {'gelu', 'swiglu'}, "
+                f"got {ffn_activation!r}"
+            )
+        if self.norm_variant not in {"ln", "rms"}:
+            raise ValueError(
+                "norm_variant must be one of {'ln', 'rms'}, "
+                f"got {norm_variant!r}"
+            )
+        self.conditioning_injection_mode = str(conditioning_injection_mode)
+        self.content_style_fusion = str(content_style_fusion)
+        self.content_style_fusion_heads = int(content_style_fusion_heads)
+        self.style_pool_mode = str(style_pool_mode)
+        self.style_proj_mode = str(style_proj_mode)
+        if self.content_style_fusion not in {"none", "cross_attn"}:
+            raise ValueError(
+                "content_style_fusion must be one of {'none', 'cross_attn'}, "
+                f"got {content_style_fusion!r}"
+            )
+        if self.content_style_fusion_heads <= 0:
+            raise ValueError(f"content_style_fusion_heads must be > 0, got {content_style_fusion_heads}")
+        if self.style_pool_mode not in {"attention", "mean"}:
+            raise ValueError(
+                "style_pool_mode must be one of {'attention', 'mean'}, "
+                f"got {style_pool_mode!r}"
+            )
+        if self.style_proj_mode not in {"mlp", "linear"}:
+            raise ValueError(
+                "style_proj_mode must be one of {'mlp', 'linear'}, "
+                f"got {style_proj_mode!r}"
+            )
         self.detailer_base_channels = int(detailer_base_channels)
         self.detailer_max_channels = int(detailer_max_channels)
         self.detailer_bottleneck_channels = int(detailer_bottleneck_channels)
@@ -388,11 +526,16 @@ class SourcePartRefDiT(nn.Module):
             depth=self.dit_depth,
             field_name="content_injection_layers",
         )
-        self.style_injection_layers = DiffusionTransformerBackbone._normalize_layer_indices(
+        requested_style_injection_layers = DiffusionTransformerBackbone._normalize_layer_indices(
             style_injection_layers,
             default_layers=range(1, self.dit_depth + 1),
             depth=self.dit_depth,
             field_name="style_injection_layers",
+        )
+        self.style_injection_layers = (
+            tuple()
+            if self.content_style_fusion == "cross_attn"
+            else requested_style_injection_layers
         )
 
         self.content_encoder = ContentEncoder(
@@ -404,10 +547,42 @@ class SourcePartRefDiT(nn.Module):
             in_channels=self.in_channels,
             hidden_dim=self.style_hidden_dim,
         )
-        self.style_pool_heads = 4
-        self.style_pool = StyleAttentionPool(
-            hidden_dim=self.style_hidden_dim,
-            num_heads=self.style_pool_heads,
+        self.style_token_hidden_dim = int(self.style_encoder.local_hidden_dim)
+        if self.style_pool_mode == "attention":
+            self.style_pool_heads = 4
+            self.style_pool = StyleAttentionPool(
+                hidden_dim=self.style_hidden_dim,
+                num_heads=self.style_pool_heads,
+            )
+        else:
+            self.style_pool_heads = 0
+            self.style_pool = StyleMeanPool()
+        self.style_proj = _build_style_projection(
+            self.style_hidden_dim,
+            self.dit_hidden_dim,
+            mode=self.style_proj_mode,
+        )
+        self.style_token_proj = (
+            _build_style_projection(
+                self.style_token_hidden_dim,
+                self.dit_hidden_dim,
+                mode=self.style_proj_mode,
+            )
+            if self.content_style_fusion == "cross_attn"
+            else None
+        )
+        self.style_token_downsample = (
+            StyleTokenDownsample(self.style_token_hidden_dim)
+            if self.content_style_fusion == "cross_attn"
+            else None
+        )
+        self.content_style_attn = (
+            ContentStyleCrossAttention(
+                embed_dim=self.dit_hidden_dim,
+                num_heads=self.content_style_fusion_heads,
+            )
+            if self.content_style_fusion == "cross_attn"
+            else None
         )
         self.backbone = DiffusionTransformerBackbone(
             in_channels=self.in_channels,
@@ -420,6 +595,9 @@ class SourcePartRefDiT(nn.Module):
             mlp_ratio=self.dit_mlp_ratio,
             content_injection_layers=self.content_injection_layers,
             style_injection_layers=self.style_injection_layers,
+            conditioning_injection_mode=self.conditioning_injection_mode,
+            ffn_activation=self.ffn_activation,
+            norm_variant=self.norm_variant,
         )
         self.detailer = PatchDetailerHead(
             in_channels=self.in_channels,
@@ -434,7 +612,6 @@ class SourcePartRefDiT(nn.Module):
             self.content_proj = nn.Linear(self.encoder_hidden_dim, self.dit_hidden_dim)
         else:
             self.content_proj = nn.Identity()
-        self.style_proj = _build_style_projection(self.style_hidden_dim, self.dit_hidden_dim)
 
     def export_config(self) -> dict[str, int | float]:
         return {
@@ -447,8 +624,15 @@ class SourcePartRefDiT(nn.Module):
             "dit_depth": int(self.dit_depth),
             "dit_heads": int(self.dit_heads),
             "dit_mlp_ratio": float(self.dit_mlp_ratio),
+            "ffn_activation": str(self.ffn_activation),
+            "norm_variant": str(self.norm_variant),
             "content_injection_layers": list(self.content_injection_layers),
             "style_injection_layers": list(self.style_injection_layers),
+            "conditioning_injection_mode": str(self.conditioning_injection_mode),
+            "content_style_fusion": str(self.content_style_fusion),
+            "content_style_fusion_heads": int(self.content_style_fusion_heads),
+            "style_pool_mode": str(self.style_pool_mode),
+            "style_proj_mode": str(self.style_proj_mode),
             "detailer_base_channels": int(self.detailer_base_channels),
             "detailer_max_channels": int(self.detailer_max_channels),
             "detailer_bottleneck_channels": int(self.detailer_bottleneck_channels),
@@ -458,11 +642,11 @@ class SourcePartRefDiT(nn.Module):
         content_features = self.content_encoder(content_img)
         return content_features.flatten(2).transpose(1, 2).contiguous()
 
-    def encode_style_global(
+    def _encode_style_features(
         self,
         style_img: torch.Tensor,
         style_ref_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if style_img.dim() == 4:
             style_img = style_img.unsqueeze(1)
         if style_img.dim() != 5:
@@ -481,18 +665,69 @@ class SourcePartRefDiT(nn.Module):
             raise RuntimeError("style_ref_mask must keep at least one reference per sample")
 
         flat_style = style_img.view(batch * refs, channels, height, width)
-        style_features = self.style_encoder(flat_style)
-        style_tokens = style_features.flatten(2).transpose(1, 2).contiguous()
+        local_style_features, global_style_features = self.style_encoder.forward_features(flat_style)
+        if self.style_token_downsample is not None:
+            local_style_features = self.style_token_downsample(local_style_features)
+        style_tokens = local_style_features.flatten(2).transpose(1, 2).contiguous()
         tokens_per_ref = int(style_tokens.size(1))
-        style_tokens = style_tokens.view(batch, refs * tokens_per_ref, self.style_hidden_dim)
+        style_tokens = style_tokens.view(batch, refs * tokens_per_ref, self.style_token_hidden_dim)
         token_valid_mask = (
             ref_valid_mask[:, :, None]
             .expand(batch, refs, tokens_per_ref)
             .reshape(batch, refs * tokens_per_ref)
         )
-        pooled_style = self.style_pool(style_tokens, token_valid_mask=token_valid_mask)
-        pooled_style = pooled_style.to(dtype=style_features.dtype)
-        return self.style_proj(pooled_style)
+        global_style_tokens = global_style_features.flatten(2).transpose(1, 2).contiguous()
+        global_tokens_per_ref = int(global_style_tokens.size(1))
+        global_style_tokens = global_style_tokens.view(batch, refs * global_tokens_per_ref, self.style_hidden_dim)
+        global_token_valid_mask = (
+            ref_valid_mask[:, :, None]
+            .expand(batch, refs, global_tokens_per_ref)
+            .reshape(batch, refs * global_tokens_per_ref)
+        )
+        return style_tokens, token_valid_mask, global_style_tokens, global_token_valid_mask
+
+    def encode_style_condition_bank(
+        self,
+        style_img: torch.Tensor,
+        style_ref_mask: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+        style_tokens, token_valid_mask, global_style_tokens, global_token_valid_mask = self._encode_style_features(
+            style_img,
+            style_ref_mask=style_ref_mask,
+        )
+        pooled_style = self.style_pool(global_style_tokens, token_valid_mask=global_token_valid_mask)
+        pooled_style = pooled_style.to(dtype=global_style_tokens.dtype)
+        style_global = self.style_proj(pooled_style)
+        style_token_bank = None
+        if self.style_token_proj is not None:
+            style_token_bank = self.style_token_proj(style_tokens)
+        return style_global, style_token_bank, token_valid_mask
+
+    def encode_style_global(
+        self,
+        style_img: torch.Tensor,
+        style_ref_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        style_global, _, _ = self.encode_style_condition_bank(
+            style_img,
+            style_ref_mask=style_ref_mask,
+        )
+        return style_global
+
+    def fuse_content_style_tokens(
+        self,
+        content_tokens: torch.Tensor,
+        style_tokens: torch.Tensor,
+        *,
+        token_valid_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if self.content_style_attn is None:
+            return content_tokens
+        return self.content_style_attn(
+            content_tokens,
+            style_tokens,
+            token_valid_mask=token_valid_mask,
+        )
 
     def _patchify(self, x: torch.Tensor) -> torch.Tensor:
         patches = F.unfold(x, kernel_size=self.patch_size, stride=self.patch_size)
@@ -532,26 +767,17 @@ class SourcePartRefDiT(nn.Module):
         timesteps: torch.Tensor,
         *,
         content_tokens: torch.Tensor,
-        style_global: torch.Tensor,
-        return_injection_stats: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
-        backbone_output = self.backbone(
+        style_global: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        patch_tokens = self.backbone(
             x_t_image,
             timesteps,
             content_tokens=content_tokens,
             style_global=style_global,
-            return_injection_stats=return_injection_stats,
         )
-        if return_injection_stats:
-            patch_tokens, injection_stats = backbone_output
-        else:
-            patch_tokens = backbone_output
-            injection_stats = {}
         noisy_patches = self._patchify(x_t_image)
         pred_patches = self.detailer(patch_tokens, noisy_patches)
         pred_flow = self._unpatchify(pred_patches)
-        if return_injection_stats:
-            return pred_flow, injection_stats
         return pred_flow
 
     def forward(
@@ -565,10 +791,16 @@ class SourcePartRefDiT(nn.Module):
     ) -> torch.Tensor:
         content_tokens = self.encode_content_tokens(content_img)
         content_tokens = self.content_proj(content_tokens)
-        style_global = self.encode_style_global(
+        style_global, style_token_bank, token_valid_mask = self.encode_style_condition_bank(
             style_img,
             style_ref_mask=style_ref_mask,
         )
+        if style_token_bank is not None:
+            content_tokens = self.fuse_content_style_tokens(
+                content_tokens,
+                style_token_bank,
+                token_valid_mask=token_valid_mask,
+            )
         return self.predict_flow(
             x_t_image,
             timesteps,

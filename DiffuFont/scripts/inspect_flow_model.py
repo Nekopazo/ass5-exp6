@@ -75,9 +75,15 @@ def print_model_summary(model: SourcePartRefDiT) -> None:
             f"encoder_hidden_dim: {model.encoder_hidden_dim}",
             f"style_hidden_dim: {model.style_hidden_dim}",
             f"style_pool_heads: {model.style_pool_heads}",
+            f"style_pool_mode: {model.style_pool_mode}",
+            f"style_proj_mode: {model.style_proj_mode}",
             f"dit_hidden_dim: {model.dit_hidden_dim}",
             f"dit_depth: {model.dit_depth}",
             f"dit_heads: {model.dit_heads}",
+            f"ffn_activation: {model.ffn_activation}",
+            f"norm_variant: {model.norm_variant}",
+            f"content_style_fusion: {model.content_style_fusion}",
+            f"content_style_fusion_heads: {model.content_style_fusion_heads}",
             f"content_injection_layers: {list(model.content_injection_layers)}",
             f"style_injection_layers: {list(model.style_injection_layers)}",
         ]
@@ -101,7 +107,7 @@ def print_model_summary(model: SourcePartRefDiT) -> None:
             style_pool_params = sum(int(param.numel()) for param in model.style_pool.parameters())
             print(
                 "  - style_pool: "
-                f"attention_pool+masked_mean total={style_pool_params:,} trainable={style_pool_params:,}"
+                f"{model.style_pool.__class__.__name__} total={style_pool_params:,} trainable={style_pool_params:,}"
             )
 
     print()
@@ -171,26 +177,30 @@ def trace_style_path(
         .reshape(batch, refs * tokens_per_ref)
     )
     print(f"style.all_ref_spatial_token_mask: {shape_of(token_valid_mask)}")
-    style_query = model.style_pool.query.expand(batch, -1, -1)
-    print(f"style.pool_query: {shape_of(style_query)}")
-    style_query = model.style_pool.query_norm(style_query)
-    print(f"style.pool_query_norm: {shape_of(style_query)}")
-    style_keys = model.style_pool.token_norm(style_tokens)
-    print(f"style.pool_token_norm: {shape_of(style_keys)}")
-    key_padding_mask = None
-    need_weights = False
-    if bool((~token_valid_mask).any().item()):
-        key_padding_mask = ~token_valid_mask
-        need_weights = True
-    style_vectors, _ = model.style_pool.attn(
-        style_query,
-        style_keys,
-        style_tokens,
-        key_padding_mask=key_padding_mask,
-        need_weights=need_weights,
-    )
-    print(f"style.attention_pool: {shape_of(style_vectors)}")
-    pooled_style = style_vectors.squeeze(1)
+    if model.style_pool_mode == "attention":
+        style_query = model.style_pool.query.expand(batch, -1, -1)
+        print(f"style.pool_query: {shape_of(style_query)}")
+        style_query = model.style_pool.query_norm(style_query)
+        print(f"style.pool_query_norm: {shape_of(style_query)}")
+        style_keys = model.style_pool.token_norm(style_tokens)
+        print(f"style.pool_token_norm: {shape_of(style_keys)}")
+        key_padding_mask = None
+        need_weights = False
+        if bool((~token_valid_mask).any().item()):
+            key_padding_mask = ~token_valid_mask
+            need_weights = True
+        style_vectors, _ = model.style_pool.attn(
+            style_query,
+            style_keys,
+            style_tokens,
+            key_padding_mask=key_padding_mask,
+            need_weights=need_weights,
+        )
+        print(f"style.attention_pool: {shape_of(style_vectors)}")
+        pooled_style = style_vectors.squeeze(1)
+    else:
+        pooled_style = model.style_pool(style_tokens, token_valid_mask)
+        print(f"style.mean_pool: {shape_of(pooled_style)}")
     print(f"style.pooled_style: {shape_of(pooled_style)}")
     style_global = model.style_proj(pooled_style)
     print(f"style.global: {shape_of(style_global)}")
