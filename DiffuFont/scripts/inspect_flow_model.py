@@ -112,9 +112,9 @@ def trace_content_path(model: SourcePartRefDiT, content: torch.Tensor) -> tuple[
     print(f"content_input: {shape_of(content)}")
     x = encoder.stem(content)
     print(f"content.stem: {shape_of(x)}")
-    x = encoder.stem_resblock(x)
-    print(f"content.stem_resblock: {shape_of(x)}")
-    for idx, (downsample, resblock) in enumerate(zip(encoder.downsample_layers, encoder.resblocks)):
+    x = encoder.stem_block(x)
+    print(f"content.stem_block: {shape_of(x)}")
+    for idx, (downsample, resblock) in enumerate(zip(encoder.stage_downsamples, encoder.stage_blocks)):
         x = downsample(x)
         print(f"content.downsample_{idx}: {shape_of(x)}")
         x = resblock(x)
@@ -146,8 +146,11 @@ def trace_style_path(
     batch, refs, channels, height, width = style_img.shape
     flat_style = style_img.view(batch * refs, channels, height, width)
     print(f"style.flatten_refs: {shape_of(flat_style)}")
-    x = flat_style
-    for idx, (downsample, resblock) in enumerate(zip(encoder.downsample_layers, encoder.resblocks)):
+    x = encoder.stem(flat_style)
+    print(f"style.stem: {shape_of(x)}")
+    x = encoder.stem_block(x)
+    print(f"style.stem_block: {shape_of(x)}")
+    for idx, (downsample, resblock) in enumerate(zip(encoder.stage_downsamples, encoder.stage_blocks)):
         x = downsample(x)
         print(f"style.downsample_{idx}: {shape_of(x)}")
         x = resblock(x)

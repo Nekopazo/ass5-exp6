@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .diffusion_transformer_backbone import DiffusionTransformerBackbone
+from .diffusion_transformer_backbone import DiffusionTransformerBackbone, timestep_embedding
 from .sdpa_attention import SDPAAttention
 
 
@@ -68,7 +68,156 @@ class ConvSiLU(nn.Module):
         return F.silu(self.conv(x))
 
 
-class ContentEncoder(nn.Module):
+class TimeConditionedConvSiLU(nn.Module):
+    """Two-conv residual block with additive time conditioning between convs."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        *,
+        time_dim: int,
+        kernel_size: int = 3,
+        padding: int = 1,
+        second_stride: int = 1,
+    ) -> None:
+        super().__init__()
+        self.in_channels = int(in_channels)
+        self.out_channels = int(out_channels)
+        self.second_stride = int(second_stride)
+        self.conv1 = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            padding=padding,
+            stride=1,
+        )
+        self.conv2 = nn.Conv2d(
+            out_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            padding=padding,
+            stride=second_stride,
+        )
+        self.time_proj = nn.Linear(int(time_dim), int(out_channels))
+        self.skip = (
+            nn.Identity()
+            if self.in_channels == self.out_channels and self.second_stride == 1
+            else nn.Conv2d(self.in_channels, self.out_channels, kernel_size=1, stride=self.second_stride)
+        )
+
+    def forward(self, x: torch.Tensor, time_emb: torch.Tensor) -> torch.Tensor:
+        residual = self.skip(x)
+        x = self.conv1(x)
+        x = x + self.time_proj(time_emb).view(time_emb.size(0), -1, 1, 1)
+        x = F.silu(x)
+        x = self.conv2(x)
+        return F.silu(x + residual)
+
+
+class ConvPyramidEncoder(nn.Module):
+    """Shared CNN pyramid template used by both content and style encoders."""
+
+    def __init__(
+        self,
+        *,
+        in_channels: int,
+        stage_channels: Sequence[int],
+        use_stem: bool,
+        stem_stride: int = 1,
+        output_grid_size: Optional[int] = None,
+    ) -> None:
+        super().__init__()
+        normalized_stage_channels = [int(ch) for ch in stage_channels]
+        if not normalized_stage_channels:
+            raise ValueError("stage_channels must be non-empty")
+
+        self.in_channels = int(in_channels)
+        self.stage_channels = normalized_stage_channels
+        self.output_grid_size = None if output_grid_size is None else int(output_grid_size)
+        self.use_stem = bool(use_stem)
+        self.stem_stride = int(stem_stride)
+        if self.use_stem:
+            if self.stem_stride <= 0:
+                raise ValueError(f"stem_stride must be > 0, got {stem_stride}")
+            stem_channels = self.stage_channels[0]
+            self.stem = nn.Conv2d(
+                self.in_channels,
+                stem_channels,
+                kernel_size=3,
+                stride=self.stem_stride,
+                padding=1,
+            )
+            self.stem_block = ResBlock(stem_channels, stem_channels)
+            prev_channels = stem_channels
+            stage_start_idx = 1
+        else:
+            self.stem = nn.Identity()
+            self.stem_block = nn.Identity()
+            prev_channels = self.in_channels
+            stage_start_idx = 0
+
+        self.stage_downsamples = nn.ModuleList()
+        self.stage_blocks = nn.ModuleList()
+        for out_channels in self.stage_channels[stage_start_idx:]:
+            self.stage_downsamples.append(
+                nn.Conv2d(prev_channels, out_channels, kernel_size=3, stride=2, padding=1)
+            )
+            self.stage_blocks.append(ResBlock(out_channels, out_channels))
+            prev_channels = out_channels
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() != 4:
+            raise ValueError(f"expected BCHW tensor, got {tuple(x.shape)}")
+
+        x = self.stem(x)
+        x = self.stem_block(x)
+        for downsample, resblock in zip(self.stage_downsamples, self.stage_blocks):
+            x = downsample(x)
+            x = resblock(x)
+        if self.output_grid_size is not None and x.shape[-2:] != (self.output_grid_size, self.output_grid_size):
+            x = F.interpolate(
+                x,
+                size=(self.output_grid_size, self.output_grid_size),
+                mode="bilinear",
+                align_corners=False,
+            )
+        return x
+
+
+def _build_pyramid_stage_channels(
+    *,
+    image_size: int,
+    output_grid_size: int,
+    hidden_dim: int,
+    base_channels: int,
+    max_channels: int,
+) -> tuple[list[int], int]:
+    if image_size % output_grid_size != 0:
+        raise ValueError(
+            f"image_size must be divisible by output_grid_size, got {image_size} vs {output_grid_size}"
+        )
+    downsample_factor = int(image_size) // int(output_grid_size)
+    if downsample_factor < 1:
+        raise ValueError(f"Invalid downsample factor: {downsample_factor}")
+    downsample_depth = int(round(math.log2(downsample_factor))) if downsample_factor > 1 else 0
+    if 2**downsample_depth != downsample_factor:
+        raise ValueError(
+            f"image_size/output_grid_size must be a power of two, got {image_size}/{output_grid_size}"
+        )
+
+    remaining_downsample_depth = max(0, downsample_depth - 1)
+    stage_channels = [int(base_channels)]
+    for stage_idx in range(remaining_downsample_depth):
+        out_channels = hidden_dim if stage_idx == remaining_downsample_depth - 1 else min(
+            base_channels * (2 ** (stage_idx + 1)),
+            max_channels,
+        )
+        stage_channels.append(int(out_channels))
+    return stage_channels, int(downsample_depth)
+
+
+class ContentEncoder(ConvPyramidEncoder):
     """CNN content encoder that downsamples to the DiT patch grid."""
 
     def __init__(
@@ -80,99 +229,63 @@ class ContentEncoder(nn.Module):
         base_channels: int = 64,
         max_channels: int = 256,
     ) -> None:
-        super().__init__()
-        if image_size % output_grid_size != 0:
-            raise ValueError(
-                f"image_size must be divisible by output_grid_size, got {image_size} vs {output_grid_size}"
-            )
-        downsample_factor = int(image_size) // int(output_grid_size)
-        if downsample_factor < 1:
-            raise ValueError(f"Invalid downsample factor: {downsample_factor}")
-        downsample_depth = int(round(math.log2(downsample_factor))) if downsample_factor > 1 else 0
-        if 2**downsample_depth != downsample_factor:
-            raise ValueError(
-                f"image_size/output_grid_size must be a power of two, got {image_size}/{output_grid_size}"
-            )
+        self.image_size = int(image_size)
+        self.hidden_dim = int(hidden_dim)
+        self.base_channels = int(base_channels)
+        self.max_channels = int(max_channels)
+        stage_channels, downsample_depth = _build_pyramid_stage_channels(
+            image_size=int(image_size),
+            output_grid_size=int(output_grid_size),
+            hidden_dim=int(hidden_dim),
+            base_channels=int(base_channels),
+            max_channels=int(max_channels),
+        )
+        self.downsample_depth = int(downsample_depth)
 
+        super().__init__(
+            in_channels=1,
+            stage_channels=stage_channels,
+            use_stem=True,
+            stem_stride=2 if self.downsample_depth > 0 else 1,
+            output_grid_size=int(output_grid_size),
+        )
+        self.output_grid_size = int(output_grid_size)
+
+
+class StyleEncoder(ConvPyramidEncoder):
+    def __init__(
+        self,
+        *,
+        in_channels: int = 1,
+        image_size: int = 128,
+        output_grid_size: int = 8,
+        hidden_dim: int = 512,
+        base_channels: int = 64,
+        max_channels: int = 256,
+    ) -> None:
         self.image_size = int(image_size)
         self.output_grid_size = int(output_grid_size)
         self.hidden_dim = int(hidden_dim)
         self.base_channels = int(base_channels)
         self.max_channels = int(max_channels)
-        self.downsample_depth = int(downsample_depth)
-
-        self.stem_stride = 2 if self.downsample_depth > 0 else 1
-        self.stem = nn.Conv2d(1, self.base_channels, kernel_size=3, stride=self.stem_stride, padding=1)
-        self.stem_resblock = ResBlock(self.base_channels, self.base_channels)
-
-        self.downsample_layers = nn.ModuleList()
-        self.resblocks = nn.ModuleList()
-        in_channels = self.base_channels
-        remaining_downsample_depth = max(0, self.downsample_depth - 1)
-        if remaining_downsample_depth == 0:
-            self.downsample_layers.append(nn.Identity())
-            self.resblocks.append(ResBlock(in_channels, self.hidden_dim))
-        else:
-            stage_channels = []
-            for stage_idx in range(remaining_downsample_depth):
-                out_channels = self.hidden_dim if stage_idx == remaining_downsample_depth - 1 else min(
-                    self.base_channels * (2 ** (stage_idx + 1)),
-                    self.max_channels,
-                )
-                stage_channels.append(out_channels)
-            if len(stage_channels) != remaining_downsample_depth:
-                raise RuntimeError(
-                    f"content stage construction mismatch: expected {remaining_downsample_depth}, got {len(stage_channels)}"
-                )
-            for stage_idx in range(remaining_downsample_depth):
-                out_channels = int(stage_channels[stage_idx])
-                self.downsample_layers.append(
-                    nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1)
-                )
-                self.resblocks.append(ResBlock(out_channels, out_channels))
-                in_channels = out_channels
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.dim() != 4:
-            raise ValueError(f"expected BCHW tensor, got {tuple(x.shape)}")
-
-        x = self.stem(x)
-        x = self.stem_resblock(x)
-        for downsample, resblock in zip(self.downsample_layers, self.resblocks):
-            x = downsample(x)
-            x = resblock(x)
-        if x.shape[-2:] != (self.output_grid_size, self.output_grid_size):
-            x = F.interpolate(
-                x,
-                size=(self.output_grid_size, self.output_grid_size),
-                mode="bilinear",
-                align_corners=False,
-            )
-        return x
-
-
-class StyleEncoder(nn.Module):
-    def __init__(self, in_channels: int = 1) -> None:
-        super().__init__()
-        stage_channels = [64, 128, 256, 512]
+        stage_channels, self.downsample_depth = _build_pyramid_stage_channels(
+            image_size=int(image_size),
+            output_grid_size=int(output_grid_size),
+            hidden_dim=int(hidden_dim),
+            base_channels=int(base_channels),
+            max_channels=int(max_channels),
+        )
         self.local_hidden_dim = int(stage_channels[-1])
-        self.downsample_layers = nn.ModuleList()
-        self.resblocks = nn.ModuleList()
-        prev_channels = int(in_channels)
-        for out_channels in stage_channels:
-            self.downsample_layers.append(
-                nn.Conv2d(prev_channels, out_channels, kernel_size=3, stride=2, padding=1)
-            )
-            self.resblocks.append(ResBlock(out_channels, out_channels))
-            prev_channels = out_channels
+        super().__init__(
+            in_channels=int(in_channels),
+            stage_channels=stage_channels,
+            use_stem=True,
+            stem_stride=2 if self.downsample_depth > 0 else 1,
+            output_grid_size=int(output_grid_size),
+        )
 
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
-        if x.dim() != 4:
-            raise ValueError(f"expected BCHW tensor, got {tuple(x.shape)}")
-        for downsample, resblock in zip(self.downsample_layers, self.resblocks):
-            x = downsample(x)
-            x = resblock(x)
-        return x
+        return super().forward(x)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.forward_features(x)
@@ -258,24 +371,39 @@ class PatchDetailerHead(nn.Module):
             min(self.base_channels * (2**idx), self.max_channels)
             for idx in range(self.depth)
         ]
+        self.time_mlp = nn.Sequential(
+            nn.Linear(self.context_dim, self.context_dim),
+            nn.SiLU(),
+            nn.Linear(self.context_dim, self.context_dim),
+        )
 
-        self.input_proj = ConvSiLU(self.in_channels, self.stage_channels[0], kernel_size=3, padding=1)
+        self.input_proj = TimeConditionedConvSiLU(
+            self.in_channels,
+            self.stage_channels[0],
+            time_dim=self.context_dim,
+            kernel_size=3,
+            padding=1,
+            second_stride=1,
+        )
 
         self.downsample_blocks = nn.ModuleList()
         prev_channels = self.stage_channels[0]
         for stage_idx, ch in enumerate(self.stage_channels):
             in_ch = prev_channels if stage_idx > 0 else self.stage_channels[0]
             self.downsample_blocks.append(
-                ConvSiLU(in_ch, ch, kernel_size=3, padding=1, stride=2)
+                TimeConditionedConvSiLU(
+                    in_ch,
+                    ch,
+                    time_dim=self.context_dim,
+                    kernel_size=3,
+                    padding=1,
+                    second_stride=2,
+                )
             )
             prev_channels = ch
 
         self.skip_channels = [self.stage_channels[0], *self.stage_channels[:-1]]
 
-        self.context_proj = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(self.context_dim, self.bottleneck_channels),
-        )
         self.bottleneck = ConvSiLU(
             self.stage_channels[-1] + self.bottleneck_channels,
             self.bottleneck_channels,
@@ -289,7 +417,14 @@ class PatchDetailerHead(nn.Module):
         for skip_ch in reversed(self.skip_channels):
             self.upsample_layers.append(nn.Upsample(scale_factor=2, mode="nearest"))
             self.dec_blocks.append(
-                ConvSiLU(current_ch + skip_ch, skip_ch, kernel_size=3, padding=1)
+                TimeConditionedConvSiLU(
+                    current_ch + skip_ch,
+                    skip_ch,
+                    time_dim=self.context_dim,
+                    kernel_size=3,
+                    padding=1,
+                    second_stride=1,
+                )
             )
             current_ch = skip_ch
 
@@ -297,11 +432,18 @@ class PatchDetailerHead(nn.Module):
         nn.init.zeros_(self.out_proj.weight)
         nn.init.zeros_(self.out_proj.bias)
 
-    def forward(self, patch_tokens: torch.Tensor, noisy_patches: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        patch_tokens: torch.Tensor,
+        noisy_patches: torch.Tensor,
+        timesteps: torch.Tensor,
+    ) -> torch.Tensor:
         if patch_tokens.dim() != 3:
             raise ValueError(f"patch_tokens must be 3D, got {tuple(patch_tokens.shape)}")
         if noisy_patches.dim() != 5:
             raise ValueError(f"noisy_patches must be 5D, got {tuple(noisy_patches.shape)}")
+        if timesteps.dim() != 1:
+            raise ValueError(f"timesteps must be 1D, got {tuple(timesteps.shape)}")
         batch, patch_count, channels, patch_h, patch_w = noisy_patches.shape
         if channels != self.in_channels:
             raise ValueError(
@@ -317,28 +459,47 @@ class PatchDetailerHead(nn.Module):
                 "patch_tokens and noisy_patches must share batch/patch dims: "
                 f"patch_tokens={tuple(patch_tokens.shape)} noisy_patches={tuple(noisy_patches.shape)}"
             )
+        if timesteps.size(0) != batch:
+            raise ValueError(
+                f"timesteps batch mismatch: expected {batch}, got {int(timesteps.size(0))}"
+            )
 
         flat_patches = noisy_patches.reshape(batch * patch_count, channels, patch_h, patch_w)
         flat_tokens = patch_tokens.reshape(batch * patch_count, patch_tokens.size(-1))
+        time_embed = timestep_embedding(timesteps, self.context_dim).to(dtype=flat_tokens.dtype)
+        time_embed = self.time_mlp(time_embed)
+        flat_time = time_embed[:, None, :].expand(batch, patch_count, self.context_dim).reshape(
+            batch * patch_count,
+            self.context_dim,
+        )
 
         skips: list[torch.Tensor] = []
-        x = self.input_proj(flat_patches)
+        x = self.input_proj(flat_patches, flat_time)
         skips.append(x)
         for stage_idx, downsample in enumerate(self.downsample_blocks):
-            x = downsample(x)
+            x = downsample(x, flat_time)
             if stage_idx < len(self.downsample_blocks) - 1:
                 skips.append(x)
 
-        context = self.context_proj(flat_tokens).view(flat_tokens.size(0), -1, 1, 1)
+        if flat_tokens.size(-1) != self.bottleneck_channels:
+            raise ValueError(
+                "patch token dim must match bottleneck_channels for direct concat: "
+                f"got token_dim={flat_tokens.size(-1)} bottleneck_channels={self.bottleneck_channels}"
+            )
+        context = flat_tokens.view(flat_tokens.size(0), -1, 1, 1)
         x = torch.cat([x, context], dim=1)
         x = self.bottleneck(x)
 
-        for upsample, dec_block, skip in zip(self.upsample_layers, self.dec_blocks, reversed(skips)):
+        for upsample, dec_block, skip in zip(
+            self.upsample_layers,
+            self.dec_blocks,
+            reversed(skips),
+        ):
             x = upsample(x)
             if x.shape[-2:] != skip.shape[-2:]:
                 x = F.interpolate(x, size=skip.shape[-2:], mode="nearest")
             x = torch.cat([x, skip], dim=1)
-            x = dec_block(x)
+            x = dec_block(x, flat_time)
 
         x = self.out_proj(x)
         return x.view(batch, patch_count, self.in_channels, self.patch_size, self.patch_size)
@@ -417,6 +578,9 @@ class SourcePartRefDiT(nn.Module):
         )
         self.style_encoder = StyleEncoder(
             in_channels=self.in_channels,
+            image_size=self.image_size,
+            output_grid_size=self.patch_grid_size,
+            hidden_dim=self.dit_hidden_dim,
         )
         self.style_token_hidden_dim = int(self.style_encoder.local_hidden_dim)
         self.style_token_proj = (
@@ -578,7 +742,7 @@ class SourcePartRefDiT(nn.Module):
             content_tokens=content_tokens,
         )
         noisy_patches = self._patchify(x_t_image)
-        pred_patches = self.detailer(patch_tokens, noisy_patches)
+        pred_patches = self.detailer(patch_tokens, noisy_patches, timesteps)
         pred_flow = self._unpatchify(pred_patches)
         return pred_flow
 

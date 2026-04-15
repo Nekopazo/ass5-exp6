@@ -12,6 +12,7 @@ Current model:
 - input/output channels: `1`
 - content encoder output: `8x8x512`
 - style encoder output: `8x8x512`
+- content/style encoders: shared CNN pyramid template
 - style fusion: one-shot `content <- style` cross-attention outside the backbone
 - DiT feed-forward: `swiglu`
 - DiT normalization/modulation: `rms`
@@ -116,7 +117,7 @@ Shape trace:
 | --- | --- |
 | input | `[B, 1, 128, 128]` |
 | stem conv | `[B, 64, 64, 64]` |
-| stem residual block | `[B, 64, 64, 64]` |
+| stem block | `[B, 64, 64, 64]` |
 | downsample stage 1 | `[B, 128, 32, 32]` |
 | residual block 1 | `[B, 128, 32, 32]` |
 | downsample stage 2 | `[B, 256, 16, 16]` |
@@ -136,16 +137,27 @@ Implemented by `StyleEncoder` and `ContentStyleCrossAttention` in `models/source
 
 Each style reference is encoded independently, then regrouped per sample.
 
+The style encoder now uses the same CNN pyramid template as the content encoder:
+
+- stem conv
+- stem block
+- three stride-2 pyramid stages
+- final `8x8x512` feature map
+
 Shape trace:
 
 | stage | shape |
 | --- | --- |
 | `style_img` | `[B, R, 1, 128, 128]` |
 | flatten refs | `[B*R, 1, 128, 128]` |
-| stage 0 | `[B*R, 64, 64, 64]` |
-| stage 1 | `[B*R, 128, 32, 32]` |
-| stage 2 | `[B*R, 256, 16, 16]` |
-| stage 3 | `[B*R, 512, 8, 8]` |
+| stem conv | `[B*R, 64, 64, 64]` |
+| stem block | `[B*R, 64, 64, 64]` |
+| downsample stage 1 | `[B*R, 128, 32, 32]` |
+| residual block 1 | `[B*R, 128, 32, 32]` |
+| downsample stage 2 | `[B*R, 256, 16, 16]` |
+| residual block 2 | `[B*R, 256, 16, 16]` |
+| downsample stage 3 | `[B*R, 512, 8, 8]` |
+| residual block 3 | `[B*R, 512, 8, 8]` |
 | flatten per ref | `[B*R, 64, 512]` |
 | regroup refs | `[B, R, 64, 512]` |
 | concat refs | `[B, R*64, 512]` |
@@ -329,6 +341,7 @@ Inputs:
 | --- | --- |
 | `patch_tokens` | `[B, 64, 512]` |
 | `noisy_patches` | `[B, 64, 1, 16, 16]` |
+| `timesteps` | `[B]` |
 
 Flattened internal tensors:
 
@@ -336,6 +349,7 @@ Flattened internal tensors:
 | --- | --- |
 | flat patch images | `[B*64, 1, 16, 16]` |
 | flat patch tokens | `[B*64, 512]` |
+| flat time embedding | `[B*64, 512]` |
 
 Current channel plan:
 
@@ -347,17 +361,40 @@ Detailer shape trace:
 
 | stage | shape |
 | --- | --- |
-| input proj | `[B*64, 64, 16, 16]` |
-| down block 1 | `[B*64, 64, 8, 8]` |
-| down block 2 | `[B*64, 128, 4, 4]` |
-| down block 3 | `[B*64, 256, 2, 2]` |
-| down block 4 | `[B*64, 512, 1, 1]` |
-| context projection | `[B*64, 512, 1, 1]` |
-| concat bottleneck input | `[B*64, 1024, 1, 1]` |
+| timestep embedding + MLP | `[B, 512]` |
+| input block (`conv1 -> +t -> SiLU -> conv2 -> +skip -> SiLU`) | `[B*64, 64, 16, 16]` |
+| down block 1 (`conv1 -> +t -> SiLU -> conv2(stride=2) -> +skip -> SiLU`) | `[B*64, 64, 8, 8]` |
+| down block 2 (`conv1 -> +t -> SiLU -> conv2(stride=2) -> +skip -> SiLU`) | `[B*64, 128, 4, 4]` |
+| down block 3 (`conv1 -> +t -> SiLU -> conv2(stride=2) -> +skip -> SiLU`) | `[B*64, 256, 2, 2]` |
+| down block 4 (`conv1 -> +t -> SiLU -> conv2(stride=2) -> +skip -> SiLU`) | `[B*64, 512, 1, 1]` |
+| token reshape | `[B*64, 512, 1, 1]` |
+| bottleneck concat input | `[B*64, 1024, 1, 1]` |
 | bottleneck output | `[B*64, 512, 1, 1]` |
-| up path final feature | `[B*64, 64, 16, 16]` |
+| up block 1 (`conv1 -> +t -> SiLU -> conv2 -> +skip -> SiLU`) | `[B*64, 256, 2, 2]` |
+| up block 2 (`conv1 -> +t -> SiLU -> conv2 -> +skip -> SiLU`) | `[B*64, 128, 4, 4]` |
+| up block 3 (`conv1 -> +t -> SiLU -> conv2 -> +skip -> SiLU`) | `[B*64, 64, 8, 8]` |
+| up block 4 (`conv1 -> +t -> SiLU -> conv2 -> +skip -> SiLU`) | `[B*64, 64, 16, 16]` |
 | output projection | `[B*64, 1, 16, 16]` |
 | reshape back | `[B, 64, 1, 16, 16]` |
+
+Condition injection in the current detailer uses two paths:
+
+```text
+t_emb = timestep_embedding(t).reshape(B*64, 512)
+t_bias_l = Linear(512 -> C_l)(t_emb).view(B*64, C_l, 1, 1)
+hidden = SiLU(conv1(feature_l))
+hidden = SiLU(conv1(feature_l) + t_bias_l)
+feature_l = SiLU(conv2(hidden) + skip(feature_l))
+```
+
+This happens inside the input block, every down block, and every up block. In down blocks, the second convolution is the downsampling step.
+
+Patch-token conditioning is injected directly at the bottleneck by channel concatenation:
+
+```text
+token_context = s_i.view(B*64, 512, 1, 1)
+x = concat([bottleneck_feature, token_context], dim=1)
+```
 
 Final output:
 
