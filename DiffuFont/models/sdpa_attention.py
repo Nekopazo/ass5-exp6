@@ -62,8 +62,6 @@ class SDPAAttention(nn.Module):
         self.k_proj = nn.Linear(self.embed_dim, self.embed_dim)
         self.v_proj = nn.Linear(self.embed_dim, self.embed_dim)
         self.out_proj = nn.Linear(self.embed_dim, self.embed_dim)
-        self.q_norm = nn.LayerNorm(self.head_dim, elementwise_affine=False, eps=1e-6)
-        self.k_norm = nn.LayerNorm(self.head_dim, elementwise_affine=False, eps=1e-6)
 
     def forward(
         self,
@@ -80,8 +78,6 @@ class SDPAAttention(nn.Module):
         q = self.q_proj(query).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(key).view(bsz, k_len, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(value).view(bsz, k_len, self.num_heads, self.head_dim).transpose(1, 2)
-        q = self.q_norm(q)
-        k = self.k_norm(k)
 
         if key_padding_mask is not None and key_padding_mask.shape != (bsz, k_len):
             raise ValueError(

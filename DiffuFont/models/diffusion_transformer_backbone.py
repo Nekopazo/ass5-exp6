@@ -154,8 +154,8 @@ class DiTBlock(nn.Module):
         num_heads: int,
         mlp_ratio: float,
         *,
-        ffn_activation: str = "gelu",
-        norm_variant: str = "ln",
+        ffn_activation: str = "swiglu",
+        norm_variant: str = "rms",
     ) -> None:
         super().__init__()
         self.norm_self = _build_norm(hidden_dim, norm_variant=norm_variant)
@@ -196,31 +196,14 @@ class GlyphDiTBlock(nn.Module):
         num_heads: int,
         mlp_ratio: float,
         *,
-        style_cond_dim: int,
         use_content_injection: bool = True,
-        use_style_injection: bool = True,
-        conditioning_injection_mode: str = "all",
-        ffn_activation: str = "gelu",
-        norm_variant: str = "ln",
+        ffn_activation: str = "swiglu",
+        norm_variant: str = "rms",
     ) -> None:
         super().__init__()
         self.hidden_dim = int(hidden_dim)
-        self.style_cond_dim = int(style_cond_dim)
         self.use_content_injection = bool(use_content_injection)
-        self.use_style_injection = bool(use_style_injection)
-        self.conditioning_injection_mode = str(conditioning_injection_mode)
         self.norm_variant = _normalize_norm_variant(norm_variant)
-        if self.conditioning_injection_mode not in {
-            "all",
-            "content_sa_style_ffn",
-            "content_style_sa_style_ffn",
-            "content_style_sa_t_ffn",
-        }:
-            raise ValueError(
-                "conditioning_injection_mode must be one of "
-                "{'all', 'content_sa_style_ffn', 'content_style_sa_style_ffn', 'content_style_sa_t_ffn'}, "
-                f"got {conditioning_injection_mode!r}"
-            )
         self.content_control_norm = (
             _build_norm(hidden_dim, norm_variant=self.norm_variant)
             if self.use_content_injection
@@ -233,11 +216,6 @@ class GlyphDiTBlock(nn.Module):
         )
         joint_out_dim = hidden_dim * (4 if self.norm_variant == "rms" else 6)
         self.joint_mod = _build_zero_linear(hidden_dim, joint_out_dim)
-        self.style_cond_norm = (
-            _build_norm(self.style_cond_dim, norm_variant=self.norm_variant)
-            if self.use_style_injection
-            else None
-        )
         self.dit_block = DiTBlock(
             hidden_dim,
             num_heads,
@@ -252,12 +230,10 @@ class GlyphDiTBlock(nn.Module):
         *,
         time_cond: torch.Tensor,
         content_tokens: torch.Tensor | None,
-        style_global: torch.Tensor | None,
     ) -> torch.Tensor:
         x = patch_tokens
         attn_time_tokens = self.attn_time_to_token(self.attn_time_norm(time_cond)).unsqueeze(1).expand_as(x)
         sa_source = attn_time_tokens
-        ffn_source: torch.Tensor = attn_time_tokens if self.conditioning_injection_mode == "all" else time_cond
         if self.use_content_injection:
             if (
                 content_tokens is None
@@ -271,68 +247,20 @@ class GlyphDiTBlock(nn.Module):
                 )
             content_source = self.content_control_norm(content_tokens)
             sa_source = sa_source + content_source
-            if self.conditioning_injection_mode == "all":
-                ffn_source = ffn_source + content_source
-
-        if self.use_style_injection:
-            if (
-                style_global is None
-                or self.style_cond_norm is None
-            ):
-                raise RuntimeError("style_global must be provided when style injection is enabled")
-            expected_style_shape = (x.size(0), self.style_cond_dim)
-            if tuple(style_global.shape) != expected_style_shape:
-                raise RuntimeError(
-                    "style_global shape mismatch: "
-                    f"expected {expected_style_shape}, got {tuple(style_global.shape)}"
-                )
-            style_source = self.style_cond_norm(style_global).unsqueeze(1).expand_as(x)
-            if self.conditioning_injection_mode == "all":
-                ffn_source = ffn_source + style_source
-                sa_source = sa_source + style_source
-            elif self.conditioning_injection_mode == "content_sa_style_ffn":
-                ffn_source = ffn_source + self.style_cond_norm(style_global)
-            elif self.conditioning_injection_mode == "content_style_sa_style_ffn":
-                sa_source = sa_source + style_source
-                ffn_source = ffn_source + self.style_cond_norm(style_global)
-            elif self.conditioning_injection_mode == "content_style_sa_t_ffn":
-                sa_source = sa_source + style_source
 
         if self.norm_variant == "rms":
-            if self.conditioning_injection_mode == "all":
-                self_attn_scale, self_attn_gate, ffn_scale, ffn_gate = self.joint_mod(sa_source).chunk(4, dim=-1)
-            else:
-                self_attn_scale, self_attn_gate, _, _ = self.joint_mod(sa_source).chunk(4, dim=-1)
-                _, _, ffn_scale, ffn_gate = self.joint_mod(ffn_source).chunk(4, dim=-1)
+            self_attn_scale, self_attn_gate, ffn_scale, ffn_gate = self.joint_mod(sa_source).chunk(4, dim=-1)
             self_attn_shift = None
             ffn_shift = None
         else:
-            if self.conditioning_injection_mode == "all":
-                (
-                    self_attn_shift,
-                    self_attn_scale,
-                    self_attn_gate,
-                    ffn_shift,
-                    ffn_scale,
-                    ffn_gate,
-                ) = self.joint_mod(sa_source).chunk(6, dim=-1)
-            else:
-                (
-                    self_attn_shift,
-                    self_attn_scale,
-                    self_attn_gate,
-                    _,
-                    _,
-                    _,
-                ) = self.joint_mod(sa_source).chunk(6, dim=-1)
-                (
-                    _,
-                    _,
-                    _,
-                    ffn_shift,
-                    ffn_scale,
-                    ffn_gate,
-                ) = self.joint_mod(ffn_source).chunk(6, dim=-1)
+            (
+                self_attn_shift,
+                self_attn_scale,
+                self_attn_gate,
+                ffn_shift,
+                ffn_scale,
+                ffn_gate,
+            ) = self.joint_mod(sa_source).chunk(6, dim=-1)
 
         x = self.dit_block(
             x,
@@ -354,15 +282,13 @@ class DiffusionTransformerBackbone(nn.Module):
         image_size: int = 128,
         patch_size: int = 16,
         hidden_dim: int = 512,
-        style_cond_dim: int = 768,
         depth: int = 16,
         num_heads: int = 8,
         mlp_ratio: float = 4.0,
         content_injection_layers: Sequence[int] | None = None,
-        style_injection_layers: Sequence[int] | None = None,
         conditioning_injection_mode: str = "all",
-        ffn_activation: str = "gelu",
-        norm_variant: str = "ln",
+        ffn_activation: str = "swiglu",
+        norm_variant: str = "rms",
     ) -> None:
         super().__init__()
         if image_size % patch_size != 0:
@@ -371,24 +297,24 @@ class DiffusionTransformerBackbone(nn.Module):
         self.image_size = int(image_size)
         self.patch_size = int(patch_size)
         self.hidden_dim = int(hidden_dim)
-        self.style_cond_dim = int(style_cond_dim)
         self.depth = int(depth)
         self.num_heads = int(num_heads)
-        self.conditioning_injection_mode = str(conditioning_injection_mode)
+        if str(conditioning_injection_mode) != "all":
+            raise ValueError(
+                "conditioning_injection_mode is fixed to 'all' in the current model, "
+                f"got {conditioning_injection_mode!r}"
+            )
         self.ffn_activation = str(ffn_activation)
         self.norm_variant = _normalize_norm_variant(norm_variant)
-        if self.ffn_activation not in {"gelu", "swiglu"}:
-            raise ValueError(f"ffn_activation must be 'gelu' or 'swiglu', got {ffn_activation!r}")
-        if self.conditioning_injection_mode not in {
-            "all",
-            "content_sa_style_ffn",
-            "content_style_sa_style_ffn",
-            "content_style_sa_t_ffn",
-        }:
+        if self.ffn_activation != "swiglu":
             raise ValueError(
-                "conditioning_injection_mode must be one of "
-                "{'all', 'content_sa_style_ffn', 'content_style_sa_style_ffn', 'content_style_sa_t_ffn'}, "
-                f"got {conditioning_injection_mode!r}"
+                "ffn_activation is fixed to 'swiglu' in the current model, "
+                f"got {ffn_activation!r}"
+            )
+        if self.norm_variant != "rms":
+            raise ValueError(
+                "norm_variant is fixed to 'rms' in the current model, "
+                f"got {norm_variant!r}"
             )
         self.grid_size = self.image_size // self.patch_size
         self.num_tokens = self.grid_size * self.grid_size
@@ -398,25 +324,13 @@ class DiffusionTransformerBackbone(nn.Module):
             depth=self.depth,
             field_name="content_injection_layers",
         )
-        self.style_injection_layers = self._normalize_layer_indices(
-            style_injection_layers,
-            default_layers=range(1, self.depth + 1),
-            depth=self.depth,
-            field_name="style_injection_layers",
-        )
         content_layer_set = set(self.content_injection_layers)
-        style_layer_set = set(self.style_injection_layers)
 
         self.content_layer_mask = [
             (block_idx + 1) in content_layer_set
             for block_idx in range(self.depth)
         ]
-        self.style_layer_mask = [
-            (block_idx + 1) in style_layer_set
-            for block_idx in range(self.depth)
-        ]
         self.has_content_injection = any(self.content_layer_mask)
-        self.has_style_injection = any(self.style_layer_mask)
 
         self.patch_embed = nn.Conv2d(
             self.in_channels,
@@ -441,10 +355,7 @@ class DiffusionTransformerBackbone(nn.Module):
                     self.hidden_dim,
                     self.num_heads,
                     mlp_ratio,
-                    style_cond_dim=self.style_cond_dim,
                     use_content_injection=self.content_layer_mask[block_idx],
-                    use_style_injection=self.style_layer_mask[block_idx],
-                    conditioning_injection_mode=self.conditioning_injection_mode,
                     ffn_activation=self.ffn_activation,
                     norm_variant=self.norm_variant,
                 )
@@ -480,7 +391,6 @@ class DiffusionTransformerBackbone(nn.Module):
         timesteps: torch.Tensor,
         *,
         content_tokens: torch.Tensor,
-        style_global: torch.Tensor,
     ) -> torch.Tensor:
         if image.dim() != 4:
             raise ValueError(f"image must be 4D, got {tuple(image.shape)}")
@@ -503,17 +413,12 @@ class DiffusionTransformerBackbone(nn.Module):
             content_tokens = content_tokens.to(device=x.device, dtype=x.dtype)
         else:
             content_tokens = None
-        if self.has_style_injection:
-            style_global = style_global.to(device=x.device, dtype=x.dtype)
-        else:
-            style_global = None
 
         for block in self.blocks:
             x = block(
                 x,
                 time_cond=time_cond,
                 content_tokens=content_tokens if block.use_content_injection else None,
-                style_global=style_global if block.use_style_injection else None,
             )
 
         x = self.final_norm(x)

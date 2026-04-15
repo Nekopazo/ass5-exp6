@@ -429,53 +429,6 @@ def _group_pair_sum(normalized_vectors: torch.Tensor, labels: list[Any]) -> tupl
     return total_sum, total_count
 
 
-def compute_style_vector_stats(
-    style_vectors: torch.Tensor,
-    *,
-    font_names: list[str],
-    char_ids: list[int],
-    split_labels: list[str],
-) -> dict[str, dict[str, float | int]]:
-    output: dict[str, dict[str, float | int]] = {}
-    normalized = F.normalize(style_vectors.float(), dim=-1, eps=1e-6).cpu()
-    split_to_indices: dict[str, list[int]] = {"all": list(range(int(normalized.size(0))))}
-    for idx, split_label in enumerate(split_labels):
-        split_to_indices.setdefault(split_label, []).append(idx)
-
-    for split_name, indices in split_to_indices.items():
-        if len(indices) < 2:
-            continue
-        subset = normalized.index_select(0, torch.tensor(indices, dtype=torch.long))
-        subset_fonts = [font_names[idx] for idx in indices]
-        subset_chars = [char_ids[idx] for idx in indices]
-        all_sum, all_count = _pair_sum(subset)
-        same_font_sum, same_font_count = _group_pair_sum(subset, subset_fonts)
-        same_char_sum, same_char_count = _group_pair_sum(subset, subset_chars)
-        diff_font_sum = all_sum - same_font_sum
-        diff_font_count = all_count - same_font_count
-        diff_char_sum = all_sum - same_char_sum
-        diff_char_count = all_count - same_char_count
-        output[split_name] = {
-            "num_samples": int(len(indices)),
-            "all_pair_count": int(all_count),
-            "all_pair_cos_mean": float(all_sum / all_count) if all_count > 0 else 0.0,
-            "same_font_pair_count": int(same_font_count),
-            "same_font_pair_cos_mean": float(same_font_sum / same_font_count) if same_font_count > 0 else 0.0,
-            "different_font_pair_count": int(diff_font_count),
-            "different_font_pair_cos_mean": float(diff_font_sum / diff_font_count) if diff_font_count > 0 else 0.0,
-            "same_font_margin": (
-                float(same_font_sum / same_font_count - diff_font_sum / diff_font_count)
-                if same_font_count > 0 and diff_font_count > 0
-                else 0.0
-            ),
-            "same_char_pair_count": int(same_char_count),
-            "same_char_pair_cos_mean": float(same_char_sum / same_char_count) if same_char_count > 0 else 0.0,
-            "different_char_pair_count": int(diff_char_count),
-            "different_char_pair_cos_mean": float(diff_char_sum / diff_char_count) if diff_char_count > 0 else 0.0,
-        }
-    return output
-
-
 def build_worst_grid(
     dataset: FontImageDataset,
     trainer,
@@ -674,16 +627,10 @@ def evaluate_checkpoint(
     output_dir: Path,
 ) -> dict[str, Any]:
     trainer = load_trainer(checkpoint_path, device)
-    sample_model = trainer._inference_model()
-    sample_model.eval()
 
     fid_by_split: dict[str, FrechetInceptionDistance] = {"all": init_fid(device, int(args.fid_feature))}
 
     rows: list[dict[str, Any]] = []
-    style_vectors: list[torch.Tensor] = []
-    font_labels: list[str] = []
-    char_ids: list[int] = []
-    split_labels: list[str] = []
 
     grouped = specs_by_font(sample_specs)
     total_chunks = math.ceil(len(font_names) / int(args.fonts_per_batch))
@@ -700,13 +647,6 @@ def evaluate_checkpoint(
             num_inference_steps=int(args.inference_steps),
         )
         target = batch["target"].to(device)
-        with torch.no_grad():
-            with trainer._autocast_context():
-                style_global = sample_model.encode_style_global(
-                    batch["style_img"].to(device),
-                    style_ref_mask=batch["style_ref_mask"].to(device),
-                )
-            style_global = style_global.float().cpu()
         metrics = compute_image_metrics(generation, target, perceptor_model)
         split_batch_labels = [spec.split for spec in batch_specs]
         update_fids(fid_by_split, generation, target, split_batch_labels)
@@ -730,10 +670,6 @@ def evaluate_checkpoint(
                 row[metric_name] = value
             row["neg_ssim"] = float(-row["ssim"])
             rows.append(row)
-            style_vectors.append(style_global[sample_idx])
-            font_labels.append(spec.font_name)
-            char_ids.append(int(spec.char_id))
-            split_labels.append(spec.split)
 
         elapsed = time.time() - start_time
         print(
@@ -749,12 +685,6 @@ def evaluate_checkpoint(
     csv_path = output_dir / f"{checkpoint_alias}_per_sample_metrics.csv"
     df.to_csv(csv_path, index=False)
 
-    style_vector_stats = compute_style_vector_stats(
-        torch.stack(style_vectors, dim=0),
-        font_names=font_labels,
-        char_ids=char_ids,
-        split_labels=split_labels,
-    )
     summary = summarize_metrics(df, fid_results)
 
     worst_df = df.sort_values(args.worst_rank_by, ascending=False).head(20).copy()
@@ -778,7 +708,6 @@ def evaluate_checkpoint(
         "checkpoint_path": str(checkpoint_path),
         "step": int(checkpoint_step),
         "summary": summary,
-        "style_vector_stats": style_vector_stats,
         "per_sample_metrics_csv": str(csv_path),
         "worst_grid_path": str(worst_grid_path),
         "worst_samples": worst_df.to_dict(orient="records"),

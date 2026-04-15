@@ -395,41 +395,15 @@ def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
         image_size=int(args.image_size),
         patch_size=int(args.patch_size),
         encoder_hidden_dim=int(args.encoder_hidden_dim),
-        style_hidden_dim=int(args.style_hidden_dim),
         dit_hidden_dim=int(args.dit_hidden_dim),
         dit_depth=int(args.dit_depth),
         dit_heads=int(args.dit_heads),
         dit_mlp_ratio=float(args.dit_mlp_ratio),
-        ffn_activation=str(args.ffn_activation),
-        norm_variant=str(args.norm_variant),
-        content_injection_layers=args.content_injection_layers,
-        style_injection_layers=args.style_injection_layers,
-        conditioning_injection_mode=str(args.conditioning_injection_mode),
-        content_style_fusion=str(args.content_style_fusion),
-        content_style_fusion_heads=int(args.content_style_fusion_heads),
-        style_pool_mode=str(args.style_pool_mode),
-        style_proj_mode=str(args.style_proj_mode),
+        content_injection_layers=None,
+        content_style_fusion_heads=4,
         detailer_base_channels=int(args.detailer_base_channels),
         detailer_max_channels=int(args.detailer_max_channels),
     )
-
-
-def parse_layer_indices(value: str) -> tuple[int, ...]:
-    parts = [part.strip() for part in str(value).split(",")]
-    if not parts or any(part == "" for part in parts):
-        raise argparse.ArgumentTypeError("layer list must be a comma-separated list like 1,2,3,4,5,6")
-    try:
-        return tuple(int(part) for part in parts)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"invalid layer list: {value}") from exc
-
-
-def resolve_norm_configuration(args: argparse.Namespace) -> None:
-    variant = str(args.norm_variant).strip().lower()
-    if variant not in {"ln", "rms"}:
-        supported = "ln, rms"
-        raise ValueError(f"norm_variant must be one of {{{supported}}}, got {args.norm_variant!r}")
-    args.norm_variant = variant
 
 
 def main() -> None:
@@ -454,58 +428,10 @@ def main() -> None:
 
     parser.add_argument("--patch-size", type=int, required=True)
     parser.add_argument("--encoder-hidden-dim", type=int, required=True)
-    parser.add_argument("--style-hidden-dim", type=int, default=1024)
     parser.add_argument("--dit-hidden-dim", type=int, required=True)
     parser.add_argument("--dit-depth", type=int, required=True)
     parser.add_argument("--dit-heads", type=int, required=True)
     parser.add_argument("--dit-mlp-ratio", type=float, required=True)
-    parser.add_argument(
-        "--ffn-activation",
-        type=str,
-        default="gelu",
-        choices=["gelu", "swiglu"],
-    )
-    parser.add_argument(
-        "--norm-variant",
-        type=str,
-        default="ln",
-        choices=["ln", "rms"],
-        help="Select the normalization/modulation bundle: "
-             "ln -> LayerNorm + shift/scale/gate; "
-             "rms -> RMSNorm + scale/gate.",
-    )
-    parser.add_argument("--content-injection-layers", type=parse_layer_indices, required=True)
-    parser.add_argument("--style-injection-layers", type=parse_layer_indices, required=True)
-    parser.add_argument(
-        "--conditioning-injection-mode",
-        type=str,
-        default="all",
-        choices=[
-            "all",
-            "content_sa_style_ffn",
-            "content_style_sa_style_ffn",
-            "content_style_sa_t_ffn",
-        ],
-    )
-    parser.add_argument(
-        "--content-style-fusion",
-        type=str,
-        default="cross_attn",
-        choices=["none", "cross_attn"],
-    )
-    parser.add_argument("--content-style-fusion-heads", type=int, default=4)
-    parser.add_argument(
-        "--style-pool-mode",
-        type=str,
-        default="attention",
-        choices=["attention", "mean"],
-    )
-    parser.add_argument(
-        "--style-proj-mode",
-        type=str,
-        default="mlp",
-        choices=["mlp", "linear"],
-    )
     parser.add_argument("--detailer-base-channels", type=int, required=True)
     parser.add_argument("--detailer-max-channels", type=int, required=True)
     parser.add_argument("--train-sampling", type=str, required=True, choices=["shuffle", "cartesian_font_char"])
@@ -513,6 +439,7 @@ def main() -> None:
     parser.add_argument("--cartesian-chars-per-batch", type=int, required=True)
 
     parser.add_argument("--lr", type=float, required=True)
+    parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--lr-warmup-steps", type=int, default=0)
     parser.add_argument("--lr-decay-start-step", type=int, default=-1)
     parser.add_argument("--lr-min-scale", type=float, default=0.1)
@@ -539,7 +466,6 @@ def main() -> None:
     parser.add_argument("--ema-decay", type=float, required=True)
     parser.add_argument("--ema-start-step", type=int, default=-1)
     args = parser.parse_args()
-    resolve_norm_configuration(args)
 
     set_global_seed(int(args.seed))
     enable_torch_sdpa_backends()
@@ -561,6 +487,8 @@ def main() -> None:
         raise ValueError("save_every_steps and sample_every_steps must be >= 0.")
     if total_steps <= 0:
         raise ValueError("total_steps must be > 0.")
+    if float(args.weight_decay) < 0.0:
+        raise ValueError("weight_decay must be >= 0.")
     if int(args.lr_warmup_steps) < 0:
         raise ValueError("lr_warmup_steps must be >= 0.")
     if float(args.lr_min_scale) < 0.0 or float(args.lr_min_scale) > 1.0:
@@ -650,6 +578,7 @@ def main() -> None:
         model,
         device,
         lr=float(args.lr),
+        weight_decay=float(args.weight_decay),
         total_steps=total_steps,
         lr_warmup_steps=int(args.lr_warmup_steps),
         lr_decay_start_step=None if int(args.lr_decay_start_step) < 0 else int(args.lr_decay_start_step),
@@ -717,6 +646,11 @@ def main() -> None:
     run_config["lr_warmup_steps"] = int(args.lr_warmup_steps)
     run_config["lr_decay_start_step"] = None if int(args.lr_decay_start_step) < 0 else int(args.lr_decay_start_step)
     run_config["lr_min_scale"] = float(args.lr_min_scale)
+    run_config["weight_decay"] = float(args.weight_decay)
+    run_config["ffn_activation"] = "swiglu"
+    run_config["norm_variant"] = "rms"
+    run_config["content_injection_layers"] = list(range(1, int(args.dit_depth) + 1))
+    run_config["content_style_fusion_heads"] = 4
     run_config["grad_clip_min_norm"] = None if args.grad_clip_min_norm is None else float(args.grad_clip_min_norm)
 
     (args.save_dir / "train_config.json").write_text(

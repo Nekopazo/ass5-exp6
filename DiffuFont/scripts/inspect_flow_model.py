@@ -73,19 +73,14 @@ def print_model_summary(model: SourcePartRefDiT) -> None:
             f"patch_grid_size: {model.patch_grid_size}",
             f"num_patches: {model.num_patches}",
             f"encoder_hidden_dim: {model.encoder_hidden_dim}",
-            f"style_hidden_dim: {model.style_hidden_dim}",
-            f"style_pool_heads: {model.style_pool_heads}",
-            f"style_pool_mode: {model.style_pool_mode}",
-            f"style_proj_mode: {model.style_proj_mode}",
+            f"style_token_hidden_dim: {model.style_token_hidden_dim}",
             f"dit_hidden_dim: {model.dit_hidden_dim}",
             f"dit_depth: {model.dit_depth}",
             f"dit_heads: {model.dit_heads}",
             f"ffn_activation: {model.ffn_activation}",
             f"norm_variant: {model.norm_variant}",
-            f"content_style_fusion: {model.content_style_fusion}",
             f"content_style_fusion_heads: {model.content_style_fusion_heads}",
             f"content_injection_layers: {list(model.content_injection_layers)}",
-            f"style_injection_layers: {list(model.style_injection_layers)}",
         ]
     )
 
@@ -95,7 +90,8 @@ def print_model_summary(model: SourcePartRefDiT) -> None:
         "content_encoder",
         "content_proj",
         "style_encoder",
-        "style_proj",
+        "style_token_proj",
+        "content_style_attn",
         "backbone",
         "detailer",
     ]
@@ -103,20 +99,11 @@ def print_model_summary(model: SourcePartRefDiT) -> None:
         module = getattr(model, name)
         total, trainable = count_params(module)
         print(f"  - {name}: {module.__class__.__name__} total={total:,} trainable={trainable:,}")
-        if name == "style_encoder":
-            style_pool_params = sum(int(param.numel()) for param in model.style_pool.parameters())
-            print(
-                "  - style_pool: "
-                f"{model.style_pool.__class__.__name__} total={style_pool_params:,} trainable={style_pool_params:,}"
-            )
 
     print()
     print("backbone_layer_plan:")
     for idx, block in enumerate(model.backbone.blocks):
-        print(
-            f"  - block_{idx:02d}: content_injection={int(block.use_content_injection)} "
-            f"style_injection={int(block.use_style_injection)}"
-        )
+        print(f"  - block_{idx:02d}: content_injection={int(block.use_content_injection)}")
 
 
 def trace_content_path(model: SourcePartRefDiT, content: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -152,7 +139,7 @@ def trace_style_path(
     model: SourcePartRefDiT,
     style_img: torch.Tensor,
     style_ref_mask: torch.Tensor,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     encoder = model.style_encoder
     print_header("Style Path")
     print(f"style_input: {shape_of(style_img)}")
@@ -177,34 +164,9 @@ def trace_style_path(
         .reshape(batch, refs * tokens_per_ref)
     )
     print(f"style.all_ref_spatial_token_mask: {shape_of(token_valid_mask)}")
-    if model.style_pool_mode == "attention":
-        style_query = model.style_pool.query.expand(batch, -1, -1)
-        print(f"style.pool_query: {shape_of(style_query)}")
-        style_query = model.style_pool.query_norm(style_query)
-        print(f"style.pool_query_norm: {shape_of(style_query)}")
-        style_keys = model.style_pool.token_norm(style_tokens)
-        print(f"style.pool_token_norm: {shape_of(style_keys)}")
-        key_padding_mask = None
-        need_weights = False
-        if bool((~token_valid_mask).any().item()):
-            key_padding_mask = ~token_valid_mask
-            need_weights = True
-        style_vectors, _ = model.style_pool.attn(
-            style_query,
-            style_keys,
-            style_tokens,
-            key_padding_mask=key_padding_mask,
-            need_weights=need_weights,
-        )
-        print(f"style.attention_pool: {shape_of(style_vectors)}")
-        pooled_style = style_vectors.squeeze(1)
-    else:
-        pooled_style = model.style_pool(style_tokens, token_valid_mask)
-        print(f"style.mean_pool: {shape_of(pooled_style)}")
-    print(f"style.pooled_style: {shape_of(pooled_style)}")
-    style_global = model.style_proj(pooled_style)
-    print(f"style.global: {shape_of(style_global)}")
-    return style_global
+    style_token_bank = model.style_token_proj(style_tokens)
+    print(f"style.token_bank: {shape_of(style_token_bank)}")
+    return style_token_bank, token_valid_mask
 
 
 def trace_backbone_path(
@@ -212,7 +174,6 @@ def trace_backbone_path(
     xt: torch.Tensor,
     timesteps: torch.Tensor,
     content_tokens: torch.Tensor,
-    style_global: torch.Tensor,
 ) -> torch.Tensor:
     backbone = model.backbone
     print_header("Backbone Path")
@@ -223,8 +184,6 @@ def trace_backbone_path(
     print(f"backbone.tokens_plus_pos: {shape_of(x)}")
     content_tokens = content_tokens.to(device=x.device, dtype=x.dtype)
     print(f"backbone.content_tokens: {shape_of(content_tokens)}")
-    style_global = style_global.to(device=x.device, dtype=x.dtype)
-    print(f"backbone.style_global: {shape_of(style_global)}")
     time_cond = timestep_embedding(timesteps, backbone.hidden_dim).to(dtype=x.dtype)
     print(f"backbone.timestep_embedding: {shape_of(time_cond)}")
     time_cond = backbone.time_mlp(time_cond)
@@ -236,12 +195,10 @@ def trace_backbone_path(
             x,
             time_cond=time_cond,
             content_tokens=content_tokens if block.use_content_injection else None,
-            style_global=style_global if block.use_style_injection else None,
         )
         print(
             f"backbone.block_{idx:02d}: out={shape_of(x)} "
-            f"content_injection={int(block.use_content_injection)} "
-            f"style_injection={int(block.use_style_injection)}"
+            f"content_injection={int(block.use_content_injection)}"
         )
     x = backbone.final_norm(x)
     print(f"backbone.final_norm: {shape_of(x)}")
@@ -323,13 +280,18 @@ def print_training_flow(
     print(f"target_flow=x1-x0: {shape_of(target_flow)}")
 
     _, content_tokens = trace_content_path(model, content)
-    style_global = trace_style_path(model, style_img, style_ref_mask)
+    style_token_bank, token_valid_mask = trace_style_path(model, style_img, style_ref_mask)
+    content_tokens = model.fuse_content_style_tokens(
+        content_tokens,
+        style_token_bank,
+        token_valid_mask=token_valid_mask,
+    )
+    print(f"content.tokens_after_style_fusion: {shape_of(content_tokens)}")
     patch_tokens = trace_backbone_path(
         model,
         xt,
         timesteps,
         content_tokens,
-        style_global,
     )
     noisy_patches = model._patchify(xt)
     print_header("Patchify")

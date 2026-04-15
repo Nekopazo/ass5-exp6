@@ -1,53 +1,42 @@
 # Current Project Model Architecture
 
-Generated on `2026-04-07` from the current repository state in `/scratch/yangximing/code/ass5-exp6/DiffuFont`.
+Generated from the current repository state in `/scratch/yangximing/code/ass5-exp6/DiffuFont`.
 
-This document records the current runnable architecture after the DiT conditioning refactor:
+This document describes only the current model. Historical branches and removed alternatives are intentionally omitted.
 
-- `SourcePartRefDiT` for pixel-space glyph flow generation
-- `DiffusionTransformerBackbone` block-by-block conditioning order
-- `PatchDetailerHead` local patch refinement head
-- `FlowTrainer` loss composition and sampling path
-- `FontPerceptor` frozen perceptual/style guidance model
+## 1. Main Path
 
-Shape traces and parameter counts were checked with:
+Current model:
 
-```bash
-/scratch/yangximing/miniconda3/envs/sg3/bin/python scripts/inspect_flow_model.py --device cpu --batch-size 1 --style-refs 6
-/scratch/yangximing/miniconda3/envs/sg3/bin/python scripts/inspect_font_perceptor.py --device cpu --batch-size 2 --image-size 128
-```
+- model: `SourcePartRefDiT`
+- input/output channels: `1`
+- content encoder output: `8x8x512`
+- style encoder output: `8x8x512`
+- style fusion: one-shot `content <- style` cross-attention outside the backbone
+- DiT feed-forward: `swiglu`
+- DiT normalization/modulation: `rms`
+- DiT patch size: `16`
+- DiT hidden size: `512`
+- DiT heads: `8`
+- content-style cross-attention heads: `4`
+- optimizer: `AdamW`
+- default `weight_decay`: `0.01`
 
-## 1. Active Model Paths
+Effective path:
 
-### 1.1 `SourcePartRefDiT`
+1. Encode `content_img` into `8x8x512` content tokens.
+2. Encode all style references into `8x8x512` style tokens.
+3. Concatenate all style-reference tokens along the token axis.
+4. Run one cross-attention with content tokens as query and style tokens as key/value.
+5. Add the resulting style context back to content tokens.
+6. Feed fused content tokens into the DiT backbone.
+7. Use timestep-conditioned RMS modulation in every DiT block.
+8. Refine patch outputs with `PatchDetailerHead`.
+9. Unpatchify patch outputs into final image-space flow.
 
-Used by `train.py` for grayscale pixel-space flow matching.
+There is no global style vector path in the current model.
 
-Core design:
-
-- content is encoded into one token per `16x16` image patch
-- style is encoded into one global vector per sample
-- each transformer block now builds one joint token-wise conditioning source from timestep tokens, optional content tokens, and an optional repeated style vector
-- the joint conditioning source is sent through one zero-init modulation head that directly emits six token-wise adaLN tensors: self-attention `shift/scale/gate` and MLP `shift/scale/gate`
-- style is encoded to a pooled `1024`-dim vector, then compressed to `512` by a transformer-style MLP projector before being repeated across all `64` patch tokens
-- style does not have a separate residual token injection path
-- self-attention is performed inside the DiT block after content/style injection
-- patch-level transformer outputs are refined by a per-patch local detailer before unpatchifying to the final flow field
-
-### 1.2 `FontPerceptor`
-
-Used by `train_font_perceptor.py` for pretraining, and optionally loaded by `FlowTrainer` as a frozen guidance model.
-
-Core design:
-
-- grayscale CNN backbone with four downsampling stages
-- global pooled style embedding head for font-style supervision
-- character classification head for auxiliary character recognition
-- frozen guidance computes feature-map L1 perceptual loss and style embedding cosine loss
-
-## 2. `SourcePartRefDiT` Default Configuration
-
-Current default constructor values:
+## 2. Main Configuration
 
 | item | value |
 | --- | --- |
@@ -57,34 +46,29 @@ Current default constructor values:
 | `patch_grid_size` | `8` |
 | `num_patches` | `64` |
 | `encoder_hidden_dim` | `512` |
-| `style_hidden_dim` | `1024` |
-| `style_pool_heads` | `4` |
 | `dit_hidden_dim` | `512` |
-| `dit_depth` | `16` |
+| `dit_depth` | runtime-configured |
 | `dit_heads` | `8` |
 | `dit_mlp_ratio` | `4.0` |
-| `content_injection_layers` | `[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]` |
-| `style_injection_layers` | `[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]` |
-| `detailer_base_channels` | `64` |
-| `detailer_max_channels` | `512` |
+| `ffn_activation` | `swiglu` |
+| `norm_variant` | `rms` |
+| `content_style_fusion_heads` | `4` |
+| `content_injection_layers` | all DiT layers |
+| `detailer_base_channels` | runtime-configured |
+| `detailer_max_channels` | runtime-configured |
 | `detailer_bottleneck_channels` | `512` |
-
-Current parameter counts from `inspect_flow_model.py`:
-
-| module | params |
-| --- | ---: |
-| `content_encoder` | `7,822,464` |
-| `content_proj` | `0` |
-| `style_encoder` | `31,422,592` |
-| `style_pool` | `4,199,424` |
-| `style_proj` | `3,148,288` |
-| `backbone` | `84,683,264` |
-| `detailer` | `8,965,249` |
-| total | `140,241,281` |
+| `weight_decay` | `0.01` |
 
 ## 3. Top-Level Forward Graph
 
-Let `B` be batch size, `R` be style reference count, `H=W=128`, `P=16`, `N=(H/P)^2=64`, `D=512`, and `S=1024`.
+Notation:
+
+- `B`: batch size
+- `R`: number of style references
+- `H = W = 128`
+- `P = 16`
+- `N = (H / P)^2 = 64`
+- `D = 512`
 
 Inputs:
 
@@ -96,447 +80,326 @@ Inputs:
 | `x_t_image` | `[B, 1, 128, 128]` |
 | `timesteps` | `[B]` |
 
-Top-level forward equations:
+Forward:
 
 ```text
-content_tokens = content_proj(encode_content_tokens(content_img))     # [B, 64, 512]
-style_global = encode_style_global(style_img, style_ref_mask)         # [B, 512]
-patch_tokens = backbone(x_t_image, timesteps,
-                        content_tokens=content_tokens,
-                        style_global=style_global)                    # [B, 64, 512]
-noisy_patches = patchify(x_t_image)                                  # [B, 64, 1, 16, 16]
-pred_patches = detailer(patch_tokens, noisy_patches)                  # [B, 64, 1, 16, 16]
-pred_flow = unpatchify(pred_patches)                                  # [B, 1, 128, 128]
+content_tokens = encode_content_tokens(content_img)                 # [B, 64, 512]
+content_tokens = content_proj(content_tokens)                       # [B, 64, 512]
+
+style_token_bank, token_valid_mask =
+    encode_style_token_bank(style_img, style_ref_mask)              # [B, R*64, 512], [B, R*64]
+
+fused_content_tokens = fuse_content_style_tokens(
+    content_tokens,
+    style_token_bank,
+    token_valid_mask=token_valid_mask,
+)                                                                   # [B, 64, 512]
+
+patch_tokens = backbone(
+    x_t_image,
+    timesteps,
+    content_tokens=fused_content_tokens,
+)                                                                   # [B, 64, 512]
+
+noisy_patches = patchify(x_t_image)                                 # [B, 64, 1, 16, 16]
+pred_patches = detailer(patch_tokens, noisy_patches)                # [B, 64, 1, 16, 16]
+pred_flow = unpatchify(pred_patches)                                # [B, 1, 128, 128]
 ```
 
-## 4. Content Encoder
+## 4. Content Path
 
 Implemented by `ContentEncoder` in `models/source_part_ref_dit.py`.
 
-Shape trace for `B=1`:
+Shape trace:
 
 | stage | shape |
 | --- | --- |
-| `content_input` | `(1, 1, 128, 128)` |
-| `stem` | `(1, 64, 64, 64)` |
-| `stem_resblock` | `(1, 64, 64, 64)` |
-| `downsample_0` | `(1, 128, 32, 32)` |
-| `resblock_0` | `(1, 128, 32, 32)` |
-| `downsample_1` | `(1, 256, 16, 16)` |
-| `resblock_1` | `(1, 256, 16, 16)` |
-| `downsample_2` | `(1, 512, 8, 8)` |
-| `resblock_2` | `(1, 512, 8, 8)` |
-| `flatten(2).transpose(1,2)` | `(1, 64, 512)` |
-| `content_proj` | `(1, 64, 512)` |
+| input | `[B, 1, 128, 128]` |
+| stem conv | `[B, 64, 64, 64]` |
+| stem residual block | `[B, 64, 64, 64]` |
+| downsample stage 1 | `[B, 128, 32, 32]` |
+| residual block 1 | `[B, 128, 32, 32]` |
+| downsample stage 2 | `[B, 256, 16, 16]` |
+| residual block 2 | `[B, 256, 16, 16]` |
+| downsample stage 3 | `[B, 512, 8, 8]` |
+| residual block 3 | `[B, 512, 8, 8]` |
+| flatten to tokens | `[B, 64, 512]` |
 
 Semantics:
 
-- the encoder downsamples content glyphs to the same `8x8` grid as the DiT patch lattice
-- after flattening, token index `n` is aligned with image patch index `n`
+- content tokens are spatially aligned with the `8x8` DiT patch lattice
+- token index matches patch index
 
-## 5. Style Encoder
+## 5. Style Path
 
-Implemented by `StyleEncoder` and `SourcePartRefDiT.encode_style_global`.
+Implemented by `StyleEncoder` and `ContentStyleCrossAttention` in `models/source_part_ref_dit.py`.
 
-For each sample, every style reference glyph is encoded independently to a `4x4x1024` feature map. The `4x4` spatial grid from all valid references is flattened and concatenated into `R*16` local tokens, then pooled once by a single-query attention pool without positional embedding and with `style_ref_mask` expanded to token-level masking. The pooled style vector is then compressed from `1024 -> 512` by a two-layer MLP projector with LayerNorm and GELU before entering the backbone.
+Each style reference is encoded independently, then regrouped per sample.
 
-Shape trace for `B=1`, `R=6`:
-
-| stage | shape |
-| --- | --- |
-| `style_input` | `(1, 6, 1, 128, 128)` |
-| `flatten_refs` | `(6, 1, 128, 128)` |
-| `downsample_0` | `(6, 64, 64, 64)` |
-| `resblock_0` | `(6, 64, 64, 64)` |
-| `downsample_1` | `(6, 128, 32, 32)` |
-| `resblock_1` | `(6, 128, 32, 32)` |
-| `downsample_2` | `(6, 256, 16, 16)` |
-| `resblock_2` | `(6, 256, 16, 16)` |
-| `downsample_3` | `(6, 512, 8, 8)` |
-| `resblock_3` | `(6, 512, 8, 8)` |
-| `downsample_4` | `(6, 1024, 4, 4)` |
-| `resblock_4` | `(6, 1024, 4, 4)` |
-| `flatten(2).transpose(1,2)` | `(6, 16, 1024)` |
-| `view(B, R*16, S)` | `(1, 96, 1024)` |
-| `expand style_ref_mask to token mask` | `(1, 96)` |
-| `style_pool.query` | `(1, 1, 1024)` |
-| `style_pool.attn` | `(1, 1, 1024)` |
-| `squeeze(1)` | `(1, 1024)` |
-| `style_proj` | MLP projector, `(1, 512)` |
-
-Exact aggregation:
-
-```text
-style_features_r = style_encoder(style_refs_r)              # [B*R, 1024, 4, 4]
-style_tokens_r = flatten_hw(style_features_r)               # [B*R, 16, 1024]
-style_tokens = reshape(style_tokens_r)                      # [B, R*16, 1024]
-token_mask = expand_ref_mask(style_ref_mask, 16)            # [B, R*16]
-
-pooled_style = style_pool(style_tokens, token_mask)         # [B, 1024]
-style_global = style_proj(pooled_style)                     # [B, 512]
-```
-
-Runtime constraint:
-
-- current flash-only style pooling requires every `style_ref_mask` entry to be valid; masked/padded refs are not supported
-- `style_pool` uses one learned query and no positional embedding, so all valid `R*16` spatial tokens are pooled as an unordered set
-- `style_proj` is `LayerNorm(1024) -> Linear(1024, 2048) -> GELU -> Linear(2048, 512)`
-
-## 6. Diffusion Transformer Backbone
-
-Implemented by `DiffusionTransformerBackbone` and `GlyphDiTBlock` in `models/diffusion_transformer_backbone.py`.
-
-### 6.1 Patch embedding and timestep embedding
-
-```text
-x = patch_embed(x_t_image).flatten(2).transpose(1,2)         # [B, 64, 512]
-x = x + pos_embed                                            # fixed 2D sin-cos, [1, 64, 512]
-time_cond = LayerNorm(time_mlp(timestep_embedding(t, 512)))  # [B, 512]
-```
-
-### 6.2 Layer plan
-
-Current default block usage:
-
-| block index | 1-based layer | content injection | style injection |
-| --- | --- | --- | --- |
-| `0` | `1` | yes | no |
-| `1` | `2` | yes | no |
-| `2` | `3` | yes | no |
-| `3` | `4` | yes | no |
-| `4` | `5` | yes | no |
-| `5` | `6` | yes | no |
-| `6` | `7` | no | yes |
-| `7` | `8` | no | yes |
-| `8` | `9` | no | yes |
-| `9` | `10` | no | yes |
-| `10` | `11` | no | yes |
-| `11` | `12` | no | yes |
-
-### 6.3 One `GlyphDiTBlock` forward order
-
-For one block `l`, input `x_l: [B, 64, 512]`, content tokens `c: [B, 64, 512]`, style global `s: [B, 512]`, timestep condition `t: [B, 512]`.
-
-#### 6.3.1 Unified token-wise conditioning from timestep, content, and style
-
-The timestep term is always present. Content is added only if layer `l` is in `content_injection_layers`. Style is added only if layer `l` is in `style_injection_layers`.
-
-```text
-t_attn_l = attn_time_to_token_l(attn_time_ln_l(t))[:, None, :]      # [B, 1, 512]
-t_attn_l = expand_to_64_tokens(t_attn_l)                            # [B, 64, 512]
-
-style_tokens_l = repeat(style_cond_ln_l(s), 64)                       # [B, 64, 512]
-
-joint_l = t_attn_l                                                    # [B, 64, 512]
-joint_l = joint_l + content_control_ln_l(c)        if content enabled
-joint_l = joint_l + style_tokens_l                  if style enabled
-
-shift_sa, scale_sa, gate_sa, shift_ffn, scale_ffn, gate_ffn =
-    joint_mod_l(joint_l)                                              # each [B, 64, 512]
-```
-
-Important details:
-
-- `joint_mod_l` is zero-initialized, so both attention and MLP conditioning start as a no-op
-- `attn_time_to_token_l` broadcasts timestep information to every patch token
-- `c.shape` must exactly match `x_l.shape`
-- style remains a single global vector per sample, but is repeated across the `64` patch positions before fusion
-
-#### 6.3.2 Unified-conditioned DiT block
-
-After building `joint_l`, the block runs one self-attention sublayer and one MLP sublayer using the six token-wise modulation tensors.
-
-```text
-self_h = modulate(self_ln_l(x_l), shift_sa, scale_sa)         # [B, 64, 512]
-self_out = self_attn_l(self_h, self_h, self_h)                # [B, 64, 512]
-x_l = x_l + gate_sa * self_out                                # [B, 64, 512]
-
-mlp_h = modulate(mlp_ln_l(x_l), shift_ffn, scale_ffn)         # [B, 64, 512]
-x_{l+1} = x_l + gate_ffn * mlp_l(mlp_h)                       # [B, 64, 512]
-```
-
-Where:
-
-```text
-modulate(x, shift, scale) = x * (1 + scale) + shift
-```
-
-`joint_mod_l` is zero-initialized on its final linear layer.
-
-### 6.4 Backbone output
-
-After all 12 blocks:
-
-```text
-patch_tokens = final_norm(x_12)      # [B, 64, 512]
-```
-
-## 7. Patch Detailer Head
-
-Implemented by `PatchDetailerHead` in `models/source_part_ref_dit.py`.
-
-Purpose:
-
-- refine each noisy `16x16` patch independently using the corresponding final transformer token
-- inject the token only at the `1x1` bottleneck of a shallow local U-Net
-
-Shape trace for `B=1`, `N=64`:
+Shape trace:
 
 | stage | shape |
 | --- | --- |
-| `noisy_patches` | `(1, 64, 1, 16, 16)` |
-| `patch_tokens` | `(1, 64, 512)` |
-| `flat_patches` | `(64, 1, 16, 16)` |
-| `flat_tokens` | `(64, 512)` |
-| `input_proj` | `(64, 64, 16, 16)` |
-| `downsample_block_0` | `(64, 64, 8, 8)` |
-| `downsample_block_1` | `(64, 128, 4, 4)` |
-| `downsample_block_2` | `(64, 256, 2, 2)` |
-| `downsample_block_3` | `(64, 512, 1, 1)` |
-| `context_proj(flat_tokens).view(...,1,1)` | `(64, 512, 1, 1)` |
-| `concat_context` | `(64, 1024, 1, 1)` |
-| `bottleneck` | `(64, 512, 1, 1)` |
-| `upsample_0 + concat_skip_0 + dec_block_0` | `(64, 256, 2, 2)` |
-| `upsample_1 + concat_skip_1 + dec_block_1` | `(64, 128, 4, 4)` |
-| `upsample_2 + concat_skip_2 + dec_block_2` | `(64, 64, 8, 8)` |
-| `upsample_3 + concat_skip_3 + dec_block_3` | `(64, 64, 16, 16)` |
-| `out_proj` | `(64, 1, 16, 16)` |
-| `pred_patches` | `(1, 64, 1, 16, 16)` |
-
-The final `out_proj` convolution is zero-initialized.
-
-## 8. Flow Training Objective
-
-Implemented by `FlowTrainer._compute_losses` in `models/model.py`.
-
-### 8.1 Flow matching path
-
-```text
-x1 = target
-x0 ~ Normal(0, I)
-t ~ Uniform(t_eps, 1 - t_eps), where t_eps = 0.02
-x_t = (1 - t) * x0 + t * x1
-target_flow = x1 - x0
-
-content_tokens = content_proj(encode_content_tokens(content))
-style_global = encode_style_global(style_img, style_ref_mask)
-pred_flow = predict_flow(x_t, t, content_tokens=content_tokens, style_global=style_global)
-pred_target = x_t + (1 - t) * pred_flow
-```
-
-### 8.2 Loss terms
-
-Total loss:
-
-```text
-loss =
-    flow_term
-  + perceptual_term
-  + style_term
-  + pixel_term
-```
-
-Base terms:
-
-```text
-loss_flow = mean_i(mean_pixels((pred_flow_i - target_flow_i)^2))
-flow_term = lambda_flow * loss_flow
-
-loss_pixel_i = mean_pixels(|pred_target_i - target_i|)
-loss_pixel = mean_i(loss_pixel_i)
-pixel_term = mean_i(pixel_weight_i * loss_pixel_i)
-```
-
-Frozen perceptor guidance terms, enabled only when `use_cnn_perceptor=True` and a perceptor checkpoint is loaded:
-
-```text
-loss_perceptual_i = sum_stage mean(|P_stage(pred_target_i) - P_stage(target_i)|)
-loss_style_embed_i = 1 - cosine(P_style(pred_target_i), P_style(target_i))
-
-perceptual_term = mean_i(perceptual_weight_i * loss_perceptual_i)
-style_term = mean_i(style_weight_i * loss_style_embed_i)
-```
-
-Logged style-global similarity diagnostics:
-
-```text
-style_pos_cos, style_neg_cos, style_cos_margin, style_pos_pairs, style_neg_pairs
-    = style_similarity_stats(style_global, font_id)
-```
-
-Logged conditioning-injection diagnostics:
-
-```text
-block_{l}_content_ratio
-```
-
-Where:
-
-```text
-block_{l}_content_ratio =
-    rms(self_ln_l(block_input_tokens_l) * content_attn_scale_l + content_attn_shift_l)
-    / rms(block_input_tokens_l)
-```
-
-`content_ratio` is a cheap pre-attention modulation proxy. An exact decomposition of the final attention residual into `t` and `content` parts would require an extra baseline attention pass, so the logged metric intentionally stays in modulation space.
-
-Runtime detail:
-
-- `style_similarity_stats` no longer builds a cosine matrix; it linearly scans the batch and evaluates at most `64` positive pairs and `64` negative pairs, so `style_pos_pairs` and `style_neg_pairs` are sampled pair counts rather than full-batch pair counts
-
-Time-dependent auxiliary weights:
-
-```text
-w(t; lambda, k, m) = lambda * normalized_sigmoid(k * (t - m))
-perceptual_weight_i = w(t_i; perceptual_loss_lambda, aux_loss_t_logistic_steepness, perceptual_loss_t_midpoint)
-style_weight_i      = w(t_i; style_loss_lambda,      aux_loss_t_logistic_steepness, style_loss_t_midpoint)
-pixel_weight_i      = w(t_i; pixel_loss_lambda,      aux_loss_t_logistic_steepness, pixel_loss_t_midpoint)
-```
-
-Optimizer learning-rate schedule:
-
-```text
-lr_scale(step) = hold-then-linear schedule with warmup, optional decay start, and min scale
-optimizer_lr(step) = base_lr * lr_scale(step)
-```
-
-### 8.3 Sampling path
-
-Implemented by `FlowTrainer.flow_sample`.
-
-```text
-sample_0 ~ Normal(0, I)
-dt = 1 / num_inference_steps
-content_tokens = content_proj(encode_content_tokens(content))
-style_global = encode_style_global(style_img, style_ref_mask)
-
-for k in 0..num_inference_steps-1:
-    t_k = k / num_inference_steps
-    pred_flow_k = predict_flow(sample_k, t_k, content_tokens=content_tokens, style_global=style_global)
-    sample_{k+1} = sample_k + dt * pred_flow_k
-
-sample = clamp(sample_K, -1, 1)
-```
-
-## 9. Font Perceptor Architecture
-
-Implemented by `FontPerceptor` in `models/font_perceptor.py`.
-
-Default configuration:
-
-| item | value |
-| --- | --- |
-| `in_channels` | `1` |
-| `base_channels` | `32` |
-| `proj_dim` | `128` |
-| `num_chars` | `1000` |
-| `dropout` | `0.0` |
-| `feature_stage_names` | `["stage1", "stage2", "stage3", "stage4"]` |
-
-Parameter counts from `inspect_font_perceptor.py`:
-
-| module | params |
-| --- | ---: |
-| `stem` | `5,344` |
-| `stage1` | `25,280` |
-| `stage2` | `68,096` |
-| `stage3` | `238,464` |
-| `stage4` | `446,848` |
-| `global_proj` | `66,304` |
-| `font_head` | `197,376` |
-| `char_head` | `322,792` |
-| total | `1,370,504` |
-
-Forward shape trace for `B=2`:
-
-| stage | shape |
-| --- | --- |
-| `input` | `(2, 1, 128, 128)` |
-| `stem` | `(2, 32, 64, 64)` |
-| `stage1` | `(2, 64, 32, 32)` |
-| `stage2` | `(2, 128, 16, 16)` |
-| `stage3` | `(2, 192, 8, 8)` |
-| `stage4` | `(2, 256, 4, 4)` |
-| `global_pool_flatten` | `(2, 256)` |
-| `global_feat` | `(2, 256)` |
-| `font_logits` | `(2, 512)` |
-| `char_logits` | `(2, 1000)` |
+| `style_img` | `[B, R, 1, 128, 128]` |
+| flatten refs | `[B*R, 1, 128, 128]` |
+| stage 0 | `[B*R, 64, 64, 64]` |
+| stage 1 | `[B*R, 128, 32, 32]` |
+| stage 2 | `[B*R, 256, 16, 16]` |
+| stage 3 | `[B*R, 512, 8, 8]` |
+| flatten per ref | `[B*R, 64, 512]` |
+| regroup refs | `[B, R, 64, 512]` |
+| concat refs | `[B, R*64, 512]` |
+| token valid mask | `[B, R*64]` |
+| style token projection | `[B, R*64, 512]` |
 
 Outputs:
 
-- `feature_maps`: selected intermediate CNN stages for perceptual loss
-- `global_feat`: pooled feature before heads
-- `font_logits`: font classifier logits
-- `char_logits`: character classifier logits
-
-## 10. Font Perceptor Pretraining Objective
-
-Implemented by `FontPerceptorTrainer._compute_losses`.
-
 ```text
-outputs = FontPerceptor(target)
-loss_char_ce = CrossEntropy(outputs["char_logits"], char_id)
-loss_font_ce = CrossEntropy(outputs["font_logits"], font_id)
-loss = loss_char_ce + font_loss_lambda(step) * loss_font_ce
+style_token_bank = [B, R*64, 512]
+token_valid_mask = [B, R*64]
 ```
 
-Training metrics additionally report:
+## 6. External Content-Style Cross Attention
 
-```text
-font_acc
-char_acc
-qualified_now = (char_acc >= qualify_min_char_acc)
-```
+The style fusion happens exactly once outside the backbone.
 
-`train_font_perceptor.py` writes `qualification_report.json` and stamps the same qualification payload into `best.pt` and `last.pt`.
-
-## 11. Current CLI Surface
-
-### 11.1 Main flow training
-
-`train.py` now accepts the current conditioning layer controls:
-
-```bash
---content-injection-layers 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16
---style-injection-layers 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16
-```
-
-Old runtime parameters removed from the runnable model path:
-
-- `--content-cross-attn-heads`
-- `--content-cross-attn-layers`
-- `--style-cross-attn-layers`
-- `--style-modulation-layers`
-
-### 11.2 Helper scripts
-
-`scripts/run_diffusion_colab.sh` and `scripts/profile_memory.py` use the same new layer names.
-
-`scripts/inspect_flow_model.py` traces:
-
-- content path
-- style global-vector path
-- backbone block-by-block conditioning plan
-- patch detailer path
-
-`scripts/inspect_font_perceptor.py` traces:
-
-- CNN stage outputs
-- pooled global feature
-- style embedding
-- character logits
-
-## 12. Code Map
-
-| component | file |
+| tensor | shape |
 | --- | --- |
-| main flow entry | `train.py` |
-| perceptor pretrain entry | `train_font_perceptor.py` |
-| dataset and samplers | `dataset.py` |
-| main generator wrapper, content/style encoders, patch detailer | `models/source_part_ref_dit.py` |
-| DiT backbone and conditioning blocks | `models/diffusion_transformer_backbone.py` |
-| SDPA attention wrapper | `models/sdpa_attention.py` |
-| flow trainer and perceptor trainer | `models/model.py` |
-| font perceptor model and frozen guidance wrapper | `models/font_perceptor.py` |
-| flow model shape inspector | `scripts/inspect_flow_model.py` |
-| perceptor shape inspector | `scripts/inspect_font_perceptor.py` |
+| query = `content_tokens` | `[B, 64, 512]` |
+| key = `style_token_bank` | `[B, R*64, 512]` |
+| value = `style_token_bank` | `[B, R*64, 512]` |
+| `style_context` | `[B, 64, 512]` |
+| fused content tokens | `[B, 64, 512]` |
+
+Equation:
+
+```text
+style_context = CrossAttention(
+    Q=[B, 64, 512],
+    K=[B, R*64, 512],
+    V=[B, R*64, 512],
+)
+
+fused_content = content_tokens + style_context
+```
+
+Properties:
+
+- cross-attention runs only once
+- multiple style references are concatenated along the token dimension
+- no additional style downsampling is applied before cross-attention
+- implementation uses `SDPAAttention`
+- intended CUDA fast path is flash attention
+- current path assumes all style refs are valid in the active batch
+
+## 7. DiT Backbone
+
+Implemented by `DiffusionTransformerBackbone` and `GlyphDiTBlock` in `models/diffusion_transformer_backbone.py`.
+
+### 7.1 Patch and Timestep Embedding
+
+```text
+x = patch_embed(x_t_image).flatten(2).transpose(1, 2)      # [B, 64, 512]
+x = x + pos_embed                                           # [B, 64, 512]
+
+time_cond = timestep_embedding(timesteps, 512)              # [B, 512]
+time_cond = time_mlp(time_cond)                             # [B, 512]
+time_cond = time_cond_norm(time_cond)                       # [B, 512]
+```
+
+### 7.2 Block Conditioning
+
+Each block receives:
+
+- current patch tokens
+- timestep conditioning
+- fused content tokens
+
+There is no style-specific conditioning path inside the backbone.
+
+## 8. RMS Modulation
+
+Active normalization bundle:
+
+- `norm_variant="rms"`
+- per branch parameters: `scale` and `gate`
+- all active norm layers use `elementwise_affine=False`
+
+Per block, a zero-initialized linear head predicts:
+
+```text
+self_attn_scale, self_attn_gate, ffn_scale, ffn_gate
+```
+
+Rule:
+
+```text
+norm_x = RMSNorm(x)
+modulated_x = norm_x * (1 + scale)
+x = x + gate * branch_out
+```
+
+There is no `shift` term in the active path.
+
+Cross-attention token normalization:
+
+- `query_norm = LayerNorm(512, elementwise_affine=False)`
+- `token_norm = LayerNorm(512, elementwise_affine=False)`
+- normalization is applied once before `q/k/v` projection
+
+## 9. SwiGLU Feed-Forward
+
+Each DiT block uses `FeedForward(..., activation="swiglu")`.
+
+FFN path:
+
+```text
+Linear(hidden_dim -> 2 * inner_dim)
+split into value and gate
+SiLU(gate) * value
+Linear(inner_dim -> hidden_dim)
+```
+
+With `hidden_dim = 512` and `mlp_ratio = 4.0`:
+
+| stage | shape |
+| --- | --- |
+| input | `[B, 64, 512]` |
+| first linear | `[B, 64, 4096]` |
+| split value/gate | `2 x [B, 64, 2048]` |
+| SwiGLU output | `[B, 64, 2048]` |
+| second linear | `[B, 64, 512]` |
+
+## 10. Full Backbone Shape Trace
+
+Each block preserves token shape.
+
+Inputs to one `GlyphDiTBlock`:
+
+| tensor | shape |
+| --- | --- |
+| `x_l` | `[B, 64, 512]` |
+| `time_cond` | `[B, 512]` |
+| `content_tokens` | `[B, 64, 512]` |
+
+Inside one block:
+
+| stage | shape |
+| --- | --- |
+| timestep token expansion | `[B, 64, 512]` |
+| content source after norm | `[B, 64, 512]` |
+| joint conditioning source | `[B, 64, 512]` |
+| modulation head output | `[B, 64, 2048]` |
+| split modulation tensors | `4 x [B, 64, 512]` |
+
+Modulation tensors:
+
+```text
+self_attn_scale = [B, 64, 512]
+self_attn_gate  = [B, 64, 512]
+ffn_scale       = [B, 64, 512]
+ffn_gate        = [B, 64, 512]
+```
+
+Full backbone:
+
+```text
+[B, 64, 512]
+ -> block 1
+ -> block 2
+ -> ...
+ -> block D
+ -> final RMS norm
+ = [B, 64, 512]
+```
+
+Backbone output:
+
+```text
+patch_tokens = [B, 64, 512]
+```
+
+## 11. Patch Detailer
+
+Implemented by `PatchDetailerHead`.
+
+Inputs:
+
+| tensor | shape |
+| --- | --- |
+| `patch_tokens` | `[B, 64, 512]` |
+| `noisy_patches` | `[B, 64, 1, 16, 16]` |
+
+Flattened internal tensors:
+
+| stage | shape |
+| --- | --- |
+| flat patch images | `[B*64, 1, 16, 16]` |
+| flat patch tokens | `[B*64, 512]` |
+
+Current channel plan:
+
+```text
+[64, 128, 256, 512]
+```
+
+Detailer shape trace:
+
+| stage | shape |
+| --- | --- |
+| input proj | `[B*64, 64, 16, 16]` |
+| down block 1 | `[B*64, 64, 8, 8]` |
+| down block 2 | `[B*64, 128, 4, 4]` |
+| down block 3 | `[B*64, 256, 2, 2]` |
+| down block 4 | `[B*64, 512, 1, 1]` |
+| context projection | `[B*64, 512, 1, 1]` |
+| concat bottleneck input | `[B*64, 1024, 1, 1]` |
+| bottleneck output | `[B*64, 512, 1, 1]` |
+| up path final feature | `[B*64, 64, 16, 16]` |
+| output projection | `[B*64, 1, 16, 16]` |
+| reshape back | `[B, 64, 1, 16, 16]` |
+
+Final output:
+
+```text
+pred_flow = [B, 1, 128, 128]
+```
+
+## 12. Training Path
+
+`FlowTrainer` optimizes pixel-space flow prediction.
+
+Optimizer:
+
+- `AdamW`
+- two param groups: `decay` and `no_decay`
+- `decay` group uses `weight_decay=0.01`
+- `no_decay` group uses `weight_decay=0.0`
+- `no_decay` covers parameters with `ndim <= 1`, explicit `.bias` parameters, and batch-norm style parameters if present
+
+Because the active norm modules use `elementwise_affine=False`, they do not contribute trainable norm weights or biases.
+
+Active losses:
+
+- flow MSE term
+- pixel reconstruction term
+- optional perceptual term when a perceptor checkpoint is explicitly enabled
+
+The architecture itself does not depend on the perceptor.
+
+## 13. Gradient Flow For Deduplicated Conditions
+
+Training batches deduplicate content and style encoder inputs before expanding them back to sample-level batches.
+
+Current behavior:
+
+- content/style encoder forward passes run on unique items only
+- expanded batch conditioning still drives the full DiT backbone and detailer
+- gradients returning to the deduplicated content/style condition banks are averaged by reuse count
+- averaged gradients still preserve differences from distinct `x_t / t / target` samples; only the duplicate-count scaling is removed
+- backbone and detailer gradients remain full-batch gradients
+
+So:
+
+- encoder-side shared condition tensors use mean gradient over repeated references
+- backbone-side modules still optimize against the full effective batch

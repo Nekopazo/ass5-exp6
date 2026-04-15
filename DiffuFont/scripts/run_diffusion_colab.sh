@@ -33,7 +33,7 @@ GRAD_CLIP_NORM="1.0"
 GRAD_CLIP_MIN_NORM="0.5"
 
 STYLE_REF_COUNT=0
-STYLE_REF_COUNT_MIN=3
+STYLE_REF_COUNT_MIN=4
 STYLE_REF_COUNT_MAX=6
 BATCH_SIZE=256
 NUM_WORKERS=2
@@ -42,20 +42,10 @@ IMAGE_SIZE=128
 
 PATCH_SIZE=16
 ENCODER_HIDDEN_DIM=512
-STYLE_HIDDEN_DIM=1024
 DIT_HIDDEN_DIM=512
-DIT_DEPTH=16
+DIT_DEPTH=12
 DIT_HEADS=8
 DIT_MLP_RATIO="4.0"
-FFN_ACTIVATION="swiglu"
-NORM_VARIANT="rms"
-STYLE_POOL_MODE="attention"
-STYLE_PROJ_MODE="mlp"
-CONTENT_INJECTION_LAYERS="1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16"
-STYLE_INJECTION_LAYERS="1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16"
-CONDITIONING_INJECTION_MODE="all"
-CONTENT_STYLE_FUSION="cross_attn"
-CONTENT_STYLE_FUSION_HEADS=4
 DETAILER_BASE_CHANNELS=64
 DETAILER_MAX_CHANNELS=512
 
@@ -123,20 +113,10 @@ while [[ $# -gt 0 ]]; do
     --image-size) IMAGE_SIZE="${2:?}"; shift 2 ;;
     --patch-size) PATCH_SIZE="${2:?}"; shift 2 ;;
     --encoder-hidden-dim) ENCODER_HIDDEN_DIM="${2:?}"; shift 2 ;;
-    --style-hidden-dim) STYLE_HIDDEN_DIM="${2:?}"; shift 2 ;;
     --dit-hidden-dim) DIT_HIDDEN_DIM="${2:?}"; shift 2 ;;
     --dit-depth) DIT_DEPTH="${2:?}"; shift 2 ;;
     --dit-heads) DIT_HEADS="${2:?}"; shift 2 ;;
     --dit-mlp-ratio) DIT_MLP_RATIO="${2:?}"; shift 2 ;;
-    --ffn-activation) FFN_ACTIVATION="${2:?}"; shift 2 ;;
-    --norm-variant) NORM_VARIANT="${2:?}"; shift 2 ;;
-    --style-pool-mode) STYLE_POOL_MODE="${2:?}"; shift 2 ;;
-    --style-proj-mode) STYLE_PROJ_MODE="${2:?}"; shift 2 ;;
-    --content-injection-layers) CONTENT_INJECTION_LAYERS="${2:?}"; shift 2 ;;
-    --style-injection-layers) STYLE_INJECTION_LAYERS="${2:?}"; shift 2 ;;
-    --conditioning-injection-mode) CONDITIONING_INJECTION_MODE="${2:?}"; shift 2 ;;
-    --content-style-fusion) CONTENT_STYLE_FUSION="${2:?}"; shift 2 ;;
-    --content-style-fusion-heads) CONTENT_STYLE_FUSION_HEADS="${2:?}"; shift 2 ;;
     --detailer-base-channels) DETAILER_BASE_CHANNELS="${2:?}"; shift 2 ;;
     --detailer-max-channels) DETAILER_MAX_CHANNELS="${2:?}"; shift 2 ;;
     --train-sampling) TRAIN_SAMPLING="${2:?}"; shift 2 ;;
@@ -156,7 +136,6 @@ fi
 if [[ -z "${EMA_START_STEP}" ]]; then
   EMA_START_STEP="$(( TARGET_STEPS / 2 + 1 ))"
 fi
-
 cd "${ROOT}"
 mkdir -p logs checkpoints
 
@@ -211,18 +190,10 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --image-size "${IMAGE_SIZE}"
     --patch-size "${PATCH_SIZE}"
     --encoder-hidden-dim "${ENCODER_HIDDEN_DIM}"
-    --style-hidden-dim "${STYLE_HIDDEN_DIM}"
     --dit-hidden-dim "${DIT_HIDDEN_DIM}"
     --dit-depth "${DIT_DEPTH}"
     --dit-heads "${DIT_HEADS}"
     --dit-mlp-ratio "${DIT_MLP_RATIO}"
-    --ffn-activation "${FFN_ACTIVATION}"
-    --norm-variant "${NORM_VARIANT}"
-    --style-pool-mode "${STYLE_POOL_MODE}"
-    --style-proj-mode "${STYLE_PROJ_MODE}"
-    --content-injection-layers "${CONTENT_INJECTION_LAYERS}"
-    --style-injection-layers "${STYLE_INJECTION_LAYERS}"
-    --conditioning-injection-mode "${CONDITIONING_INJECTION_MODE}"
     --detailer-base-channels "${DETAILER_BASE_CHANNELS}"
     --detailer-max-channels "${DETAILER_MAX_CHANNELS}"
     --train-sampling "${TRAIN_SAMPLING}"
@@ -422,15 +393,6 @@ cmd_common=(
   --dit-depth "${DIT_DEPTH}"
   --dit-heads "${DIT_HEADS}"
   --dit-mlp-ratio "${DIT_MLP_RATIO}"
-  --ffn-activation "${FFN_ACTIVATION}"
-  --norm-variant "${NORM_VARIANT}"
-  --style-pool-mode "${STYLE_POOL_MODE}"
-  --style-proj-mode "${STYLE_PROJ_MODE}"
-  --content-injection-layers "${CONTENT_INJECTION_LAYERS}"
-  --style-injection-layers "${STYLE_INJECTION_LAYERS}"
-  --conditioning-injection-mode "${CONDITIONING_INJECTION_MODE}"
-  --content-style-fusion "${CONTENT_STYLE_FUSION}"
-  --content-style-fusion-heads "${CONTENT_STYLE_FUSION_HEADS}"
   --detailer-base-channels "${DETAILER_BASE_CHANNELS}"
   --detailer-max-channels "${DETAILER_MAX_CHANNELS}"
   --train-sampling "${TRAIN_SAMPLING}"
@@ -479,10 +441,10 @@ echo "[run_diffusion_colab] perceptor_checkpoint=${PERCEPTOR_CHECKPOINT:-<none>}
 echo "[run_diffusion_colab] batch=${BATCH_SIZE} lr=${LR} lr_warmup_steps=${LR_WARMUP_STEPS} lr_decay_start_step=${LR_DECAY_START_STEP} lr_min_scale=${LR_MIN_SCALE} grad_clip_norm=${GRAD_CLIP_NORM}"
 echo "[run_diffusion_colab] style_ref_count=${STYLE_REF_COUNT} style_ref_count_min=${STYLE_REF_COUNT_MIN} style_ref_count_max=${STYLE_REF_COUNT_MAX}"
 echo "[run_diffusion_colab] patch_size=${PATCH_SIZE} image_size=${IMAGE_SIZE} flow_sample_steps=${FLOW_SAMPLE_STEPS} flow_lambda=${FLOW_LAMBDA} ema_decay=${EMA_DECAY} ema_start_step=${EMA_START_STEP}"
-echo "[run_diffusion_colab] dit_heads=${DIT_HEADS} ffn_activation=${FFN_ACTIVATION} norm_variant=${NORM_VARIANT} style_pool_mode=${STYLE_POOL_MODE} style_proj_mode=${STYLE_PROJ_MODE}"
+echo "[run_diffusion_colab] dit_heads=${DIT_HEADS} main_path=swiglu+rms+cross_attn content_style_fusion_heads=4"
 echo "[run_diffusion_colab] perceptual_loss_lambda=${PERCEPTUAL_LOSS_LAMBDA} pixel_loss_lambda=${PIXEL_LOSS_LAMBDA} aux_loss_t_logistic_steepness=${AUX_LOSS_T_LOGISTIC_STEEPNESS} perceptual_loss_t_midpoint=${PERCEPTUAL_LOSS_T_MIDPOINT} pixel_loss_t_midpoint=${PIXEL_LOSS_T_MIDPOINT}"
 echo "[run_diffusion_colab] detailer_base_channels=${DETAILER_BASE_CHANNELS} detailer_max_channels=${DETAILER_MAX_CHANNELS}"
-echo "[run_diffusion_colab] content_injection_layers=${CONTENT_INJECTION_LAYERS} style_injection_layers=${STYLE_INJECTION_LAYERS} conditioning_injection_mode=${CONDITIONING_INJECTION_MODE} content_style_fusion=${CONTENT_STYLE_FUSION} content_style_fusion_heads=${CONTENT_STYLE_FUSION_HEADS}"
+echo "[run_diffusion_colab] content_injection_layers=1..${DIT_DEPTH}"
 echo "[run_diffusion_colab] train_sampling=${TRAIN_SAMPLING} cartesian_fonts_per_batch=${CARTESIAN_FONTS_PER_BATCH} cartesian_chars_per_batch=${CARTESIAN_CHARS_PER_BATCH}"
 
 attempt=1

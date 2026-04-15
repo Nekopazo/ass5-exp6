@@ -36,6 +36,77 @@ def _metrics_to_floats(metrics: Dict[str, torch.Tensor | float | int]) -> Dict[s
     return output
 
 
+def _parameter_is_no_decay(name: str, param: torch.nn.Parameter) -> bool:
+    lowered = str(name).lower()
+    if not param.requires_grad:
+        return False
+    if param.ndim <= 1:
+        return True
+    return lowered.endswith(".bias") or "bn" in lowered
+
+
+def _build_adamw_param_groups(
+    model: nn.Module,
+    *,
+    base_lr: float,
+    weight_decay: float,
+) -> tuple[list[dict], list[float], list[torch.nn.Parameter]]:
+    decay_params: list[torch.nn.Parameter] = []
+    no_decay_params: list[torch.nn.Parameter] = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        is_no_decay = _parameter_is_no_decay(name, param)
+        if is_no_decay:
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+
+    param_groups: list[dict] = []
+    base_lrs: list[float] = []
+
+    def _append_group(params: list[torch.nn.Parameter], *, lr: float, group_weight_decay: float) -> None:
+        if not params:
+            return
+        param_groups.append(
+            {
+                "params": params,
+                "lr": float(lr),
+                "weight_decay": float(group_weight_decay),
+            }
+        )
+        base_lrs.append(float(lr))
+
+    _append_group(decay_params, lr=float(base_lr), group_weight_decay=float(weight_decay))
+    _append_group(no_decay_params, lr=float(base_lr), group_weight_decay=0.0)
+    trainable_params = decay_params + no_decay_params
+    return param_groups, base_lrs, trainable_params
+
+
+def _apply_weight_decay_to_optimizer(optimizer: torch.optim.Optimizer, weight_decay: float) -> None:
+    for group in optimizer.param_groups:
+        current = float(group.get("weight_decay", 0.0))
+        group["weight_decay"] = 0.0 if current == 0.0 else float(weight_decay)
+
+
+class _ReuseCountMeanGrad(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, expanded: torch.Tensor, condition_index: torch.Tensor) -> torch.Tensor:
+        index = condition_index.to(device=expanded.device, dtype=torch.long)
+        counts = torch.bincount(index, minlength=int(expanded.size(0))).to(device=expanded.device)
+        ctx.save_for_backward(index, counts)
+        return expanded
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, None]:
+        index, counts = ctx.saved_tensors
+        scale = counts.index_select(0, index).clamp_min_(1).to(dtype=grad_output.dtype)
+        while scale.ndim < grad_output.ndim:
+            scale = scale.unsqueeze(-1)
+        return grad_output / scale, None
+
+
 def _hold_then_linear_scale(
     *,
     step: int,
@@ -198,13 +269,17 @@ class _BaseTrainer:
         self.val_log_file: Optional[Path] = None
         self.best_val_loss: Optional[float] = None
 
-        params = [param for param in self.model.parameters() if param.requires_grad]
-        if not params:
-            raise RuntimeError("No trainable parameters found.")
-        self.trainable_params = params
         self.weight_decay = max(0.0, float(weight_decay))
-        self.optimizer = torch.optim.AdamW(params, lr=float(lr), weight_decay=self.weight_decay)
-        self.base_lrs = [float(group["lr"]) for group in self.optimizer.param_groups]
+        param_groups, base_lrs, trainable_params = _build_adamw_param_groups(
+            self.model,
+            base_lr=float(lr),
+            weight_decay=self.weight_decay,
+        )
+        if not trainable_params:
+            raise RuntimeError("No trainable parameters found.")
+        self.trainable_params = trainable_params
+        self.optimizer = torch.optim.AdamW(param_groups)
+        self.base_lrs = base_lrs
         self.lr_warmup_steps = max(0, int(lr_warmup_steps))
         self.lr_decay_start_step = None if lr_decay_start_step is None else max(0, int(lr_decay_start_step))
         self.lr_min_scale = float(min(max(0.0, float(lr_min_scale)), 1.0))
@@ -628,8 +703,7 @@ class FontPerceptorTrainer(_BaseTrainer):
                 self.lr_min_scale = float(min(max(0.0, float(trainer_config["lr_min_scale"])), 1.0))
             if "weight_decay" in trainer_config:
                 self.weight_decay = max(0.0, float(trainer_config["weight_decay"]))
-                for group in self.optimizer.param_groups:
-                    group["weight_decay"] = self.weight_decay
+                _apply_weight_decay_to_optimizer(self.optimizer, self.weight_decay)
             if "font_loss_lambda_start" in trainer_config:
                 self.font_loss_lambda_start = max(0.0, float(trainer_config["font_loss_lambda_start"]))
             if "font_loss_lambda_end" in trainer_config:
@@ -686,6 +760,7 @@ class FlowTrainer(_BaseTrainer):
         val_max_batches: Optional[int] = 16,
         grad_clip_norm: Optional[float] = 1.0,
         grad_clip_min_norm: Optional[float] = None,
+        weight_decay: float = 0.01,
     ) -> None:
         super().__init__(
             model,
@@ -701,6 +776,7 @@ class FlowTrainer(_BaseTrainer):
             val_max_batches=val_max_batches,
             grad_clip_norm=grad_clip_norm,
             grad_clip_min_norm=grad_clip_min_norm,
+            weight_decay=weight_decay,
             track_best_on_val=True,
         )
         self.lambda_flow = float(lambda_flow)
@@ -806,8 +882,13 @@ class FlowTrainer(_BaseTrainer):
         self,
         condition: torch.Tensor,
         condition_index: torch.Tensor,
+        *,
+        average_grad_by_reuse: bool = False,
     ) -> torch.Tensor:
-        return condition.index_select(0, condition_index.to(device=condition.device, dtype=torch.long))
+        expanded = condition.index_select(0, condition_index.to(device=condition.device, dtype=torch.long))
+        if average_grad_by_reuse and expanded.requires_grad:
+            expanded = _ReuseCountMeanGrad.apply(expanded, condition_index)
+        return expanded
 
     def _encode_conditions(
         self,
@@ -817,36 +898,29 @@ class FlowTrainer(_BaseTrainer):
         style: torch.Tensor,
         style_ref_mask: Optional[torch.Tensor],
         style_index: torch.Tensor,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> torch.Tensor:
         unique_content_tokens = model.encode_content_tokens(content)
         unique_content_tokens = model.content_proj(unique_content_tokens)
-        content_tokens = self._expand_condition_batch(unique_content_tokens, content_index)
-
-        style_global = None
-        style_embedding_for_stats = None
-        style_token_bank = None
-        style_token_valid_mask = None
-        if model.backbone.has_style_injection or model.content_style_attn is not None:
-            style_global_bank, style_token_bank, style_token_valid_mask = model.encode_style_condition_bank(
-                style_img=style,
-                style_ref_mask=style_ref_mask,
-            )
-            style_embedding_for_stats = self._expand_condition_batch(style_global_bank, style_index)
-        if model.backbone.has_style_injection:
-            if style_global_bank is None:
-                raise RuntimeError("style_global_bank must exist when backbone style injection is enabled")
-            style_global = style_embedding_for_stats
-        if style_token_bank is not None:
-            expanded_style_tokens = self._expand_condition_batch(style_token_bank, style_index)
-            if style_token_valid_mask is None:
-                raise RuntimeError("style_token_valid_mask must exist when style token bank is enabled")
-            expanded_style_token_valid_mask = self._expand_condition_batch(style_token_valid_mask, style_index)
-            content_tokens = model.fuse_content_style_tokens(
-                content_tokens,
-                expanded_style_tokens,
-                token_valid_mask=expanded_style_token_valid_mask,
-            )
-        return content_tokens, style_global, style_embedding_for_stats
+        content_tokens = self._expand_condition_batch(
+            unique_content_tokens,
+            content_index,
+            average_grad_by_reuse=True,
+        )
+        style_token_bank, style_token_valid_mask = model.encode_style_token_bank(
+            style_img=style,
+            style_ref_mask=style_ref_mask,
+        )
+        expanded_style_tokens = self._expand_condition_batch(
+            style_token_bank,
+            style_index,
+            average_grad_by_reuse=True,
+        )
+        expanded_style_token_valid_mask = self._expand_condition_batch(style_token_valid_mask, style_index)
+        return model.fuse_content_style_tokens(
+            content_tokens,
+            expanded_style_tokens,
+            token_valid_mask=expanded_style_token_valid_mask,
+        )
 
     def _compute_losses(
         self,
@@ -877,7 +951,7 @@ class FlowTrainer(_BaseTrainer):
             t_view = timesteps.view(-1, 1, 1, 1).to(dtype=x1.dtype)
             xt = (1.0 - t_view) * x0 + t_view * x1
             target_flow = x1 - x0
-            content_tokens, style_global, _ = self._encode_conditions(
+            content_tokens = self._encode_conditions(
                 model,
                 content,
                 content_index,
@@ -889,7 +963,6 @@ class FlowTrainer(_BaseTrainer):
                 xt,
                 timesteps,
                 content_tokens=content_tokens,
-                style_global=style_global,
             )
             loss_flow_per_sample = (pred_flow.float() - target_flow.float()).pow(2).reshape(target.size(0), -1).mean(dim=1)
             loss_flow = loss_flow_per_sample.mean()
@@ -998,7 +1071,7 @@ class FlowTrainer(_BaseTrainer):
         step_count = self.flow_sample_steps if num_inference_steps is None else max(1, int(num_inference_steps))
         dt = 1.0 / float(step_count)
         with self._autocast_context():
-            content_tokens, style_global, _ = self._encode_conditions(
+            content_tokens = self._encode_conditions(
                 sample_model,
                 content,
                 content_index,
@@ -1017,7 +1090,6 @@ class FlowTrainer(_BaseTrainer):
                     sample,
                     t,
                     content_tokens=content_tokens,
-                    style_global=style_global,
                 )
                 sample = sample + dt * pred_flow
 
@@ -1036,6 +1108,7 @@ class FlowTrainer(_BaseTrainer):
                     "lr_warmup_steps": int(self.lr_warmup_steps),
                     "lr_decay_start_step": None if self.lr_decay_start_step is None else int(self.lr_decay_start_step),
                     "lr_min_scale": float(self.lr_min_scale),
+                    "weight_decay": float(self.weight_decay),
                     "flow_sample_steps": int(self.flow_sample_steps),
                     "ema_decay": float(self.ema_decay),
                     "ema_start_step": int(self.ema_start_step),
@@ -1076,6 +1149,9 @@ class FlowTrainer(_BaseTrainer):
                 self.lr_decay_start_step = None if lr_decay_start_step is None else max(0, int(lr_decay_start_step))
             if "lr_min_scale" in trainer_config:
                 self.lr_min_scale = float(min(max(0.0, float(trainer_config["lr_min_scale"])), 1.0))
+            if "weight_decay" in trainer_config:
+                self.weight_decay = max(0.0, float(trainer_config["weight_decay"]))
+                _apply_weight_decay_to_optimizer(self.optimizer, self.weight_decay)
             if "flow_sample_steps" in trainer_config:
                 self.flow_sample_steps = max(1, int(trainer_config["flow_sample_steps"]))
             if "ema_decay" in trainer_config:
