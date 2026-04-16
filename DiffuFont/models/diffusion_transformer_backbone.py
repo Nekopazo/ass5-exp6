@@ -204,16 +204,6 @@ class GlyphDiTBlock(nn.Module):
         self.hidden_dim = int(hidden_dim)
         self.use_content_injection = bool(use_content_injection)
         self.norm_variant = _normalize_norm_variant(norm_variant)
-        self.content_control_norm = (
-            _build_norm(hidden_dim, norm_variant=self.norm_variant)
-            if self.use_content_injection
-            else None
-        )
-        self.attn_time_norm = _build_norm(hidden_dim, norm_variant=self.norm_variant)
-        self.attn_time_to_token = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-        )
         joint_out_dim = hidden_dim * (4 if self.norm_variant == "rms" else 6)
         self.joint_mod = _build_zero_linear(hidden_dim, joint_out_dim)
         self.dit_block = DiTBlock(
@@ -228,25 +218,15 @@ class GlyphDiTBlock(nn.Module):
         self,
         patch_tokens: torch.Tensor,
         *,
-        time_cond: torch.Tensor,
-        content_tokens: torch.Tensor | None,
+        conditioning_tokens: torch.Tensor,
     ) -> torch.Tensor:
         x = patch_tokens
-        attn_time_tokens = self.attn_time_to_token(self.attn_time_norm(time_cond)).unsqueeze(1).expand_as(x)
-        sa_source = attn_time_tokens
-        if self.use_content_injection:
-            if (
-                content_tokens is None
-                or self.content_control_norm is None
-            ):
-                raise RuntimeError("content_tokens must be provided when content injection is enabled")
-            if content_tokens.shape != x.shape:
-                raise RuntimeError(
-                    "content token shape mismatch: "
-                    f"expected {tuple(x.shape)}, got {tuple(content_tokens.shape)}"
-                )
-            content_source = self.content_control_norm(content_tokens)
-            sa_source = sa_source + content_source
+        if conditioning_tokens.shape != x.shape:
+            raise RuntimeError(
+                "conditioning token shape mismatch: "
+                f"expected {tuple(x.shape)}, got {tuple(conditioning_tokens.shape)}"
+            )
+        sa_source = conditioning_tokens
 
         if self.norm_variant == "rms":
             self_attn_scale, self_attn_gate, ffn_scale, ffn_gate = self.joint_mod(sa_source).chunk(4, dim=-1)
@@ -408,17 +388,22 @@ class DiffusionTransformerBackbone(nn.Module):
         time_cond = timestep_embedding(timesteps, self.hidden_dim).to(dtype=x.dtype)
         time_cond = self.time_mlp(time_cond)
         time_cond = self.time_cond_norm(time_cond)
+        time_tokens = time_cond.unsqueeze(1).expand(-1, self.num_tokens, -1)
+        fused_conditioning_tokens = time_tokens
 
         if self.has_content_injection:
             content_tokens = content_tokens.to(device=x.device, dtype=x.dtype)
-        else:
-            content_tokens = None
+            if content_tokens.shape != x.shape:
+                raise RuntimeError(
+                    "content token shape mismatch: "
+                    f"expected {tuple(x.shape)}, got {tuple(content_tokens.shape)}"
+                )
+            fused_conditioning_tokens = time_tokens + content_tokens
 
         for block in self.blocks:
             x = block(
                 x,
-                time_cond=time_cond,
-                content_tokens=content_tokens if block.use_content_injection else None,
+                conditioning_tokens=fused_conditioning_tokens if block.use_content_injection else time_tokens,
             )
 
         x = self.final_norm(x)

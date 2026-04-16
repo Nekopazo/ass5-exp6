@@ -68,53 +68,6 @@ class ConvSiLU(nn.Module):
         return F.silu(self.conv(x))
 
 
-class TimeConditionedConvSiLU(nn.Module):
-    """Two-conv residual block with additive time conditioning between convs."""
-
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        *,
-        time_dim: int,
-        kernel_size: int = 3,
-        padding: int = 1,
-        second_stride: int = 1,
-    ) -> None:
-        super().__init__()
-        self.in_channels = int(in_channels)
-        self.out_channels = int(out_channels)
-        self.second_stride = int(second_stride)
-        self.conv1 = nn.Conv2d(
-            in_channels,
-            out_channels,
-            kernel_size=kernel_size,
-            padding=padding,
-            stride=1,
-        )
-        self.conv2 = nn.Conv2d(
-            out_channels,
-            out_channels,
-            kernel_size=kernel_size,
-            padding=padding,
-            stride=second_stride,
-        )
-        self.time_proj = nn.Linear(int(time_dim), int(out_channels))
-        self.skip = (
-            nn.Identity()
-            if self.in_channels == self.out_channels and self.second_stride == 1
-            else nn.Conv2d(self.in_channels, self.out_channels, kernel_size=1, stride=self.second_stride)
-        )
-
-    def forward(self, x: torch.Tensor, time_emb: torch.Tensor) -> torch.Tensor:
-        residual = self.skip(x)
-        x = self.conv1(x)
-        x = x + self.time_proj(time_emb).view(time_emb.size(0), -1, 1, 1)
-        x = F.silu(x)
-        x = self.conv2(x)
-        return F.silu(x + residual)
-
-
 class ConvPyramidEncoder(nn.Module):
     """Shared CNN pyramid template used by both content and style encoders."""
 
@@ -339,7 +292,7 @@ class ContentStyleCrossAttention(nn.Module):
             key_padding_mask=None,
             need_weights=False,
         )
-        return content_tokens + style_context
+        return style_context
 
 class PatchDetailerHead(nn.Module):
     """Per-patch local refiner conditioned on the final DiT token."""
@@ -371,38 +324,30 @@ class PatchDetailerHead(nn.Module):
             min(self.base_channels * (2**idx), self.max_channels)
             for idx in range(self.depth)
         ]
-        self.time_mlp = nn.Sequential(
-            nn.Linear(self.context_dim, self.context_dim),
-            nn.SiLU(),
-            nn.Linear(self.context_dim, self.context_dim),
-        )
-
-        self.input_proj = TimeConditionedConvSiLU(
+        self.input_proj = ConvSiLU(
             self.in_channels,
             self.stage_channels[0],
-            time_dim=self.context_dim,
             kernel_size=3,
             padding=1,
-            second_stride=1,
         )
+        self.input_pool = nn.MaxPool2d(kernel_size=2, stride=2)
 
         self.downsample_blocks = nn.ModuleList()
+        self.downsample_pools = nn.ModuleList()
         prev_channels = self.stage_channels[0]
-        for stage_idx, ch in enumerate(self.stage_channels):
-            in_ch = prev_channels if stage_idx > 0 else self.stage_channels[0]
+        for ch in self.stage_channels[1:]:
             self.downsample_blocks.append(
-                TimeConditionedConvSiLU(
-                    in_ch,
+                ConvSiLU(
+                    prev_channels,
                     ch,
-                    time_dim=self.context_dim,
                     kernel_size=3,
                     padding=1,
-                    second_stride=2,
                 )
             )
+            self.downsample_pools.append(nn.MaxPool2d(kernel_size=2, stride=2))
             prev_channels = ch
 
-        self.skip_channels = [self.stage_channels[0], *self.stage_channels[:-1]]
+        self.skip_channels = list(self.stage_channels)
 
         self.bottleneck = ConvSiLU(
             self.stage_channels[-1] + self.bottleneck_channels,
@@ -417,13 +362,11 @@ class PatchDetailerHead(nn.Module):
         for skip_ch in reversed(self.skip_channels):
             self.upsample_layers.append(nn.Upsample(scale_factor=2, mode="nearest"))
             self.dec_blocks.append(
-                TimeConditionedConvSiLU(
+                ConvSiLU(
                     current_ch + skip_ch,
                     skip_ch,
-                    time_dim=self.context_dim,
                     kernel_size=3,
                     padding=1,
-                    second_stride=1,
                 )
             )
             current_ch = skip_ch
@@ -436,14 +379,11 @@ class PatchDetailerHead(nn.Module):
         self,
         patch_tokens: torch.Tensor,
         noisy_patches: torch.Tensor,
-        timesteps: torch.Tensor,
     ) -> torch.Tensor:
         if patch_tokens.dim() != 3:
             raise ValueError(f"patch_tokens must be 3D, got {tuple(patch_tokens.shape)}")
         if noisy_patches.dim() != 5:
             raise ValueError(f"noisy_patches must be 5D, got {tuple(noisy_patches.shape)}")
-        if timesteps.dim() != 1:
-            raise ValueError(f"timesteps must be 1D, got {tuple(timesteps.shape)}")
         batch, patch_count, channels, patch_h, patch_w = noisy_patches.shape
         if channels != self.in_channels:
             raise ValueError(
@@ -459,27 +399,18 @@ class PatchDetailerHead(nn.Module):
                 "patch_tokens and noisy_patches must share batch/patch dims: "
                 f"patch_tokens={tuple(patch_tokens.shape)} noisy_patches={tuple(noisy_patches.shape)}"
             )
-        if timesteps.size(0) != batch:
-            raise ValueError(
-                f"timesteps batch mismatch: expected {batch}, got {int(timesteps.size(0))}"
-            )
 
         flat_patches = noisy_patches.reshape(batch * patch_count, channels, patch_h, patch_w)
         flat_tokens = patch_tokens.reshape(batch * patch_count, patch_tokens.size(-1))
-        time_embed = timestep_embedding(timesteps, self.context_dim).to(dtype=flat_tokens.dtype)
-        time_embed = self.time_mlp(time_embed)
-        flat_time = time_embed[:, None, :].expand(batch, patch_count, self.context_dim).reshape(
-            batch * patch_count,
-            self.context_dim,
-        )
 
         skips: list[torch.Tensor] = []
-        x = self.input_proj(flat_patches, flat_time)
+        x = self.input_proj(flat_patches)
         skips.append(x)
-        for stage_idx, downsample in enumerate(self.downsample_blocks):
-            x = downsample(x, flat_time)
-            if stage_idx < len(self.downsample_blocks) - 1:
-                skips.append(x)
+        x = self.input_pool(x)
+        for downsample, pool in zip(self.downsample_blocks, self.downsample_pools):
+            x = downsample(x)
+            skips.append(x)
+            x = pool(x)
 
         if flat_tokens.size(-1) != self.bottleneck_channels:
             raise ValueError(
@@ -499,7 +430,7 @@ class PatchDetailerHead(nn.Module):
             if x.shape[-2:] != skip.shape[-2:]:
                 x = F.interpolate(x, size=skip.shape[-2:], mode="nearest")
             x = torch.cat([x, skip], dim=1)
-            x = dec_block(x, flat_time)
+            x = dec_block(x)
 
         x = self.out_proj(x)
         return x.view(batch, patch_count, self.in_channels, self.patch_size, self.patch_size)
@@ -592,6 +523,12 @@ class SourcePartRefDiT(nn.Module):
             embed_dim=self.dit_hidden_dim,
             num_heads=self.content_style_fusion_heads,
         )
+        self.content_style_fusion_norm = nn.LayerNorm(
+            self.dit_hidden_dim * 2,
+            elementwise_affine=False,
+            eps=1e-6,
+        )
+        self.content_style_fusion_proj = nn.Linear(self.dit_hidden_dim * 2, self.dit_hidden_dim)
         self.backbone = DiffusionTransformerBackbone(
             in_channels=self.in_channels,
             image_size=self.image_size,
@@ -691,11 +628,14 @@ class SourcePartRefDiT(nn.Module):
         *,
         token_valid_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return self.content_style_attn(
+        style_context = self.content_style_attn(
             content_tokens,
             style_tokens,
             token_valid_mask=token_valid_mask,
         )
+        fused_tokens = torch.cat([content_tokens, style_context], dim=-1)
+        fused_tokens = self.content_style_fusion_norm(fused_tokens)
+        return self.content_style_fusion_proj(fused_tokens)
 
     def _patchify(self, x: torch.Tensor) -> torch.Tensor:
         patches = F.unfold(x, kernel_size=self.patch_size, stride=self.patch_size)
@@ -742,7 +682,7 @@ class SourcePartRefDiT(nn.Module):
             content_tokens=content_tokens,
         )
         noisy_patches = self._patchify(x_t_image)
-        pred_patches = self.detailer(patch_tokens, noisy_patches, timesteps)
+        pred_patches = self.detailer(patch_tokens, noisy_patches)
         pred_flow = self._unpatchify(pred_patches)
         return pred_flow
 

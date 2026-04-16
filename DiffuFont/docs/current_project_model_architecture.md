@@ -181,6 +181,8 @@ The style fusion happens exactly once outside the backbone.
 | key = `style_token_bank` | `[B, R*64, 512]` |
 | value = `style_token_bank` | `[B, R*64, 512]` |
 | `style_context` | `[B, 64, 512]` |
+| concat(`content_tokens`, `style_context`) | `[B, 64, 1024]` |
+| fusion norm | `[B, 64, 1024]` |
 | fused content tokens | `[B, 64, 512]` |
 
 Equation:
@@ -192,12 +194,17 @@ style_context = CrossAttention(
     V=[B, R*64, 512],
 )
 
-fused_content = content_tokens + style_context
+fused_content = Linear(1024 -> 512)(
+    LayerNorm(1024)(
+        concat([content_tokens, style_context], dim=-1)
+    )
+)
 ```
 
 Properties:
 
 - cross-attention runs only once
+- content/style fusion is learned, not residual addition
 - multiple style references are concatenated along the token dimension
 - no additional style downsampling is applied before cross-attention
 - implementation uses `SDPAAttention`
@@ -217,17 +224,24 @@ x = x + pos_embed                                           # [B, 64, 512]
 time_cond = timestep_embedding(timesteps, 512)              # [B, 512]
 time_cond = time_mlp(time_cond)                             # [B, 512]
 time_cond = time_cond_norm(time_cond)                       # [B, 512]
+time_tokens = time_cond.unsqueeze(1).expand(-1, 64, -1)     # [B, 64, 512]
 ```
 
 ### 7.2 Block Conditioning
 
+Backbone-level conditioning is prepared once before the block stack:
+
+```text
+conditioning_tokens = time_tokens + fused_content_tokens
+```
+
 Each block receives:
 
 - current patch tokens
-- timestep conditioning
-- fused content tokens
+- conditioning tokens
 
 There is no style-specific conditioning path inside the backbone.
+There is also no per-block timestep projection anymore; per-block differences come from each block's own `joint_mod`.
 
 ## 8. RMS Modulation
 
@@ -341,7 +355,6 @@ Inputs:
 | --- | --- |
 | `patch_tokens` | `[B, 64, 512]` |
 | `noisy_patches` | `[B, 64, 1, 16, 16]` |
-| `timesteps` | `[B]` |
 
 Flattened internal tensors:
 
@@ -349,7 +362,6 @@ Flattened internal tensors:
 | --- | --- |
 | flat patch images | `[B*64, 1, 16, 16]` |
 | flat patch tokens | `[B*64, 512]` |
-| flat time embedding | `[B*64, 512]` |
 
 Current channel plan:
 
@@ -361,33 +373,29 @@ Detailer shape trace:
 
 | stage | shape |
 | --- | --- |
-| timestep embedding + MLP | `[B, 512]` |
-| input block (`conv1 -> +t -> SiLU -> conv2 -> +skip -> SiLU`) | `[B*64, 64, 16, 16]` |
-| down block 1 (`conv1 -> +t -> SiLU -> conv2(stride=2) -> +skip -> SiLU`) | `[B*64, 64, 8, 8]` |
-| down block 2 (`conv1 -> +t -> SiLU -> conv2(stride=2) -> +skip -> SiLU`) | `[B*64, 128, 4, 4]` |
-| down block 3 (`conv1 -> +t -> SiLU -> conv2(stride=2) -> +skip -> SiLU`) | `[B*64, 256, 2, 2]` |
-| down block 4 (`conv1 -> +t -> SiLU -> conv2(stride=2) -> +skip -> SiLU`) | `[B*64, 512, 1, 1]` |
+| input block (`conv -> SiLU`) | `[B*64, 64, 16, 16]` |
+| max pool 1 | `[B*64, 64, 8, 8]` |
+| down block 1 (`conv -> SiLU`) | `[B*64, 128, 8, 8]` |
+| max pool 2 | `[B*64, 128, 4, 4]` |
+| down block 2 (`conv -> SiLU`) | `[B*64, 256, 4, 4]` |
+| max pool 3 | `[B*64, 256, 2, 2]` |
+| down block 3 (`conv -> SiLU`) | `[B*64, 512, 2, 2]` |
+| max pool 4 | `[B*64, 512, 1, 1]` |
 | token reshape | `[B*64, 512, 1, 1]` |
 | bottleneck concat input | `[B*64, 1024, 1, 1]` |
 | bottleneck output | `[B*64, 512, 1, 1]` |
-| up block 1 (`conv1 -> +t -> SiLU -> conv2 -> +skip -> SiLU`) | `[B*64, 256, 2, 2]` |
-| up block 2 (`conv1 -> +t -> SiLU -> conv2 -> +skip -> SiLU`) | `[B*64, 128, 4, 4]` |
-| up block 3 (`conv1 -> +t -> SiLU -> conv2 -> +skip -> SiLU`) | `[B*64, 64, 8, 8]` |
-| up block 4 (`conv1 -> +t -> SiLU -> conv2 -> +skip -> SiLU`) | `[B*64, 64, 16, 16]` |
+| nearest upsample 1 + skip concat | `[B*64, 1024, 2, 2]` |
+| up block 1 (`conv -> SiLU`) | `[B*64, 512, 2, 2]` |
+| nearest upsample 2 + skip concat | `[B*64, 768, 4, 4]` |
+| up block 2 (`conv -> SiLU`) | `[B*64, 256, 4, 4]` |
+| nearest upsample 3 + skip concat | `[B*64, 384, 8, 8]` |
+| up block 3 (`conv -> SiLU`) | `[B*64, 128, 8, 8]` |
+| nearest upsample 4 + skip concat | `[B*64, 192, 16, 16]` |
+| up block 4 (`conv -> SiLU`) | `[B*64, 64, 16, 16]` |
 | output projection | `[B*64, 1, 16, 16]` |
 | reshape back | `[B, 64, 1, 16, 16]` |
 
-Condition injection in the current detailer uses two paths:
-
-```text
-t_emb = timestep_embedding(t).reshape(B*64, 512)
-t_bias_l = Linear(512 -> C_l)(t_emb).view(B*64, C_l, 1, 1)
-hidden = SiLU(conv1(feature_l))
-hidden = SiLU(conv1(feature_l) + t_bias_l)
-feature_l = SiLU(conv2(hidden) + skip(feature_l))
-```
-
-This happens inside the input block, every down block, and every up block. In down blocks, the second convolution is the downsampling step.
+The current detailer has no explicit timestep-conditioning path. Downsampling is performed by a separate `MaxPool2d(2)` after each down block, with no extra activation after the pool. Upsampling is performed by nearest-neighbor resize first, then skip concatenation, then the single-conv block.
 
 Patch-token conditioning is injected directly at the bottleneck by channel concatenation:
 
