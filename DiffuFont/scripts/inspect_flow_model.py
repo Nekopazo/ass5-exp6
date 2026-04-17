@@ -92,8 +92,10 @@ def print_model_summary(model: SourcePartRefDiT) -> None:
         "style_encoder",
         "style_token_proj",
         "content_style_attn",
+        "content_style_fusion_norm",
+        "content_style_fusion_proj",
         "backbone",
-        "detailer",
+        "refiner",
     ]
     for name in top_level_names:
         module = getattr(model, name)
@@ -208,51 +210,126 @@ def trace_backbone_path(
     return x
 
 
-def trace_detailer_path(
+def trace_refiner_path(
     model: SourcePartRefDiT,
     patch_tokens: torch.Tensor,
-    noisy_patches: torch.Tensor,
+    noisy_image: torch.Tensor,
 ) -> torch.Tensor:
-    detailer = model.detailer
-    print_header("Detailer Path")
-    print(f"noisy_patches: {shape_of(noisy_patches)}")
+    refiner = model.refiner
+    print_header("Refiner Path")
+    print(f"noisy_image: {shape_of(noisy_image)}")
     print(f"patch_tokens: {shape_of(patch_tokens)}")
-    batch, patch_count, channels, patch_h, patch_w = noisy_patches.shape
-    flat_patches = noisy_patches.reshape(batch * patch_count, channels, patch_h, patch_w)
-    flat_tokens = patch_tokens.reshape(batch * patch_count, patch_tokens.size(-1))
-    print(f"detailer.flat_patches: {shape_of(flat_patches)}")
-    print(f"detailer.flat_tokens: {shape_of(flat_tokens)}")
-
-    skips: list[torch.Tensor] = []
-    x = detailer.input_proj(flat_patches)
-    skips.append(x)
-    print(f"detailer.input_proj: {shape_of(x)}")
-    for idx, downsample in enumerate(detailer.downsample_blocks):
-        x = downsample(x)
-        print(f"detailer.downsample_block_{idx}: {shape_of(x)}")
-        if idx < len(detailer.downsample_blocks) - 1:
+    print(f"refiner_mode: {model.refiner_mode}")
+    if model.refiner_mode == "image":
+        skips: list[torch.Tensor] = []
+        x = refiner.input_proj(noisy_image)
+        skips.append(x)
+        print(f"refiner.input_proj: {shape_of(x)}")
+        x = refiner.input_pool(x)
+        print(f"refiner.input_pool: {shape_of(x)}")
+        for idx, (downsample, pool) in enumerate(zip(refiner.downsample_blocks, refiner.downsample_pools)):
+            x = downsample(x)
             skips.append(x)
-    context = detailer.context_proj(flat_tokens).view(flat_tokens.size(0), -1, 1, 1)
-    print(f"detailer.context_proj: {shape_of(context)}")
-    x = torch.cat([x, context], dim=1)
-    print(f"detailer.concat_context: {shape_of(x)}")
-    x = detailer.bottleneck(x)
-    print(f"detailer.bottleneck: {shape_of(x)}")
-    for idx, (upsample, dec_block, skip) in enumerate(zip(detailer.upsample_layers, detailer.dec_blocks, reversed(skips))):
+            print(f"refiner.downsample_block_{idx}: {shape_of(x)}")
+            x = pool(x)
+            print(f"refiner.max_pool_{idx}: {shape_of(x)}")
+        token_map = patch_tokens.transpose(1, 2).reshape(
+            patch_tokens.size(0),
+            patch_tokens.size(-1),
+            refiner.token_grid_size,
+            refiner.token_grid_size,
+        )
+        print(f"refiner.token_map: {shape_of(token_map)}")
+        x = torch.cat([x, token_map], dim=1)
+        print(f"refiner.concat_context: {shape_of(x)}")
+        x = refiner.bottleneck(x)
+        print(f"refiner.bottleneck: {shape_of(x)}")
+        for idx, (upsample, dec_block, skip) in enumerate(zip(refiner.upsample_layers, refiner.dec_blocks, reversed(skips))):
+            x = upsample(x)
+            print(f"refiner.upsample_{idx}: {shape_of(x)}")
+            if x.shape[-2:] != skip.shape[-2:]:
+                x = F.interpolate(x, size=skip.shape[-2:], mode="nearest")
+                print(f"refiner.align_skip_{idx}: {shape_of(x)}")
+            x = torch.cat([x, skip], dim=1)
+            print(f"refiner.concat_skip_{idx}: {shape_of(x)}")
+            x = dec_block(x)
+            print(f"refiner.dec_block_{idx}: {shape_of(x)}")
+        x = refiner.out_proj(x)
+        print(f"refiner.out_proj: {shape_of(x)}")
+        return x
+    noisy_patches = (
+        noisy_image.unfold(2, refiner.patch_size, refiner.patch_size)
+        .unfold(3, refiner.patch_size, refiner.patch_size)
+        .permute(0, 2, 3, 1, 4, 5)
+        .contiguous()
+        .view(
+            noisy_image.size(0),
+            refiner.num_patches,
+            refiner.in_channels,
+            refiner.patch_size,
+            refiner.patch_size,
+        )
+    )
+    print(f"refiner.noisy_patches: {shape_of(noisy_patches)}")
+    skips: list[torch.Tensor] = []
+    x = noisy_patches.view(
+        noisy_image.size(0) * refiner.num_patches,
+        refiner.in_channels,
+        refiner.patch_size,
+        refiner.patch_size,
+    )
+    print(f"refiner.flat_patches: {shape_of(x)}")
+    x = refiner.input_proj(x)
+    skips.append(x)
+    print(f"refiner.input_proj: {shape_of(x)}")
+    x = refiner.input_pool(x)
+    print(f"refiner.input_pool: {shape_of(x)}")
+    for idx, (downsample, pool) in enumerate(zip(refiner.downsample_blocks, refiner.downsample_pools)):
+        x = downsample(x)
+        skips.append(x)
+        print(f"refiner.downsample_block_{idx}: {shape_of(x)}")
+        x = pool(x)
+        print(f"refiner.max_pool_{idx}: {shape_of(x)}")
+    token_map = patch_tokens.contiguous().view(
+        patch_tokens.size(0) * patch_tokens.size(1),
+        patch_tokens.size(-1),
+        1,
+        1,
+    )
+    print(f"refiner.token_map: {shape_of(token_map)}")
+    x = torch.cat([x, token_map], dim=1)
+    print(f"refiner.concat_context: {shape_of(x)}")
+    x = refiner.bottleneck(x)
+    print(f"refiner.bottleneck: {shape_of(x)}")
+    for idx, (upsample, dec_block, skip) in enumerate(zip(refiner.upsample_layers, refiner.dec_blocks, reversed(skips))):
         x = upsample(x)
-        print(f"detailer.upsample_{idx}: {shape_of(x)}")
+        print(f"refiner.upsample_{idx}: {shape_of(x)}")
         if x.shape[-2:] != skip.shape[-2:]:
             x = F.interpolate(x, size=skip.shape[-2:], mode="nearest")
-            print(f"detailer.align_skip_{idx}: {shape_of(x)}")
+            print(f"refiner.align_skip_{idx}: {shape_of(x)}")
         x = torch.cat([x, skip], dim=1)
-        print(f"detailer.concat_skip_{idx}: {shape_of(x)}")
+        print(f"refiner.concat_skip_{idx}: {shape_of(x)}")
         x = dec_block(x)
-        print(f"detailer.dec_block_{idx}: {shape_of(x)}")
-    x = detailer.out_proj(x)
-    print(f"detailer.out_proj: {shape_of(x)}")
-    pred_patches = x.view(batch, patch_count, detailer.in_channels, detailer.patch_size, detailer.patch_size)
-    print(f"detailer.pred_patches: {shape_of(pred_patches)}")
-    return pred_patches
+        print(f"refiner.dec_block_{idx}: {shape_of(x)}")
+    x = refiner.out_proj(x)
+    print(f"refiner.out_proj_patches: {shape_of(x)}")
+    x = x.view(
+        patch_tokens.size(0),
+        refiner.token_grid_size,
+        refiner.token_grid_size,
+        refiner.in_channels,
+        refiner.patch_size,
+        refiner.patch_size,
+    )
+    print(f"refiner.pred_patches: {shape_of(x)}")
+    x = x.permute(0, 3, 1, 4, 2, 5).contiguous().view(
+        patch_tokens.size(0),
+        refiner.in_channels,
+        refiner.image_size,
+        refiner.image_size,
+    )
+    print(f"refiner.unpatchify: {shape_of(x)}")
+    return x
 
 
 def print_training_flow(
@@ -296,11 +373,7 @@ def print_training_flow(
         timesteps,
         content_tokens,
     )
-    noisy_patches = model._patchify(xt)
-    print_header("Patchify")
-    print(f"model._patchify(xt): {shape_of(noisy_patches)}")
-    pred_patches = trace_detailer_path(model, patch_tokens, noisy_patches)
-    pred_flow = model._unpatchify(pred_patches)
+    pred_flow = trace_refiner_path(model, patch_tokens, xt)
     pred_target = xt + (1.0 - t_view) * pred_flow
     print_header("Outputs")
     print(f"pred_flow: {shape_of(pred_flow)}")

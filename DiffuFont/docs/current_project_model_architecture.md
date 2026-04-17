@@ -20,6 +20,7 @@ Current model:
 - DiT hidden size: `512`
 - DiT heads: `8`
 - content-style cross-attention heads: `4`
+- refiner mode: runtime-configured, default `patch`
 - optimizer: `AdamW`
 - default `weight_decay`: `0.01`
 
@@ -29,11 +30,12 @@ Effective path:
 2. Encode all style references into `8x8x512` style tokens.
 3. Concatenate all style-reference tokens along the token axis.
 4. Run one cross-attention with content tokens as query and style tokens as key/value.
-5. Add the resulting style context back to content tokens.
-6. Feed fused content tokens into the DiT backbone.
-7. Use timestep-conditioned RMS modulation in every DiT block.
-8. Refine patch outputs with `PatchDetailerHead`.
-9. Unpatchify patch outputs into final image-space flow.
+5. Fuse content and style with `concat -> LayerNorm -> Linear(1024 -> 512)`.
+6. Feed fused content tokens and timestep conditioning into the DiT backbone.
+7. Let each DiT block apply its own timestep projection before modulation.
+8. Refine the noisy image with the configured refiner:
+   - `patch`: patch-level `16x16` U-Net with one DiT token per patch at the `1x1` bottleneck
+   - `image`: full-image U-Net down to `8x8`, then channel-concat the DiT token lattice
 
 There is no global style vector path in the current model.
 
@@ -102,9 +104,7 @@ patch_tokens = backbone(
     content_tokens=fused_content_tokens,
 )                                                                   # [B, 64, 512]
 
-noisy_patches = patchify(x_t_image)                                 # [B, 64, 1, 16, 16]
-pred_patches = detailer(patch_tokens, noisy_patches)                # [B, 64, 1, 16, 16]
-pred_flow = unpatchify(pred_patches)                                # [B, 1, 128, 128]
+pred_flow = refiner(patch_tokens, x_t_image)                        # [B, 1, 128, 128]
 ```
 
 ## 4. Content Path
@@ -224,24 +224,18 @@ x = x + pos_embed                                           # [B, 64, 512]
 time_cond = timestep_embedding(timesteps, 512)              # [B, 512]
 time_cond = time_mlp(time_cond)                             # [B, 512]
 time_cond = time_cond_norm(time_cond)                       # [B, 512]
-time_tokens = time_cond.unsqueeze(1).expand(-1, 64, -1)     # [B, 64, 512]
 ```
 
 ### 7.2 Block Conditioning
 
-Backbone-level conditioning is prepared once before the block stack:
-
-```text
-conditioning_tokens = time_tokens + fused_content_tokens
-```
-
 Each block receives:
 
 - current patch tokens
-- conditioning tokens
+- timestep conditioning
+- fused content tokens
 
 There is no style-specific conditioning path inside the backbone.
-There is also no per-block timestep projection anymore; per-block differences come from each block's own `joint_mod`.
+Each block applies its own timestep projection before summing timestep and content conditioning.
 
 ## 8. RMS Modulation
 
@@ -345,23 +339,16 @@ Backbone output:
 patch_tokens = [B, 64, 512]
 ```
 
-## 11. Patch Detailer
+## 11. Patch-Level Refiner U-Net
 
-Implemented by `PatchDetailerHead`.
+Implemented by `ImageRefinerUNet`.
 
 Inputs:
 
 | tensor | shape |
 | --- | --- |
 | `patch_tokens` | `[B, 64, 512]` |
-| `noisy_patches` | `[B, 64, 1, 16, 16]` |
-
-Flattened internal tensors:
-
-| stage | shape |
-| --- | --- |
-| flat patch images | `[B*64, 1, 16, 16]` |
-| flat patch tokens | `[B*64, 512]` |
+| `noisy_image` | `[B, 1, 128, 128]` |
 
 Current channel plan:
 
@@ -369,10 +356,13 @@ Current channel plan:
 [64, 128, 256, 512]
 ```
 
-Detailer shape trace:
+Refiner shape trace:
 
 | stage | shape |
 | --- | --- |
+| patchify noisy image | `[B, 64, 1, 16, 16]` |
+| flatten patch batch | `[B*64, 1, 16, 16]` |
+| flatten token batch | `[B*64, 512]` |
 | input block (`conv -> SiLU`) | `[B*64, 64, 16, 16]` |
 | max pool 1 | `[B*64, 64, 8, 8]` |
 | down block 1 (`conv -> SiLU`) | `[B*64, 128, 8, 8]` |
@@ -383,7 +373,7 @@ Detailer shape trace:
 | max pool 4 | `[B*64, 512, 1, 1]` |
 | token reshape | `[B*64, 512, 1, 1]` |
 | bottleneck concat input | `[B*64, 1024, 1, 1]` |
-| bottleneck output | `[B*64, 512, 1, 1]` |
+| bottleneck output (`conv -> SiLU`) | `[B*64, 512, 1, 1]` |
 | nearest upsample 1 + skip concat | `[B*64, 1024, 2, 2]` |
 | up block 1 (`conv -> SiLU`) | `[B*64, 512, 2, 2]` |
 | nearest upsample 2 + skip concat | `[B*64, 768, 4, 4]` |
@@ -392,16 +382,18 @@ Detailer shape trace:
 | up block 3 (`conv -> SiLU`) | `[B*64, 128, 8, 8]` |
 | nearest upsample 4 + skip concat | `[B*64, 192, 16, 16]` |
 | up block 4 (`conv -> SiLU`) | `[B*64, 64, 16, 16]` |
-| output projection | `[B*64, 1, 16, 16]` |
-| reshape back | `[B, 64, 1, 16, 16]` |
+| output projection patches | `[B*64, 1, 16, 16]` |
+| regroup predicted patches | `[B, 64, 1, 16, 16]` |
+| unpatchify output | `[B, 1, 128, 128]` |
 
-The current detailer has no explicit timestep-conditioning path. Downsampling is performed by a separate `MaxPool2d(2)` after each down block, with no extra activation after the pool. Upsampling is performed by nearest-neighbor resize first, then skip concatenation, then the single-conv block.
+The current refiner does not use explicit timestep-conditioning. Downsampling is performed by a separate `MaxPool2d(2)` after each down block, with no extra activation after the pool. Upsampling is performed by nearest-neighbor resize first, then skip concatenation, then a single-conv block.
 
-Patch-token conditioning is injected directly at the bottleneck by channel concatenation:
+DiT-token conditioning is injected directly at the `1x1` bottleneck of each patch U-Net by channel concatenation:
 
 ```text
-token_context = s_i.view(B*64, 512, 1, 1)
-x = concat([bottleneck_feature, token_context], dim=1)
+token_context = patch_tokens.reshape(B*64, 512)
+token_map = token_context.view(B*64, 512, 1, 1)
+x = concat([patch_bottleneck_feature, token_map], dim=1)
 ```
 
 Final output:
@@ -439,10 +431,10 @@ Training batches deduplicate content and style encoder inputs before expanding t
 Current behavior:
 
 - content/style encoder forward passes run on unique items only
-- expanded batch conditioning still drives the full DiT backbone and detailer
+- expanded batch conditioning still drives the full DiT backbone and refiner
 - gradients returning to the deduplicated content/style condition banks are averaged by reuse count
 - averaged gradients still preserve differences from distinct `x_t / t / target` samples; only the duplicate-count scaling is removed
-- backbone and detailer gradients remain full-batch gradients
+- backbone and refiner gradients remain full-batch gradients
 
 So:
 

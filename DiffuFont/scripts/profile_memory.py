@@ -79,6 +79,7 @@ def build_model_from_args(args: argparse.Namespace) -> SourcePartRefDiT:
         dit_mlp_ratio=float(args.dit_mlp_ratio),
         content_injection_layers=None,
         content_style_fusion_heads=4,
+        refiner_mode=str(args.refiner_mode),
         detailer_base_channels=int(args.detailer_base_channels),
         detailer_max_channels=int(args.detailer_max_channels),
     )
@@ -108,6 +109,7 @@ def main() -> None:
     parser.add_argument("--dit-depth", type=int, default=12)
     parser.add_argument("--dit-heads", type=int, default=8)
     parser.add_argument("--dit-mlp-ratio", type=float, default=4.0)
+    parser.add_argument("--refiner-mode", type=str, default="patch", choices=["patch", "image"])
     parser.add_argument("--detailer-base-channels", type=int, default=32)
     parser.add_argument("--detailer-max-channels", type=int, default=256)
     parser.add_argument("--ema-decay", type=float, default=0.9999)

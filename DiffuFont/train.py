@@ -401,6 +401,7 @@ def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
         dit_mlp_ratio=float(args.dit_mlp_ratio),
         content_injection_layers=None,
         content_style_fusion_heads=4,
+        refiner_mode=str(args.refiner_mode),
         detailer_base_channels=int(args.detailer_base_channels),
         detailer_max_channels=int(args.detailer_max_channels),
     )
@@ -432,6 +433,7 @@ def main() -> None:
     parser.add_argument("--dit-depth", type=int, required=True)
     parser.add_argument("--dit-heads", type=int, required=True)
     parser.add_argument("--dit-mlp-ratio", type=float, required=True)
+    parser.add_argument("--refiner-mode", type=str, default="patch", choices=["patch", "image"])
     parser.add_argument("--detailer-base-channels", type=int, required=True)
     parser.add_argument("--detailer-max-channels", type=int, required=True)
     parser.add_argument("--train-sampling", type=str, required=True, choices=["shuffle", "cartesian_font_char"])

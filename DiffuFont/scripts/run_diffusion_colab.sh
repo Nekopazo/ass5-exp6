@@ -34,7 +34,7 @@ GRAD_CLIP_MIN_NORM="0.5"
 
 STYLE_REF_COUNT=0
 STYLE_REF_COUNT_MIN=4
-STYLE_REF_COUNT_MAX=8
+STYLE_REF_COUNT_MAX=6
 BATCH_SIZE=256
 NUM_WORKERS=2
 MAX_FONTS=0
@@ -43,9 +43,10 @@ IMAGE_SIZE=128
 PATCH_SIZE=16
 ENCODER_HIDDEN_DIM=512
 DIT_HIDDEN_DIM=512
-DIT_DEPTH=12
+DIT_DEPTH=8
 DIT_HEADS=8
 DIT_MLP_RATIO="4.0"
+REFINER_MODE="patch"
 DETAILER_BASE_CHANNELS=64
 DETAILER_MAX_CHANNELS=512
 
@@ -117,6 +118,7 @@ while [[ $# -gt 0 ]]; do
     --dit-depth) DIT_DEPTH="${2:?}"; shift 2 ;;
     --dit-heads) DIT_HEADS="${2:?}"; shift 2 ;;
     --dit-mlp-ratio) DIT_MLP_RATIO="${2:?}"; shift 2 ;;
+    --refiner-mode) REFINER_MODE="${2:?}"; shift 2 ;;
     --detailer-base-channels) DETAILER_BASE_CHANNELS="${2:?}"; shift 2 ;;
     --detailer-max-channels) DETAILER_MAX_CHANNELS="${2:?}"; shift 2 ;;
     --train-sampling) TRAIN_SAMPLING="${2:?}"; shift 2 ;;
@@ -194,6 +196,7 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --dit-depth "${DIT_DEPTH}"
     --dit-heads "${DIT_HEADS}"
     --dit-mlp-ratio "${DIT_MLP_RATIO}"
+    --refiner-mode "${REFINER_MODE}"
     --detailer-base-channels "${DETAILER_BASE_CHANNELS}"
     --detailer-max-channels "${DETAILER_MAX_CHANNELS}"
     --train-sampling "${TRAIN_SAMPLING}"
@@ -393,6 +396,7 @@ cmd_common=(
   --dit-depth "${DIT_DEPTH}"
   --dit-heads "${DIT_HEADS}"
   --dit-mlp-ratio "${DIT_MLP_RATIO}"
+  --refiner-mode "${REFINER_MODE}"
   --detailer-base-channels "${DETAILER_BASE_CHANNELS}"
   --detailer-max-channels "${DETAILER_MAX_CHANNELS}"
   --train-sampling "${TRAIN_SAMPLING}"
@@ -443,7 +447,7 @@ echo "[run_diffusion_colab] style_ref_count=${STYLE_REF_COUNT} style_ref_count_m
 echo "[run_diffusion_colab] patch_size=${PATCH_SIZE} image_size=${IMAGE_SIZE} flow_sample_steps=${FLOW_SAMPLE_STEPS} flow_lambda=${FLOW_LAMBDA} ema_decay=${EMA_DECAY} ema_start_step=${EMA_START_STEP}"
 echo "[run_diffusion_colab] dit_heads=${DIT_HEADS} main_path=swiglu+rms+cross_attn content_style_fusion_heads=4"
 echo "[run_diffusion_colab] perceptual_loss_lambda=${PERCEPTUAL_LOSS_LAMBDA} pixel_loss_lambda=${PIXEL_LOSS_LAMBDA} aux_loss_t_logistic_steepness=${AUX_LOSS_T_LOGISTIC_STEEPNESS} perceptual_loss_t_midpoint=${PERCEPTUAL_LOSS_T_MIDPOINT} pixel_loss_t_midpoint=${PIXEL_LOSS_T_MIDPOINT}"
-echo "[run_diffusion_colab] detailer_base_channels=${DETAILER_BASE_CHANNELS} detailer_max_channels=${DETAILER_MAX_CHANNELS}"
+echo "[run_diffusion_colab] refiner_mode=${REFINER_MODE} detailer_base_channels=${DETAILER_BASE_CHANNELS} detailer_max_channels=${DETAILER_MAX_CHANNELS}"
 echo "[run_diffusion_colab] content_injection_layers=1..${DIT_DEPTH}"
 echo "[run_diffusion_colab] train_sampling=${TRAIN_SAMPLING} cartesian_fonts_per_batch=${CARTESIAN_FONTS_PER_BATCH} cartesian_chars_per_batch=${CARTESIAN_CHARS_PER_BATCH}"
 

@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .diffusion_transformer_backbone import DiffusionTransformerBackbone, timestep_embedding
+from .diffusion_transformer_backbone import DiffusionTransformerBackbone
 from .sdpa_attention import SDPAAttention
 
 
@@ -44,7 +44,7 @@ class ResBlock(nn.Module):
         return x + residual
 
 class ConvSiLU(nn.Module):
-    """Single convolution followed by SiLU, matching the paper's shallow U-Net blocks."""
+    """Single convolution followed by SiLU."""
 
     def __init__(
         self,
@@ -294,28 +294,35 @@ class ContentStyleCrossAttention(nn.Module):
         )
         return style_context
 
-class PatchDetailerHead(nn.Module):
-    """Per-patch local refiner conditioned on the final DiT token."""
+class ImageRefinerUNet(nn.Module):
+    """Patch-level U-Net refiner conditioned on one DiT token per patch."""
 
     def __init__(
         self,
         *,
         in_channels: int = 1,
-        patch_size: int = 16,
-        context_dim: int = 512,
+        image_size: int = 128,
+        token_grid_size: int = 8,
+        token_dim: int = 512,
         base_channels: int = 64,
         max_channels: int = 512,
         bottleneck_channels: int = 512,
     ) -> None:
         super().__init__()
-        if patch_size < 8:
-            raise ValueError(f"patch_size must be >= 8, got {patch_size}")
+        if image_size % token_grid_size != 0:
+            raise ValueError(
+                f"image_size must be divisible by token_grid_size, got {image_size} vs {token_grid_size}"
+            )
+        patch_size = int(image_size) // int(token_grid_size)
         depth = int(round(math.log2(patch_size)))
-        if 2**depth != int(patch_size):
+        if 2**depth != patch_size:
             raise ValueError(f"patch_size must be a power of two, got {patch_size}")
         self.in_channels = int(in_channels)
-        self.patch_size = int(patch_size)
-        self.context_dim = int(context_dim)
+        self.image_size = int(image_size)
+        self.token_grid_size = int(token_grid_size)
+        self.patch_size = patch_size
+        self.num_patches = self.token_grid_size * self.token_grid_size
+        self.token_dim = int(token_dim)
         self.base_channels = int(base_channels)
         self.max_channels = int(max_channels)
         self.bottleneck_channels = int(bottleneck_channels)
@@ -324,6 +331,11 @@ class PatchDetailerHead(nn.Module):
             min(self.base_channels * (2**idx), self.max_channels)
             for idx in range(self.depth)
         ]
+        if self.token_dim != self.bottleneck_channels:
+            raise ValueError(
+                "token_dim must match bottleneck_channels for direct bottleneck concat, "
+                f"got token_dim={self.token_dim} bottleneck_channels={self.bottleneck_channels}"
+            )
         self.input_proj = ConvSiLU(
             self.in_channels,
             self.stage_channels[0],
@@ -378,33 +390,45 @@ class PatchDetailerHead(nn.Module):
     def forward(
         self,
         patch_tokens: torch.Tensor,
-        noisy_patches: torch.Tensor,
+        noisy_image: torch.Tensor,
     ) -> torch.Tensor:
         if patch_tokens.dim() != 3:
             raise ValueError(f"patch_tokens must be 3D, got {tuple(patch_tokens.shape)}")
-        if noisy_patches.dim() != 5:
-            raise ValueError(f"noisy_patches must be 5D, got {tuple(noisy_patches.shape)}")
-        batch, patch_count, channels, patch_h, patch_w = noisy_patches.shape
+        if noisy_image.dim() != 4:
+            raise ValueError(f"noisy_image must be 4D, got {tuple(noisy_image.shape)}")
+        batch, channels, height, width = noisy_image.shape
         if channels != self.in_channels:
             raise ValueError(
-                f"noisy_patches channel mismatch: expected {self.in_channels}, got {channels}"
+                f"noisy_image channel mismatch: expected {self.in_channels}, got {channels}"
             )
-        if patch_h != self.patch_size or patch_w != self.patch_size:
+        if height != self.image_size or width != self.image_size:
             raise ValueError(
-                f"noisy_patches spatial mismatch: expected ({self.patch_size}, {self.patch_size}), "
-                f"got ({patch_h}, {patch_w})"
+                f"noisy_image spatial mismatch: expected ({self.image_size}, {self.image_size}), "
+                f"got ({height}, {width})"
             )
-        if tuple(patch_tokens.shape[:2]) != (batch, patch_count):
+        expected_patch_count = self.num_patches
+        if tuple(patch_tokens.shape[:2]) != (batch, expected_patch_count):
             raise ValueError(
-                "patch_tokens and noisy_patches must share batch/patch dims: "
-                f"patch_tokens={tuple(patch_tokens.shape)} noisy_patches={tuple(noisy_patches.shape)}"
+                "patch_tokens must match the refiner token lattice: "
+                f"expected {(batch, expected_patch_count)}, got {tuple(patch_tokens.shape[:2])}"
             )
-
-        flat_patches = noisy_patches.reshape(batch * patch_count, channels, patch_h, patch_w)
-        flat_tokens = patch_tokens.reshape(batch * patch_count, patch_tokens.size(-1))
-
         skips: list[torch.Tensor] = []
-        x = self.input_proj(flat_patches)
+        noisy_patches = (
+            noisy_image.unfold(2, self.patch_size, self.patch_size)
+            .unfold(3, self.patch_size, self.patch_size)
+            .permute(0, 2, 3, 1, 4, 5)
+            .contiguous()
+            .view(batch, self.num_patches, self.in_channels, self.patch_size, self.patch_size)
+        )
+        x = noisy_patches.view(
+            batch * self.num_patches,
+            self.in_channels,
+            self.patch_size,
+            self.patch_size,
+        )
+        token_context = patch_tokens.contiguous().view(batch * self.num_patches, self.token_dim)
+
+        x = self.input_proj(x)
         skips.append(x)
         x = self.input_pool(x)
         for downsample, pool in zip(self.downsample_blocks, self.downsample_pools):
@@ -412,13 +436,10 @@ class PatchDetailerHead(nn.Module):
             skips.append(x)
             x = pool(x)
 
-        if flat_tokens.size(-1) != self.bottleneck_channels:
-            raise ValueError(
-                "patch token dim must match bottleneck_channels for direct concat: "
-                f"got token_dim={flat_tokens.size(-1)} bottleneck_channels={self.bottleneck_channels}"
-            )
-        context = flat_tokens.view(flat_tokens.size(0), -1, 1, 1)
-        x = torch.cat([x, context], dim=1)
+        if x.shape[-2:] != (1, 1):
+            raise RuntimeError(f"patch refiner bottleneck must be 1x1, got {tuple(x.shape[-2:])}")
+        token_map = token_context.view(batch * self.num_patches, self.token_dim, 1, 1)
+        x = torch.cat([x, token_map], dim=1)
         x = self.bottleneck(x)
 
         for upsample, dec_block, skip in zip(
@@ -432,8 +453,170 @@ class PatchDetailerHead(nn.Module):
             x = torch.cat([x, skip], dim=1)
             x = dec_block(x)
 
-        x = self.out_proj(x)
-        return x.view(batch, patch_count, self.in_channels, self.patch_size, self.patch_size)
+        pred_patches = self.out_proj(x).view(
+            batch,
+            self.token_grid_size,
+            self.token_grid_size,
+            self.in_channels,
+            self.patch_size,
+            self.patch_size,
+        )
+        return (
+            pred_patches.permute(0, 3, 1, 4, 2, 5)
+            .contiguous()
+            .view(batch, self.in_channels, self.image_size, self.image_size)
+        )
+
+
+class FullImageRefinerUNet(nn.Module):
+    """Full-image U-Net refiner conditioned on the DiT token lattice at 8x8."""
+
+    def __init__(
+        self,
+        *,
+        in_channels: int = 1,
+        image_size: int = 128,
+        token_grid_size: int = 8,
+        token_dim: int = 512,
+        base_channels: int = 64,
+        max_channels: int = 512,
+        bottleneck_channels: int = 512,
+    ) -> None:
+        super().__init__()
+        if image_size % token_grid_size != 0:
+            raise ValueError(
+                f"image_size must be divisible by token_grid_size, got {image_size} vs {token_grid_size}"
+            )
+        downsample_factor = int(image_size) // int(token_grid_size)
+        depth = int(round(math.log2(downsample_factor)))
+        if 2**depth != downsample_factor:
+            raise ValueError(
+                f"image_size/token_grid_size must be a power of two, got {image_size}/{token_grid_size}"
+            )
+        self.in_channels = int(in_channels)
+        self.image_size = int(image_size)
+        self.token_grid_size = int(token_grid_size)
+        self.token_dim = int(token_dim)
+        self.base_channels = int(base_channels)
+        self.max_channels = int(max_channels)
+        self.bottleneck_channels = int(bottleneck_channels)
+        self.depth = int(depth)
+        self.stage_channels = [
+            min(self.base_channels * (2**idx), self.max_channels)
+            for idx in range(self.depth)
+        ]
+        if self.token_dim != self.bottleneck_channels:
+            raise ValueError(
+                "token_dim must match bottleneck_channels for direct bottleneck concat, "
+                f"got token_dim={self.token_dim} bottleneck_channels={self.bottleneck_channels}"
+            )
+        self.input_proj = ConvSiLU(
+            self.in_channels,
+            self.stage_channels[0],
+            kernel_size=3,
+            padding=1,
+        )
+        self.input_pool = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        self.downsample_blocks = nn.ModuleList()
+        self.downsample_pools = nn.ModuleList()
+        prev_channels = self.stage_channels[0]
+        for ch in self.stage_channels[1:]:
+            self.downsample_blocks.append(
+                ConvSiLU(
+                    prev_channels,
+                    ch,
+                    kernel_size=3,
+                    padding=1,
+                )
+            )
+            self.downsample_pools.append(nn.MaxPool2d(kernel_size=2, stride=2))
+            prev_channels = ch
+
+        self.skip_channels = list(self.stage_channels)
+        self.bottleneck = ConvSiLU(
+            self.stage_channels[-1] + self.bottleneck_channels,
+            self.bottleneck_channels,
+            kernel_size=3,
+            padding=1,
+        )
+
+        self.upsample_layers = nn.ModuleList()
+        self.dec_blocks = nn.ModuleList()
+        current_ch = self.bottleneck_channels
+        for skip_ch in reversed(self.skip_channels):
+            self.upsample_layers.append(nn.Upsample(scale_factor=2, mode="nearest"))
+            self.dec_blocks.append(
+                ConvSiLU(
+                    current_ch + skip_ch,
+                    skip_ch,
+                    kernel_size=3,
+                    padding=1,
+                )
+            )
+            current_ch = skip_ch
+
+        self.out_proj = nn.Conv2d(current_ch, self.in_channels, kernel_size=1)
+        nn.init.zeros_(self.out_proj.weight)
+        nn.init.zeros_(self.out_proj.bias)
+
+    def forward(self, patch_tokens: torch.Tensor, noisy_image: torch.Tensor) -> torch.Tensor:
+        if patch_tokens.dim() != 3:
+            raise ValueError(f"patch_tokens must be 3D, got {tuple(patch_tokens.shape)}")
+        if noisy_image.dim() != 4:
+            raise ValueError(f"noisy_image must be 4D, got {tuple(noisy_image.shape)}")
+        batch, channels, height, width = noisy_image.shape
+        if channels != self.in_channels:
+            raise ValueError(
+                f"noisy_image channel mismatch: expected {self.in_channels}, got {channels}"
+            )
+        if height != self.image_size or width != self.image_size:
+            raise ValueError(
+                f"noisy_image spatial mismatch: expected ({self.image_size}, {self.image_size}), "
+                f"got ({height}, {width})"
+            )
+        expected_patch_count = self.token_grid_size * self.token_grid_size
+        if tuple(patch_tokens.shape[:2]) != (batch, expected_patch_count):
+            raise ValueError(
+                "patch_tokens must match the refiner token lattice: "
+                f"expected {(batch, expected_patch_count)}, got {tuple(patch_tokens.shape[:2])}"
+            )
+
+        skips: list[torch.Tensor] = []
+        x = self.input_proj(noisy_image)
+        skips.append(x)
+        x = self.input_pool(x)
+        for downsample, pool in zip(self.downsample_blocks, self.downsample_pools):
+            x = downsample(x)
+            skips.append(x)
+            x = pool(x)
+
+        token_map = patch_tokens.transpose(1, 2).reshape(
+            batch,
+            self.token_dim,
+            self.token_grid_size,
+            self.token_grid_size,
+        )
+        if x.shape[-2:] != token_map.shape[-2:]:
+            raise RuntimeError(
+                "refiner bottleneck/token lattice mismatch: "
+                f"image branch={tuple(x.shape[-2:])} token_map={tuple(token_map.shape[-2:])}"
+            )
+        x = torch.cat([x, token_map], dim=1)
+        x = self.bottleneck(x)
+
+        for upsample, dec_block, skip in zip(
+            self.upsample_layers,
+            self.dec_blocks,
+            reversed(skips),
+        ):
+            x = upsample(x)
+            if x.shape[-2:] != skip.shape[-2:]:
+                x = F.interpolate(x, size=skip.shape[-2:], mode="nearest")
+            x = torch.cat([x, skip], dim=1)
+            x = dec_block(x)
+
+        return self.out_proj(x)
 
 
 class SourcePartRefDiT(nn.Module):
@@ -453,6 +636,7 @@ class SourcePartRefDiT(nn.Module):
         content_injection_layers: Sequence[int] | None = None,
         conditioning_injection_mode: str = "all",
         content_style_fusion_heads: int = 4,
+        refiner_mode: str = "patch",
         detailer_base_channels: int = 64,
         detailer_max_channels: int = 512,
         detailer_bottleneck_channels: int = 512,
@@ -492,6 +676,9 @@ class SourcePartRefDiT(nn.Module):
         self.content_style_fusion_heads = int(content_style_fusion_heads)
         if self.content_style_fusion_heads <= 0:
             raise ValueError(f"content_style_fusion_heads must be > 0, got {content_style_fusion_heads}")
+        self.refiner_mode = str(refiner_mode)
+        if self.refiner_mode not in {"patch", "image"}:
+            raise ValueError(f"refiner_mode must be one of ('patch', 'image'), got {refiner_mode!r}")
         self.detailer_base_channels = int(detailer_base_channels)
         self.detailer_max_channels = int(detailer_max_channels)
         self.detailer_bottleneck_channels = int(detailer_bottleneck_channels)
@@ -541,10 +728,12 @@ class SourcePartRefDiT(nn.Module):
             ffn_activation=self.ffn_activation,
             norm_variant=self.norm_variant,
         )
-        self.detailer = PatchDetailerHead(
+        refiner_cls = ImageRefinerUNet if self.refiner_mode == "patch" else FullImageRefinerUNet
+        self.refiner = refiner_cls(
             in_channels=self.in_channels,
-            patch_size=self.patch_size,
-            context_dim=self.dit_hidden_dim,
+            image_size=self.image_size,
+            token_grid_size=self.patch_grid_size,
+            token_dim=self.dit_hidden_dim,
             base_channels=self.detailer_base_channels,
             max_channels=self.detailer_max_channels,
             bottleneck_channels=self.detailer_bottleneck_channels,
@@ -567,6 +756,7 @@ class SourcePartRefDiT(nn.Module):
             "dit_mlp_ratio": float(self.dit_mlp_ratio),
             "content_injection_layers": list(self.content_injection_layers),
             "content_style_fusion_heads": int(self.content_style_fusion_heads),
+            "refiner_mode": str(self.refiner_mode),
             "detailer_base_channels": int(self.detailer_base_channels),
             "detailer_max_channels": int(self.detailer_max_channels),
             "detailer_bottleneck_channels": int(self.detailer_bottleneck_channels),
@@ -637,38 +827,6 @@ class SourcePartRefDiT(nn.Module):
         fused_tokens = self.content_style_fusion_norm(fused_tokens)
         return self.content_style_fusion_proj(fused_tokens)
 
-    def _patchify(self, x: torch.Tensor) -> torch.Tensor:
-        patches = F.unfold(x, kernel_size=self.patch_size, stride=self.patch_size)
-        patches = patches.transpose(1, 2).contiguous()
-        return patches.view(
-            x.size(0),
-            self.num_patches,
-            self.in_channels,
-            self.patch_size,
-            self.patch_size,
-        )
-
-    def _unpatchify(self, patch_values: torch.Tensor) -> torch.Tensor:
-        if patch_values.dim() != 5:
-            raise ValueError(f"patch_values must be 5D, got {tuple(patch_values.shape)}")
-        batch, patch_count, channels, patch_h, patch_w = patch_values.shape
-        if patch_count != self.num_patches:
-            raise ValueError(f"patch_count mismatch: expected {self.num_patches}, got {patch_count}")
-        if channels != self.in_channels:
-            raise ValueError(f"channel mismatch: expected {self.in_channels}, got {channels}")
-        if patch_h != self.patch_size or patch_w != self.patch_size:
-            raise ValueError(
-                f"patch spatial mismatch: expected ({self.patch_size}, {self.patch_size}), "
-                f"got ({patch_h}, {patch_w})"
-            )
-        patch_cols = patch_values.view(batch, patch_count, -1).transpose(1, 2).contiguous()
-        return F.fold(
-            patch_cols,
-            output_size=(self.image_size, self.image_size),
-            kernel_size=self.patch_size,
-            stride=self.patch_size,
-        )
-
     def predict_flow(
         self,
         x_t_image: torch.Tensor,
@@ -681,10 +839,7 @@ class SourcePartRefDiT(nn.Module):
             timesteps,
             content_tokens=content_tokens,
         )
-        noisy_patches = self._patchify(x_t_image)
-        pred_patches = self.detailer(patch_tokens, noisy_patches)
-        pred_flow = self._unpatchify(pred_patches)
-        return pred_flow
+        return self.refiner(patch_tokens, x_t_image)
 
     def forward(
         self,
