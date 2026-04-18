@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Profile peak CUDA memory by major pixel-flow training stages."""
+"""Profile peak CUDA memory by major x-pred training stages."""
 
 from __future__ import annotations
 
@@ -19,10 +19,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from dataset import FontImageDataset, UniqueFontBatchSampler
-from models.model import FlowTrainer
+from models.model import XPredTrainer
 from models.source_part_ref_dit import SourcePartRefDiT
 from style_augment import build_base_glyph_transform
-from train import FlowBatchCollator
+from train import XPredBatchCollator
 
 
 def set_seed(seed: int) -> None:
@@ -62,7 +62,7 @@ def build_model_from_args(args: argparse.Namespace) -> SourcePartRefDiT:
         checkpoint = torch.load(args.checkpoint, map_location="cpu")
         model_config = checkpoint.get("model_config")
         if not isinstance(model_config, dict):
-            raise RuntimeError("Flow checkpoint is missing 'model_config'.")
+            raise RuntimeError("X-pred checkpoint is missing 'model_config'.")
         model = SourcePartRefDiT(**model_config)
         state_dict = checkpoint.get("model_state")
         if isinstance(state_dict, dict):
@@ -79,9 +79,6 @@ def build_model_from_args(args: argparse.Namespace) -> SourcePartRefDiT:
         dit_mlp_ratio=float(args.dit_mlp_ratio),
         content_injection_layers=None,
         content_style_fusion_heads=4,
-        refiner_mode=str(args.refiner_mode),
-        detailer_base_channels=int(args.detailer_base_channels),
-        detailer_max_channels=int(args.detailer_max_channels),
     )
 
 
@@ -103,15 +100,12 @@ def main() -> None:
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--output", type=Path, default=PROJECT_ROOT / "analysis" / "memory_profile.json")
     parser.add_argument("--image-size", type=int, default=128)
-    parser.add_argument("--patch-size", type=int, default=16)
-    parser.add_argument("--encoder-hidden-dim", type=int, default=512)
-    parser.add_argument("--dit-hidden-dim", type=int, default=512)
+    parser.add_argument("--patch-size", type=int, default=8)
+    parser.add_argument("--encoder-hidden-dim", type=int, default=256)
+    parser.add_argument("--dit-hidden-dim", type=int, default=256)
     parser.add_argument("--dit-depth", type=int, default=12)
     parser.add_argument("--dit-heads", type=int, default=8)
     parser.add_argument("--dit-mlp-ratio", type=float, default=4.0)
-    parser.add_argument("--refiner-mode", type=str, default="patch", choices=["patch", "image"])
-    parser.add_argument("--detailer-base-channels", type=int, default=32)
-    parser.add_argument("--detailer-max-channels", type=int, default=256)
     parser.add_argument("--ema-decay", type=float, default=0.9999)
     args = parser.parse_args()
 
@@ -148,18 +142,18 @@ def main() -> None:
         batch_sampler=batch_sampler,
         num_workers=int(args.num_workers),
         pin_memory=True,
-        collate_fn=FlowBatchCollator(dataset),
+        collate_fn=XPredBatchCollator(dataset),
     )
     batch = next(iter(dataloader))
 
     model = build_model_from_args(args)
-    trainer = FlowTrainer(
+    trainer = XPredTrainer(
         model,
         device,
         lr=1e-4,
         total_steps=1,
-        lambda_flow=1.0,
-        flow_sample_steps=24,
+        v_loss_lambda=1.0,
+        sample_steps=20,
         ema_decay=float(args.ema_decay),
         log_every_steps=1,
         save_every_steps=None,
@@ -182,10 +176,9 @@ def main() -> None:
         x0 = stage_record(device, "noise_sample", lambda: torch.randn_like(x1), records)
         timesteps = stage_record(device, "time_sample", lambda: torch.rand(x1.size(0), device=device), records)
         t_view = timesteps.view(-1, 1, 1, 1).to(dtype=x1.dtype)
-        xt = stage_record(device, "flow_interpolate", lambda: (1.0 - t_view) * x0 + t_view * x1, records)
-        target_flow = stage_record(device, "flow_target", lambda: x1 - x0, records)
+        xt = stage_record(device, "xt_interpolate", lambda: (1.0 - t_view) * x0 + t_view * x1, records)
+        target_v = stage_record(device, "target_v", lambda: x1 - x0, records)
         content_tokens = stage_record(device, "content_encode_tokens", lambda: trainer.model.encode_content_tokens(content), records)
-        content_tokens = stage_record(device, "content_project", lambda: trainer.model.content_proj(content_tokens), records)
         content_tokens = stage_record(
             device,
             "content_expand",
@@ -213,7 +206,7 @@ def main() -> None:
             lambda: style_token_valid_mask.index_select(0, style_index),
             records,
         )
-        content_tokens = stage_record(
+        conditioning_tokens = stage_record(
             device,
             "content_style_fuse",
             lambda: trainer.model.fuse_content_style_tokens(
@@ -223,21 +216,27 @@ def main() -> None:
             ),
             records,
         )
-        pred_flow = stage_record(
+        pred_x = stage_record(
             device,
-            "dip_forward",
-            lambda: trainer.model.predict_flow(
+            "predict_x",
+            lambda: trainer.model.predict_x(
                 xt,
                 timesteps,
-                content_tokens=content_tokens,
+                conditioning_tokens=conditioning_tokens,
             ),
             records,
         )
-        loss = stage_record(device, "flow_loss", lambda: F.mse_loss(pred_flow, target_flow), records)
+        pred_v = stage_record(
+            device,
+            "predict_v",
+            lambda: (pred_x - xt) / (1.0 - t_view).clamp_min(1e-6),
+            records,
+        )
+        loss = stage_record(device, "v_loss", lambda: F.mse_loss(pred_v, target_v), records)
 
     stage_record(device, "backward", lambda: loss.backward(), records)
     if trainer.grad_clip_norm is not None:
-        stage_record(device, "grad_clip", lambda: trainer._apply_grad_clip(), records)
+        stage_record(device, "grad_clip", lambda: trainer._apply_grad_clip(step=1), records)
     trainer.optimizer.step()
 
     result = {

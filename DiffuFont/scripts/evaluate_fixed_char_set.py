@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate flow checkpoints on a fixed char set across all fonts."""
+"""Evaluate x-pred checkpoints on a fixed char set across all fonts."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ class SampleSpec:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate fixed chars x all fonts for DiffuFont flow checkpoints.")
+    parser = argparse.ArgumentParser(description="Evaluate fixed chars x all fonts for DiffuFont x-pred checkpoints.")
     parser.add_argument(
         "--train-config",
         type=Path,
@@ -56,6 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--best-checkpoint", type=Path, default=None)
     parser.add_argument("--final-checkpoint", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--perceptor-checkpoint", type=Path, default=None)
     parser.add_argument("--device", type=str, default="cuda:1")
     parser.add_argument("--eval-seed", type=int, default=42)
     parser.add_argument("--num-target-chars", type=int, default=30)
@@ -444,7 +445,7 @@ def build_worst_grid(
     if not worst_specs:
         return
     batch = prepare_batch(dataset, worst_specs)
-    generation = trainer.flow_sample(
+    generation = trainer.sample(
         batch["content"],
         content_index=batch["content_index"],
         style_img=batch["style_img"],
@@ -518,7 +519,7 @@ def write_markdown_report(
     worst_grid_paths: dict[str, str],
 ) -> None:
     lines: list[str] = []
-    lines.append("# Flow Evaluation Report")
+    lines.append("# X-Pred Evaluation Report")
     lines.append("")
     lines.append("## Setup")
     lines.append("")
@@ -638,7 +639,7 @@ def evaluate_checkpoint(
     for chunk_idx, font_chunk in enumerate(chunk_list(font_names, int(args.fonts_per_batch)), start=1):
         batch_specs = [spec for font_name in font_chunk for spec in grouped[font_name]]
         batch = prepare_batch(dataset, batch_specs)
-        generation = trainer.flow_sample(
+        generation = trainer.sample(
             batch["content"],
             content_index=batch["content_index"],
             style_img=batch["style_img"],
@@ -728,7 +729,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     device = resolve_device(args.device)
     if args.inference_steps is None:
-        args.inference_steps = int(train_config["flow_sample_steps"])
+        args.inference_steps = int(train_config["sample_steps"])
 
     root = Path(train_config["data_root"]).resolve()
     style_pool_path = (
@@ -761,7 +762,15 @@ def main() -> None:
     )
     save_json(output_dir / "sample_specs.json", [asdict(spec) for spec in sample_specs])
 
-    perceptor_checkpoint = Path(train_config["perceptor_checkpoint"]).resolve()
+    resolved_perceptor_checkpoint = args.perceptor_checkpoint
+    if resolved_perceptor_checkpoint is None:
+        train_config_perceptor = train_config.get("perceptor_checkpoint")
+        if train_config_perceptor is None:
+            raise KeyError(
+                "Missing perceptor checkpoint. Pass --perceptor-checkpoint explicitly because train_config.json no longer stores it."
+            )
+        resolved_perceptor_checkpoint = Path(train_config_perceptor)
+    perceptor_checkpoint = resolved_perceptor_checkpoint.resolve()
     perceptor_model, _, perceptor_report = load_font_perceptor_from_checkpoint(perceptor_checkpoint, map_location="cpu")
     perceptor_model = perceptor_model.to(device).eval()
     for param in perceptor_model.parameters():

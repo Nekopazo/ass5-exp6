@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inference entry for the content+style pixel-space flow path."""
+"""Inference entry for the content+style DiT x-pred path."""
 
 from __future__ import annotations
 
@@ -12,27 +12,25 @@ from PIL import Image, ImageDraw, ImageFont
 import torch
 
 from dataset import FontImageDataset
-from models.model import FlowTrainer
+from models.model import XPredTrainer
 from models.source_part_ref_dit import SourcePartRefDiT
 from style_augment import build_base_glyph_transform
 
 
-def load_trainer(checkpoint_path: Path, device: torch.device) -> FlowTrainer:
+def load_trainer(checkpoint_path: Path, device: torch.device) -> XPredTrainer:
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    if checkpoint.get("stage") != "flow":
-        raise RuntimeError(f"Checkpoint is not a flow checkpoint: {checkpoint_path}")
+    if checkpoint.get("stage") != "xpred":
+        raise RuntimeError(f"Checkpoint is not an x-pred checkpoint: {checkpoint_path}")
     if "model_config" not in checkpoint:
         raise RuntimeError("Checkpoint is missing 'model_config'.")
     trainer_config = checkpoint.get("trainer_config", {})
     model = SourcePartRefDiT(**checkpoint["model_config"])
-    trainer = FlowTrainer(
+    trainer = XPredTrainer(
         model,
         device,
         total_steps=1,
-        flow_sample_steps=int(trainer_config.get("flow_sample_steps", 24)),
+        sample_steps=int(trainer_config.get("sample_steps", 20)),
         ema_decay=float(trainer_config.get("ema_decay", 0.9999)),
-        aux_loss_t_logistic_steepness=float(trainer_config.get("aux_loss_t_logistic_steepness", 8.0)),
-        perceptual_loss_t_midpoint=float(trainer_config.get("perceptual_loss_t_midpoint", 0.35)),
     )
     trainer.load(checkpoint_path)
     trainer.model.eval()
@@ -96,7 +94,7 @@ def resolve_chars_for_fonts(
 
 @torch.no_grad()
 def run_inference(
-    trainer: FlowTrainer,
+    trainer: XPredTrainer,
     dataset: FontImageDataset,
     *,
     font_names: List[str],
@@ -112,7 +110,7 @@ def run_inference(
             style_refs, style_ref_mask = sample_style_refs(sample)
             style = style_refs.unsqueeze(0)
             style_ref_mask = style_ref_mask.unsqueeze(0)
-            generation = trainer.flow_sample(
+            generation = trainer.sample(
                 content,
                 content_index=torch.tensor([0], dtype=torch.long),
                 style_img=style,

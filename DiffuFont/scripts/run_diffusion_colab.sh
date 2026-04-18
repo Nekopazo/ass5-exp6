@@ -9,7 +9,7 @@ LOG_MAX_LINES=1500
 RUN_MODE="daemon"
 LOG_FILE=""
 PID_FILE=""
-SAVE_DIR="checkpoints/flow_$(date '+%Y%m%d_%H%M%S')"
+SAVE_DIR="checkpoints/xpred_$(date '+%Y%m%d_%H%M%S')"
 
 RESUME_CKPT=""
 DEVICE_ARG="cuda:1"
@@ -19,7 +19,7 @@ FONT_SPLIT_SEED=""
 FONT_TRAIN_RATIO="0.95"
 
 EPOCHS=10000000
-TARGET_STEPS=200000
+TARGET_STEPS=150000
 SAVE_EVERY=5000
 SAMPLE_EVERY=300
 LOG_EVERY=100
@@ -40,30 +40,20 @@ NUM_WORKERS=2
 MAX_FONTS=0
 IMAGE_SIZE=128
 
-PATCH_SIZE=16
-ENCODER_HIDDEN_DIM=512
-DIT_HIDDEN_DIM=512
-DIT_DEPTH=8
+PATCH_SIZE=8
+ENCODER_HIDDEN_DIM=256
+DIT_HIDDEN_DIM=256
+DIT_DEPTH=12
 DIT_HEADS=8
 DIT_MLP_RATIO="4.0"
-REFINER_MODE="patch"
-DETAILER_BASE_CHANNELS=64
-DETAILER_MAX_CHANNELS=512
 
-FLOW_LAMBDA="1.0"
-USE_CNN_PERCEPTOR="0"
-PERCEPTOR_CHECKPOINT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/font_perceptor_20260407_135124/best.pt"
-PERCEPTUAL_LOSS_LAMBDA="0"
-PIXEL_LOSS_LAMBDA="0"
-AUX_LOSS_T_LOGISTIC_STEEPNESS="8.0"
-PERCEPTUAL_LOSS_T_MIDPOINT="0.35"
-PIXEL_LOSS_T_MIDPOINT="0.55"
-FLOW_SAMPLE_STEPS=20
+V_LOSS_LAMBDA="1.0"
+SAMPLE_STEPS=20
 EMA_DECAY="0.999"
 EMA_START_STEP="70000"
 TRAIN_SAMPLING="cartesian_font_char"
 CARTESIAN_FONTS_PER_BATCH=64
-CARTESIAN_CHARS_PER_BATCH=4
+CARTESIAN_CHARS_PER_BATCH=8
 
 EXTRA_TRAIN_ARGS=()
 
@@ -93,16 +83,8 @@ while [[ $# -gt 0 ]]; do
     --lr-min-scale) LR_MIN_SCALE="${2:?}"; shift 2 ;;
     --grad-clip-norm) GRAD_CLIP_NORM="${2:?}"; shift 2 ;;
     --grad-clip-min-norm) GRAD_CLIP_MIN_NORM="${2:?}"; shift 2 ;;
-    --flow-lambda) FLOW_LAMBDA="${2:?}"; shift 2 ;;
-    --use-cnn-perceptor) USE_CNN_PERCEPTOR="1"; shift ;;
-    --no-use-cnn-perceptor) USE_CNN_PERCEPTOR="0"; shift ;;
-    --perceptor-checkpoint) PERCEPTOR_CHECKPOINT="${2:?}"; shift 2 ;;
-    --perceptual-loss-lambda) PERCEPTUAL_LOSS_LAMBDA="${2:?}"; shift 2 ;;
-    --pixel-loss-lambda) PIXEL_LOSS_LAMBDA="${2:?}"; shift 2 ;;
-    --aux-loss-t-logistic-steepness) AUX_LOSS_T_LOGISTIC_STEEPNESS="${2:?}"; shift 2 ;;
-    --perceptual-loss-t-midpoint) PERCEPTUAL_LOSS_T_MIDPOINT="${2:?}"; shift 2 ;;
-    --pixel-loss-t-midpoint) PIXEL_LOSS_T_MIDPOINT="${2:?}"; shift 2 ;;
-    --flow-sample-steps) FLOW_SAMPLE_STEPS="${2:?}"; shift 2 ;;
+    --v-loss-lambda) V_LOSS_LAMBDA="${2:?}"; shift 2 ;;
+    --sample-steps) SAMPLE_STEPS="${2:?}"; shift 2 ;;
     --ema-decay) EMA_DECAY="${2:?}"; shift 2 ;;
     --ema-start-step) EMA_START_STEP="${2:?}"; shift 2 ;;
     --style-ref-count) STYLE_REF_COUNT="${2:?}"; shift 2 ;;
@@ -118,9 +100,11 @@ while [[ $# -gt 0 ]]; do
     --dit-depth) DIT_DEPTH="${2:?}"; shift 2 ;;
     --dit-heads) DIT_HEADS="${2:?}"; shift 2 ;;
     --dit-mlp-ratio) DIT_MLP_RATIO="${2:?}"; shift 2 ;;
-    --refiner-mode) REFINER_MODE="${2:?}"; shift 2 ;;
-    --detailer-base-channels) DETAILER_BASE_CHANNELS="${2:?}"; shift 2 ;;
-    --detailer-max-channels) DETAILER_MAX_CHANNELS="${2:?}"; shift 2 ;;
+    --flow-lambda|--flow-sample-steps|--refiner-mode|--detailer-base-channels|--detailer-max-channels|--detailer-bottleneck-channels|--use-cnn-perceptor|--no-use-cnn-perceptor|--perceptor-checkpoint|--perceptual-loss-lambda|--pixel-loss-lambda|--aux-loss-t-logistic-steepness|--perceptual-loss-t-midpoint|--pixel-loss-t-midpoint)
+      echo "[run_diffusion_colab] removed argument: $1" >&2
+      echo "[run_diffusion_colab] the refactored model uses x-pred + v-loss only and no longer accepts decoder or auxiliary-loss args" >&2
+      exit 2
+      ;;
     --train-sampling) TRAIN_SAMPLING="${2:?}"; shift 2 ;;
     --cartesian-fonts-per-batch) CARTESIAN_FONTS_PER_BATCH="${2:?}"; shift 2 ;;
     --cartesian-chars-per-batch) CARTESIAN_CHARS_PER_BATCH="${2:?}"; shift 2 ;;
@@ -150,10 +134,6 @@ if [[ -n "${RESUME_CKPT}" && ! -f "${RESUME_CKPT}" ]]; then
   echo "[run_diffusion_colab] missing resume checkpoint: ${RESUME_CKPT}" >&2
   exit 2
 fi
-if [[ "${USE_CNN_PERCEPTOR}" == "1" && -n "${PERCEPTOR_CHECKPOINT}" && ! -f "${PERCEPTOR_CHECKPOINT}" ]]; then
-  echo "[run_diffusion_colab] missing perceptor checkpoint: ${PERCEPTOR_CHECKPOINT}" >&2
-  exit 2
-fi
 if [[ "${RUN_MODE}" == "daemon" ]]; then
   daemon_args=(
     --foreground
@@ -178,9 +158,8 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --lr-min-scale "${LR_MIN_SCALE}"
     --grad-clip-norm "${GRAD_CLIP_NORM}"
     --grad-clip-min-norm "${GRAD_CLIP_MIN_NORM}"
-    --flow-lambda "${FLOW_LAMBDA}"
-    --perceptual-loss-lambda "${PERCEPTUAL_LOSS_LAMBDA}"
-    --flow-sample-steps "${FLOW_SAMPLE_STEPS}"
+    --v-loss-lambda "${V_LOSS_LAMBDA}"
+    --sample-steps "${SAMPLE_STEPS}"
     --ema-decay "${EMA_DECAY}"
     --ema-start-step "${EMA_START_STEP}"
     --style-ref-count "${STYLE_REF_COUNT}"
@@ -196,23 +175,12 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --dit-depth "${DIT_DEPTH}"
     --dit-heads "${DIT_HEADS}"
     --dit-mlp-ratio "${DIT_MLP_RATIO}"
-    --refiner-mode "${REFINER_MODE}"
-    --detailer-base-channels "${DETAILER_BASE_CHANNELS}"
-    --detailer-max-channels "${DETAILER_MAX_CHANNELS}"
     --train-sampling "${TRAIN_SAMPLING}"
     --cartesian-fonts-per-batch "${CARTESIAN_FONTS_PER_BATCH}"
     --cartesian-chars-per-batch "${CARTESIAN_CHARS_PER_BATCH}"
   )
   if [[ -n "${RESUME_CKPT}" ]]; then
     daemon_args+=(--resume "${RESUME_CKPT}")
-  fi
-  if [[ "${USE_CNN_PERCEPTOR}" == "1" ]]; then
-    daemon_args+=(--use-cnn-perceptor)
-  else
-    daemon_args+=(--no-use-cnn-perceptor)
-  fi
-  if [[ "${USE_CNN_PERCEPTOR}" == "1" && -n "${PERCEPTOR_CHECKPOINT}" ]]; then
-    daemon_args+=(--perceptor-checkpoint "${PERCEPTOR_CHECKPOINT}")
   fi
   if [[ "${#EXTRA_TRAIN_ARGS[@]}" -gt 0 ]]; then
     daemon_args+=(-- "${EXTRA_TRAIN_ARGS[@]}")
@@ -396,19 +364,11 @@ cmd_common=(
   --dit-depth "${DIT_DEPTH}"
   --dit-heads "${DIT_HEADS}"
   --dit-mlp-ratio "${DIT_MLP_RATIO}"
-  --refiner-mode "${REFINER_MODE}"
-  --detailer-base-channels "${DETAILER_BASE_CHANNELS}"
-  --detailer-max-channels "${DETAILER_MAX_CHANNELS}"
   --train-sampling "${TRAIN_SAMPLING}"
   --cartesian-fonts-per-batch "${CARTESIAN_FONTS_PER_BATCH}"
   --cartesian-chars-per-batch "${CARTESIAN_CHARS_PER_BATCH}"
-  --flow-lambda "${FLOW_LAMBDA}"
-  --perceptual-loss-lambda "${PERCEPTUAL_LOSS_LAMBDA}"
-  --pixel-loss-lambda "${PIXEL_LOSS_LAMBDA}"
-  --aux-loss-t-logistic-steepness "${AUX_LOSS_T_LOGISTIC_STEEPNESS}"
-  --perceptual-loss-t-midpoint "${PERCEPTUAL_LOSS_T_MIDPOINT}"
-  --pixel-loss-t-midpoint "${PIXEL_LOSS_T_MIDPOINT}"
-  --flow-sample-steps "${FLOW_SAMPLE_STEPS}"
+  --v-loss-lambda "${V_LOSS_LAMBDA}"
+  --sample-steps "${SAMPLE_STEPS}"
   --ema-decay "${EMA_DECAY}"
   --ema-start-step "${EMA_START_STEP}"
   --epochs "${EPOCHS}"
@@ -423,31 +383,20 @@ cmd_common=(
 if [[ -n "${RESUME_CKPT}" ]]; then
   cmd_common+=(--resume "${RESUME_CKPT}")
 fi
-if [[ "${USE_CNN_PERCEPTOR}" == "1" ]]; then
-  cmd_common+=(--use-cnn-perceptor)
-else
-  cmd_common+=(--no-use-cnn-perceptor)
-fi
-if [[ "${USE_CNN_PERCEPTOR}" == "1" && -n "${PERCEPTOR_CHECKPOINT}" ]]; then
-  cmd_common+=(--perceptor-checkpoint "${PERCEPTOR_CHECKPOINT}")
-fi
 if [[ "${#EXTRA_TRAIN_ARGS[@]}" -gt 0 ]]; then
   cmd_common+=("${EXTRA_TRAIN_ARGS[@]}")
 fi
 
-echo "[run_diffusion_colab] mode=pixel_flow"
+echo "[run_diffusion_colab] mode=dit_xpred"
 echo "[run_diffusion_colab] save_dir=${SAVE_DIR}"
 echo "[run_diffusion_colab] log_file=${LOG_FILE}"
 echo "[run_diffusion_colab] requested_device=${DEVICE_ARG} seed=${SEED}"
 echo "[run_diffusion_colab] resume=${RESUME_CKPT:-<none>}"
-echo "[run_diffusion_colab] use_cnn_perceptor=${USE_CNN_PERCEPTOR}"
-echo "[run_diffusion_colab] perceptor_checkpoint=${PERCEPTOR_CHECKPOINT:-<none>}"
 echo "[run_diffusion_colab] batch=${BATCH_SIZE} lr=${LR} lr_warmup_steps=${LR_WARMUP_STEPS} lr_decay_start_step=${LR_DECAY_START_STEP} lr_min_scale=${LR_MIN_SCALE} grad_clip_norm=${GRAD_CLIP_NORM}"
 echo "[run_diffusion_colab] style_ref_count=${STYLE_REF_COUNT} style_ref_count_min=${STYLE_REF_COUNT_MIN} style_ref_count_max=${STYLE_REF_COUNT_MAX}"
-echo "[run_diffusion_colab] patch_size=${PATCH_SIZE} image_size=${IMAGE_SIZE} flow_sample_steps=${FLOW_SAMPLE_STEPS} flow_lambda=${FLOW_LAMBDA} ema_decay=${EMA_DECAY} ema_start_step=${EMA_START_STEP}"
+echo "[run_diffusion_colab] patch_size=${PATCH_SIZE} image_size=${IMAGE_SIZE} sample_steps=${SAMPLE_STEPS} ode_solver=euler v_loss_lambda=${V_LOSS_LAMBDA} ema_decay=${EMA_DECAY} ema_start_step=${EMA_START_STEP}"
 echo "[run_diffusion_colab] dit_heads=${DIT_HEADS} main_path=swiglu+rms+cross_attn content_style_fusion_heads=4"
-echo "[run_diffusion_colab] perceptual_loss_lambda=${PERCEPTUAL_LOSS_LAMBDA} pixel_loss_lambda=${PIXEL_LOSS_LAMBDA} aux_loss_t_logistic_steepness=${AUX_LOSS_T_LOGISTIC_STEEPNESS} perceptual_loss_t_midpoint=${PERCEPTUAL_LOSS_T_MIDPOINT} pixel_loss_t_midpoint=${PIXEL_LOSS_T_MIDPOINT}"
-echo "[run_diffusion_colab] refiner_mode=${REFINER_MODE} detailer_base_channels=${DETAILER_BASE_CHANNELS} detailer_max_channels=${DETAILER_MAX_CHANNELS}"
+echo "[run_diffusion_colab] output_path=pure_dit_patch_projection encoder_hidden_dim=${ENCODER_HIDDEN_DIM} dit_hidden_dim=${DIT_HIDDEN_DIM} dit_depth=${DIT_DEPTH}"
 echo "[run_diffusion_colab] content_injection_layers=1..${DIT_DEPTH}"
 echo "[run_diffusion_colab] train_sampling=${TRAIN_SAMPLING} cartesian_fonts_per_batch=${CARTESIAN_FONTS_PER_BATCH} cartesian_chars_per_batch=${CARTESIAN_CHARS_PER_BATCH}"
 

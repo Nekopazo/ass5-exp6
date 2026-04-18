@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Training entry for the pixel-space DiP glyph generation path."""
+"""Training entry for the DiT x-pred glyph generation path."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from dataset import CartesianFontCharBatchSampler, FontImageDataset, UniqueFontBatchSampler
-from models.model import FlowTrainer
+from models.model import XPredTrainer
 from models.sdpa_attention import describe_torch_sdpa_backends, enable_torch_sdpa_backends
 from models.source_part_ref_dit import SourcePartRefDiT
 from style_augment import build_base_glyph_transform
@@ -76,7 +76,7 @@ def _compact_unique_indices(sliced_index: torch.Tensor) -> tuple[torch.Tensor, t
     return torch.tensor(unique_positions, dtype=torch.long), torch.tensor(remapped_indices, dtype=torch.long)
 
 
-class FlowBatchCollator:
+class XPredBatchCollator:
     def __init__(self, dataset: FontImageDataset) -> None:
         self.dataset = dataset
 
@@ -195,7 +195,7 @@ def build_dataloader(
         "dataset": dataset,
         "num_workers": int(num_workers),
         "pin_memory": (device.type == "cuda"),
-        "collate_fn": FlowBatchCollator(dataset),
+        "collate_fn": XPredBatchCollator(dataset),
         "worker_init_fn": seed_worker if int(num_workers) > 0 else None,
     }
     if use_unique_font_batches:
@@ -401,9 +401,6 @@ def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
         dit_mlp_ratio=float(args.dit_mlp_ratio),
         content_injection_layers=None,
         content_style_fusion_heads=4,
-        refiner_mode=str(args.refiner_mode),
-        detailer_base_channels=int(args.detailer_base_channels),
-        detailer_max_channels=int(args.detailer_max_channels),
     )
 
 
@@ -433,9 +430,6 @@ def main() -> None:
     parser.add_argument("--dit-depth", type=int, required=True)
     parser.add_argument("--dit-heads", type=int, required=True)
     parser.add_argument("--dit-mlp-ratio", type=float, required=True)
-    parser.add_argument("--refiner-mode", type=str, default="patch", choices=["patch", "image"])
-    parser.add_argument("--detailer-base-channels", type=int, required=True)
-    parser.add_argument("--detailer-max-channels", type=int, required=True)
     parser.add_argument("--train-sampling", type=str, required=True, choices=["shuffle", "cartesian_font_char"])
     parser.add_argument("--cartesian-fonts-per-batch", type=int, required=True)
     parser.add_argument("--cartesian-chars-per-batch", type=int, required=True)
@@ -454,17 +448,8 @@ def main() -> None:
     parser.add_argument("--grad-clip-norm", type=float, required=True)
     parser.add_argument("--grad-clip-min-norm", type=float, default=None)
 
-    parser.add_argument("--flow-lambda", type=float, required=True)
-    use_cnn_perceptor_group = parser.add_mutually_exclusive_group(required=True)
-    use_cnn_perceptor_group.add_argument("--use-cnn-perceptor", dest="use_cnn_perceptor", action="store_true")
-    use_cnn_perceptor_group.add_argument("--no-use-cnn-perceptor", dest="use_cnn_perceptor", action="store_false")
-    parser.add_argument("--perceptor-checkpoint", type=Path)
-    parser.add_argument("--perceptual-loss-lambda", type=float, required=True)
-    parser.add_argument("--pixel-loss-lambda", type=float, default=0.05)
-    parser.add_argument("--aux-loss-t-logistic-steepness", type=float, default=8.0)
-    parser.add_argument("--perceptual-loss-t-midpoint", type=float, default=0.35)
-    parser.add_argument("--pixel-loss-t-midpoint", type=float, default=0.55)
-    parser.add_argument("--flow-sample-steps", type=int, required=True)
+    parser.add_argument("--v-loss-lambda", type=float, required=True)
+    parser.add_argument("--sample-steps", type=int, required=True)
     parser.add_argument("--ema-decay", type=float, required=True)
     parser.add_argument("--ema-start-step", type=int, default=-1)
     args = parser.parse_args()
@@ -472,7 +457,7 @@ def main() -> None:
     set_global_seed(int(args.seed))
     enable_torch_sdpa_backends()
     device = resolve_device(args.device)
-    print(f"[train] mode=pixel_flow device={device} seed={int(args.seed)}")
+    print(f"[train] mode=dit_xpred device={device} seed={int(args.seed)}")
     print(f"[train] attention_backend={describe_torch_sdpa_backends()}")
 
     font_split_seed = int(args.font_split_seed)
@@ -566,17 +551,8 @@ def main() -> None:
     if len(dataloader) > 0:
         resolved_epochs = max(resolved_epochs, math.ceil(total_steps / len(dataloader)))
 
-    effective_perceptor_checkpoint = args.perceptor_checkpoint
-    effective_perceptual_loss_lambda = float(args.perceptual_loss_lambda)
-    effective_pixel_loss_lambda = max(0.0, float(args.pixel_loss_lambda))
-    if not bool(args.use_cnn_perceptor):
-        if args.perceptor_checkpoint is not None or effective_perceptual_loss_lambda > 0.0:
-            print("[train] use_cnn_perceptor=0, ignoring perceptor checkpoint and perceptual loss weight")
-        effective_perceptor_checkpoint = None
-        effective_perceptual_loss_lambda = 0.0
-
     model = build_model(args)
-    trainer = FlowTrainer(
+    trainer = XPredTrainer(
         model,
         device,
         lr=float(args.lr),
@@ -585,15 +561,8 @@ def main() -> None:
         lr_warmup_steps=int(args.lr_warmup_steps),
         lr_decay_start_step=None if int(args.lr_decay_start_step) < 0 else int(args.lr_decay_start_step),
         lr_min_scale=float(args.lr_min_scale),
-        lambda_flow=float(args.flow_lambda),
-        use_cnn_perceptor=bool(args.use_cnn_perceptor),
-        perceptor_checkpoint=effective_perceptor_checkpoint,
-        perceptual_loss_lambda=effective_perceptual_loss_lambda,
-        pixel_loss_lambda=effective_pixel_loss_lambda,
-        aux_loss_t_logistic_steepness=float(args.aux_loss_t_logistic_steepness),
-        perceptual_loss_t_midpoint=float(args.perceptual_loss_t_midpoint),
-        pixel_loss_t_midpoint=float(args.pixel_loss_t_midpoint),
-        flow_sample_steps=int(args.flow_sample_steps),
+        v_loss_lambda=float(args.v_loss_lambda),
+        sample_steps=int(args.sample_steps),
         ema_decay=float(args.ema_decay),
         ema_start_step=None if int(args.ema_start_step) < 0 else int(args.ema_start_step),
         log_every_steps=log_every_steps,
@@ -608,17 +577,6 @@ def main() -> None:
         trainer.load(args.resume)
         print(f"[train] resumed from {args.resume}")
     args.save_dir.mkdir(parents=True, exist_ok=True)
-    if bool(args.use_cnn_perceptor) and trainer.perceptor_report is not None:
-        (args.save_dir / "perceptor_qualification_snapshot.json").write_text(
-            json.dumps(trainer.perceptor_report, ensure_ascii=False, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        ready_flag = int(bool(trainer.perceptor_report.get("can_integrate_directly")))
-        print(f"[train] loaded perceptor_report ready_for_flow={ready_flag}")
-        if not ready_flag:
-            print(f"[train] warning: perceptor report suggests not integrating directly yet: {args.perceptor_checkpoint}")
-    elif bool(args.use_cnn_perceptor) and args.perceptor_checkpoint is not None:
-        print(f"[train] loaded perceptor checkpoint without qualification report: {args.perceptor_checkpoint}")
 
     trainer.sample_batch = build_sample_batch(dataset, val_dataset, device=device, seed=int(args.seed))
     trainer.sample_every_steps = resolved_sample_every_steps
@@ -637,20 +595,14 @@ def main() -> None:
     run_config["val_fonts"] = 0 if val_dataset is None else int(len(val_dataset.font_names))
     run_config["val_samples"] = 0 if val_dataset is None else int(len(val_dataset.samples))
     run_config["computed_total_steps"] = int(total_steps)
-    run_config["model_type"] = "pixel_dip"
-    run_config["use_cnn_perceptor"] = int(bool(args.use_cnn_perceptor))
-    run_config["perceptor_checkpoint"] = None if effective_perceptor_checkpoint is None else str(effective_perceptor_checkpoint)
-    run_config["perceptual_loss_lambda"] = float(effective_perceptual_loss_lambda)
-    run_config["pixel_loss_lambda"] = float(effective_pixel_loss_lambda)
-    run_config["aux_loss_t_logistic_steepness"] = float(args.aux_loss_t_logistic_steepness)
-    run_config["perceptual_loss_t_midpoint"] = float(args.perceptual_loss_t_midpoint)
-    run_config["pixel_loss_t_midpoint"] = float(args.pixel_loss_t_midpoint)
+    run_config["model_type"] = "dit_xpred"
     run_config["lr_warmup_steps"] = int(args.lr_warmup_steps)
     run_config["lr_decay_start_step"] = None if int(args.lr_decay_start_step) < 0 else int(args.lr_decay_start_step)
     run_config["lr_min_scale"] = float(args.lr_min_scale)
     run_config["weight_decay"] = float(args.weight_decay)
     run_config["ffn_activation"] = "swiglu"
     run_config["norm_variant"] = "rms"
+    run_config["ode_solver"] = "euler"
     run_config["content_injection_layers"] = list(range(1, int(args.dit_depth) + 1))
     run_config["content_style_fusion_heads"] = 4
     run_config["grad_clip_min_norm"] = None if args.grad_clip_min_norm is None else float(args.grad_clip_min_norm)

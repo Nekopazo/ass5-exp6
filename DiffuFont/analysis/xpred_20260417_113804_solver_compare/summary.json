@@ -1,0 +1,17 @@
+{
+  "euler20": {
+    "image": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/xpred_20260417_113804_solver_compare/euler20.png",
+    "mae": 0.30401065945625305,
+    "mse": 0.5333831310272217
+  },
+  "heun20": {
+    "image": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/xpred_20260417_113804_solver_compare/heun20.png",
+    "mae": 1.0514142513275146,
+    "mse": 2.0280802249908447
+  },
+  "heun50": {
+    "image": "/scratch/yangximing/code/ass5-exp6/DiffuFont/analysis/xpred_20260417_113804_solver_compare/heun50.png",
+    "mae": 0.9114273190498352,
+    "mse": 1.6395295858383179
+  }
+}

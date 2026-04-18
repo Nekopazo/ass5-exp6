@@ -2,7 +2,7 @@
 
 Generated from the current repository state in `/scratch/yangximing/code/ass5-exp6/DiffuFont`.
 
-This document describes only the current model. Historical branches and removed alternatives are intentionally omitted.
+This document describes only the active refactored model. Historical U-Net decoder branches and backward-compatible fallbacks are intentionally removed.
 
 ## 1. Main Path
 
@@ -10,34 +10,31 @@ Current model:
 
 - model: `SourcePartRefDiT`
 - input/output channels: `1`
-- content encoder output: `8x8x512`
-- style encoder output: `8x8x512`
-- content/style encoders: shared CNN pyramid template
+- image size: `128x128`
+- default patch size: `8`
+- patch lattice: `16x16 = 256` tokens
+- content encoder output: `16x16x256`
+- style encoder output: `16x16x256`
 - style fusion: one-shot `content <- style` cross-attention outside the backbone
-- DiT feed-forward: `swiglu`
-- DiT normalization/modulation: `rms`
-- DiT patch size: `16`
-- DiT hidden size: `512`
+- DiT hidden size: `256`
+- DiT depth: `12`
 - DiT heads: `8`
-- content-style cross-attention heads: `4`
-- refiner mode: runtime-configured, default `patch`
-- optimizer: `AdamW`
-- default `weight_decay`: `0.01`
+- DiT feed-forward: `swiglu`
+- DiT normalization/modulation: `rms` + `shift/scale/gate`
+- output path: `DiT tokens -> patch projection -> unpatchify`
 
 Effective path:
 
-1. Encode `content_img` into `8x8x512` content tokens.
-2. Encode all style references into `8x8x512` style tokens.
+1. Encode `content_img` into `16x16x256` content tokens.
+2. Encode all style references into `16x16x256` style tokens.
 3. Concatenate all style-reference tokens along the token axis.
 4. Run one cross-attention with content tokens as query and style tokens as key/value.
-5. Fuse content and style with `concat -> LayerNorm -> Linear(1024 -> 512)`.
-6. Feed fused content tokens and timestep conditioning into the DiT backbone.
-7. Let each DiT block apply its own timestep projection before modulation.
-8. Refine the noisy image with the configured refiner:
-   - `patch`: patch-level `16x16` U-Net with one DiT token per patch at the `1x1` bottleneck
-   - `image`: full-image U-Net down to `8x8`, then channel-concat the DiT token lattice
+5. Fuse `content` and `content + style_context` with `concat -> LayerNorm -> Linear(512 -> 256)`.
+6. Patchify `x_t` into `256` grayscale patches and project them into the DiT hidden dimension.
+7. Run the DiT backbone with timestep conditioning plus fused content tokens at every block.
+8. Project final DiT tokens back to patch pixels and unpatchify to `[B, 1, 128, 128]`.
 
-There is no global style vector path in the current model.
+There is no U-Net refiner in the active architecture.
 
 ## 2. Main Configuration
 
@@ -45,22 +42,18 @@ There is no global style vector path in the current model.
 | --- | --- |
 | `in_channels` | `1` |
 | `image_size` | `128` |
-| `patch_size` | `16` |
-| `patch_grid_size` | `8` |
-| `num_patches` | `64` |
-| `encoder_hidden_dim` | `512` |
-| `dit_hidden_dim` | `512` |
-| `dit_depth` | runtime-configured |
+| `patch_size` | `8` |
+| `patch_grid_size` | `16` |
+| `num_patches` | `256` |
+| `encoder_hidden_dim` | `256` |
+| `dit_hidden_dim` | `256` |
+| `dit_depth` | runtime-configured, default `12` |
 | `dit_heads` | `8` |
 | `dit_mlp_ratio` | `4.0` |
 | `ffn_activation` | `swiglu` |
 | `norm_variant` | `rms` |
 | `content_style_fusion_heads` | `4` |
 | `content_injection_layers` | all DiT layers |
-| `detailer_base_channels` | runtime-configured |
-| `detailer_max_channels` | runtime-configured |
-| `detailer_bottleneck_channels` | `512` |
-| `weight_decay` | `0.01` |
 
 ## 3. Top-Level Forward Graph
 
@@ -69,9 +62,10 @@ Notation:
 - `B`: batch size
 - `R`: number of style references
 - `H = W = 128`
-- `P = 16`
-- `N = (H / P)^2 = 64`
-- `D = 512`
+- `P = 8`
+- `N = (H / P)^2 = 256`
+- `C = 256`
+- `D = 256`
 
 Inputs:
 
@@ -86,25 +80,24 @@ Inputs:
 Forward:
 
 ```text
-content_tokens = encode_content_tokens(content_img)                 # [B, 64, 512]
-content_tokens = content_proj(content_tokens)                       # [B, 64, 512]
+content_tokens = encode_content_tokens(content_img)                 # [B, 256, 256]
 
 style_token_bank, token_valid_mask =
-    encode_style_token_bank(style_img, style_ref_mask)              # [B, R*64, 512], [B, R*64]
+    encode_style_token_bank(style_img, style_ref_mask)              # [B, R*256, 256], [B, R*256]
 
-fused_content_tokens = fuse_content_style_tokens(
+conditioning_tokens = fuse_content_style_tokens(
     content_tokens,
     style_token_bank,
     token_valid_mask=token_valid_mask,
-)                                                                   # [B, 64, 512]
+)                                                                   # [B, 256, 512]
 
 patch_tokens = backbone(
     x_t_image,
     timesteps,
-    content_tokens=fused_content_tokens,
-)                                                                   # [B, 64, 512]
+    conditioning_tokens=conditioning_tokens,
+)                                                                   # [B, 256, 256]
 
-pred_flow = refiner(patch_tokens, x_t_image)                        # [B, 1, 128, 128]
+pred_x = decode_patch_tokens(patch_tokens)                          # [B, 1, 128, 128]
 ```
 
 ## 4. Content Path
@@ -122,27 +115,13 @@ Shape trace:
 | residual block 1 | `[B, 128, 32, 32]` |
 | downsample stage 2 | `[B, 256, 16, 16]` |
 | residual block 2 | `[B, 256, 16, 16]` |
-| downsample stage 3 | `[B, 512, 8, 8]` |
-| residual block 3 | `[B, 512, 8, 8]` |
-| flatten to tokens | `[B, 64, 512]` |
-
-Semantics:
-
-- content tokens are spatially aligned with the `8x8` DiT patch lattice
-- token index matches patch index
+| flatten to tokens | `[B, 256, 256]` |
 
 ## 5. Style Path
 
 Implemented by `StyleEncoder` and `ContentStyleCrossAttention` in `models/source_part_ref_dit.py`.
 
 Each style reference is encoded independently, then regrouped per sample.
-
-The style encoder now uses the same CNN pyramid template as the content encoder:
-
-- stem conv
-- stem block
-- three stride-2 pyramid stages
-- final `8x8x512` feature map
 
 Shape trace:
 
@@ -156,20 +135,9 @@ Shape trace:
 | residual block 1 | `[B*R, 128, 32, 32]` |
 | downsample stage 2 | `[B*R, 256, 16, 16]` |
 | residual block 2 | `[B*R, 256, 16, 16]` |
-| downsample stage 3 | `[B*R, 512, 8, 8]` |
-| residual block 3 | `[B*R, 512, 8, 8]` |
-| flatten per ref | `[B*R, 64, 512]` |
-| regroup refs | `[B, R, 64, 512]` |
-| concat refs | `[B, R*64, 512]` |
-| token valid mask | `[B, R*64]` |
-| style token projection | `[B, R*64, 512]` |
-
-Outputs:
-
-```text
-style_token_bank = [B, R*64, 512]
-token_valid_mask = [B, R*64]
-```
+| flatten per ref | `[B*R, 256, 256]` |
+| regroup refs | `[B, R*256, 256]` |
+| token valid mask | `[B, R*256]` |
 
 ## 6. External Content-Style Cross Attention
 
@@ -177,39 +145,20 @@ The style fusion happens exactly once outside the backbone.
 
 | tensor | shape |
 | --- | --- |
-| query = `content_tokens` | `[B, 64, 512]` |
-| key = `style_token_bank` | `[B, R*64, 512]` |
-| value = `style_token_bank` | `[B, R*64, 512]` |
-| `style_context` | `[B, 64, 512]` |
-| concat(`content_tokens`, `style_context`) | `[B, 64, 1024]` |
-| fusion norm | `[B, 64, 1024]` |
-| fused content tokens | `[B, 64, 512]` |
+| query = `content_tokens` | `[B, 256, 256]` |
+| key = `style_token_bank` | `[B, R*256, 256]` |
+| value = `style_token_bank` | `[B, R*256, 256]` |
+| `style_context` | `[B, 256, 256]` |
+| `content + style_context` | `[B, 256, 256]` |
+| `conditioning_tokens = concat(...)` | `[B, 256, 512]` |
 
 Equation:
 
 ```text
-style_context = CrossAttention(
-    Q=[B, 64, 512],
-    K=[B, R*64, 512],
-    V=[B, R*64, 512],
-)
-
-fused_content = Linear(1024 -> 512)(
-    LayerNorm(1024)(
-        concat([content_tokens, style_context], dim=-1)
-    )
-)
+style_context = CrossAttention(Q=content_tokens, K=style_tokens, V=style_tokens)
+fused_context = content_tokens + style_context
+conditioning_tokens = concat([content_tokens, fused_context], dim=-1)
 ```
-
-Properties:
-
-- cross-attention runs only once
-- content/style fusion is learned, not residual addition
-- multiple style references are concatenated along the token dimension
-- no additional style downsampling is applied before cross-attention
-- implementation uses `SDPAAttention`
-- intended CUDA fast path is flash attention
-- current path assumes all style refs are valid in the active batch
 
 ## 7. DiT Backbone
 
@@ -218,12 +167,19 @@ Implemented by `DiffusionTransformerBackbone` and `GlyphDiTBlock` in `models/dif
 ### 7.1 Patch and Timestep Embedding
 
 ```text
-x = patch_embed(x_t_image).flatten(2).transpose(1, 2)      # [B, 64, 512]
-x = x + pos_embed                                           # [B, 64, 512]
+patch_pixels = patchify(x_t_image)                                  # [B, 256, 64]
+x = patch_embed(patch_pixels)                                       # [B, 256, 256]
+x = x + pos_embed                                                   # [B, 256, 256]
 
-time_cond = timestep_embedding(timesteps, 512)              # [B, 512]
-time_cond = time_mlp(time_cond)                             # [B, 512]
-time_cond = time_cond_norm(time_cond)                       # [B, 512]
+time_cond = timestep_embedding(timesteps, 256)                      # [B, 256]
+time_cond = time_mlp(time_cond)                                     # [B, 256]
+time_cond = time_cond_norm(time_cond)                               # [B, 256]
+```
+
+For the default `8x8` grayscale patch, `patch_dim = 64`, so the embedding MLP is:
+
+```text
+64 -> 128 -> 256
 ```
 
 ### 7.2 Block Conditioning
@@ -232,211 +188,85 @@ Each block receives:
 
 - current patch tokens
 - timestep conditioning
-- fused content tokens
+- full external conditioner tokens
 
-There is no style-specific conditioning path inside the backbone.
-Each block applies its own timestep projection before summing timestep and content conditioning.
-
-## 8. RMS Modulation
-
-Active normalization bundle:
-
-- `norm_variant="rms"`
-- per branch parameters: `scale` and `gate`
-- all active norm layers use `elementwise_affine=False`
-
-Per block, a zero-initialized linear head predicts:
+Every active block predicts six modulation tensors:
 
 ```text
-self_attn_scale, self_attn_gate, ffn_scale, ffn_gate
+self_attn_shift, self_attn_scale, self_attn_gate,
+ffn_shift,       ffn_scale,       ffn_gate
 ```
 
 Rule:
 
 ```text
 norm_x = RMSNorm(x)
-modulated_x = norm_x * (1 + scale)
+modulated_x = norm_x * (1 + scale) + shift
 x = x + gate * branch_out
 ```
 
-There is no `shift` term in the active path.
+There is no reduced `scale/gate` shortcut path in the active implementation.
 
-Cross-attention token normalization:
-
-- `query_norm = LayerNorm(512, elementwise_affine=False)`
-- `token_norm = LayerNorm(512, elementwise_affine=False)`
-- normalization is applied once before `q/k/v` projection
-
-## 9. SwiGLU Feed-Forward
-
-Each DiT block uses `FeedForward(..., activation="swiglu")`.
-
-FFN path:
+Current conditioning path inside each block:
 
 ```text
-Linear(hidden_dim -> 2 * inner_dim)
-split into value and gate
-SiLU(gate) * value
-Linear(inner_dim -> hidden_dim)
+time_hidden = time_to_hidden(time_cond)                            # [B, 256]
+time_hidden = time_hidden.unsqueeze(1).expand(B, N, 256)          # [B, 256, 256]
+
+cond_hidden = cond_to_hidden(norm(conditioning_tokens))            # [B, 256, 256]
+joint_hidden = SiLU(time_hidden + cond_hidden)                     # [B, 256, 256]
+
+mods = joint_mod(joint_hidden)                                     # [B, 256, 1536]
 ```
 
-With `hidden_dim = 512` and `mlp_ratio = 4.0`:
+`time_to_hidden` is shared by the whole backbone, so every block receives the same per-sample time hidden state and only learns its own conditioner projection plus modulation head.
+
+## 8. Output Head
+
+Implemented by `output_norm` and `output_proj` in `models/source_part_ref_dit.py`.
+
+Shape trace:
 
 | stage | shape |
 | --- | --- |
-| input | `[B, 64, 512]` |
-| first linear | `[B, 64, 4096]` |
-| split value/gate | `2 x [B, 64, 2048]` |
-| SwiGLU output | `[B, 64, 2048]` |
-| second linear | `[B, 64, 512]` |
+| DiT output tokens | `[B, 256, 256]` |
+| output norm | `[B, 256, 256]` |
+| patch projection | `[B, 256, 64]` |
+| patch grid | `[B, 16, 16, 1, 8, 8]` |
+| unpatchify | `[B, 1, 128, 128]` |
 
-## 10. Full Backbone Shape Trace
+The output projection is zero-initialized so the model starts from a stable near-zero `x_pred`.
 
-Each block preserves token shape.
+## 9. Training Path
 
-Inputs to one `GlyphDiTBlock`:
-
-| tensor | shape |
-| --- | --- |
-| `x_l` | `[B, 64, 512]` |
-| `time_cond` | `[B, 512]` |
-| `content_tokens` | `[B, 64, 512]` |
-
-Inside one block:
-
-| stage | shape |
-| --- | --- |
-| timestep token expansion | `[B, 64, 512]` |
-| content source after norm | `[B, 64, 512]` |
-| joint conditioning source | `[B, 64, 512]` |
-| modulation head output | `[B, 64, 2048]` |
-| split modulation tensors | `4 x [B, 64, 512]` |
-
-Modulation tensors:
-
-```text
-self_attn_scale = [B, 64, 512]
-self_attn_gate  = [B, 64, 512]
-ffn_scale       = [B, 64, 512]
-ffn_gate        = [B, 64, 512]
-```
-
-Full backbone:
-
-```text
-[B, 64, 512]
- -> block 1
- -> block 2
- -> ...
- -> block D
- -> final RMS norm
- = [B, 64, 512]
-```
-
-Backbone output:
-
-```text
-patch_tokens = [B, 64, 512]
-```
-
-## 11. Patch-Level Refiner U-Net
-
-Implemented by `ImageRefinerUNet`.
-
-Inputs:
-
-| tensor | shape |
-| --- | --- |
-| `patch_tokens` | `[B, 64, 512]` |
-| `noisy_image` | `[B, 1, 128, 128]` |
-
-Current channel plan:
-
-```text
-[64, 128, 256, 512]
-```
-
-Refiner shape trace:
-
-| stage | shape |
-| --- | --- |
-| patchify noisy image | `[B, 64, 1, 16, 16]` |
-| flatten patch batch | `[B*64, 1, 16, 16]` |
-| flatten token batch | `[B*64, 512]` |
-| input block (`conv -> SiLU`) | `[B*64, 64, 16, 16]` |
-| max pool 1 | `[B*64, 64, 8, 8]` |
-| down block 1 (`conv -> SiLU`) | `[B*64, 128, 8, 8]` |
-| max pool 2 | `[B*64, 128, 4, 4]` |
-| down block 2 (`conv -> SiLU`) | `[B*64, 256, 4, 4]` |
-| max pool 3 | `[B*64, 256, 2, 2]` |
-| down block 3 (`conv -> SiLU`) | `[B*64, 512, 2, 2]` |
-| max pool 4 | `[B*64, 512, 1, 1]` |
-| token reshape | `[B*64, 512, 1, 1]` |
-| bottleneck concat input | `[B*64, 1024, 1, 1]` |
-| bottleneck output (`conv -> SiLU`) | `[B*64, 512, 1, 1]` |
-| nearest upsample 1 + skip concat | `[B*64, 1024, 2, 2]` |
-| up block 1 (`conv -> SiLU`) | `[B*64, 512, 2, 2]` |
-| nearest upsample 2 + skip concat | `[B*64, 768, 4, 4]` |
-| up block 2 (`conv -> SiLU`) | `[B*64, 256, 4, 4]` |
-| nearest upsample 3 + skip concat | `[B*64, 384, 8, 8]` |
-| up block 3 (`conv -> SiLU`) | `[B*64, 128, 8, 8]` |
-| nearest upsample 4 + skip concat | `[B*64, 192, 16, 16]` |
-| up block 4 (`conv -> SiLU`) | `[B*64, 64, 16, 16]` |
-| output projection patches | `[B*64, 1, 16, 16]` |
-| regroup predicted patches | `[B, 64, 1, 16, 16]` |
-| unpatchify output | `[B, 1, 128, 128]` |
-
-The current refiner does not use explicit timestep-conditioning. Downsampling is performed by a separate `MaxPool2d(2)` after each down block, with no extra activation after the pool. Upsampling is performed by nearest-neighbor resize first, then skip concatenation, then a single-conv block.
-
-DiT-token conditioning is injected directly at the `1x1` bottleneck of each patch U-Net by channel concatenation:
-
-```text
-token_context = patch_tokens.reshape(B*64, 512)
-token_map = token_context.view(B*64, 512, 1, 1)
-x = concat([patch_bottleneck_feature, token_map], dim=1)
-```
-
-Final output:
-
-```text
-pred_flow = [B, 1, 128, 128]
-```
-
-## 12. Training Path
-
-`FlowTrainer` optimizes pixel-space flow prediction.
-
-Optimizer:
-
-- `AdamW`
-- two param groups: `decay` and `no_decay`
-- `decay` group uses `weight_decay=0.01`
-- `no_decay` group uses `weight_decay=0.0`
-- `no_decay` covers parameters with `ndim <= 1`, explicit `.bias` parameters, and batch-norm style parameters if present
-
-Because the active norm modules use `elementwise_affine=False`, they do not contribute trainable norm weights or biases.
+`XPredTrainer` optimizes an `x_pred` backbone under a derived `v_pred` supervision target.
 
 Active losses:
 
-- flow MSE term
-- pixel reconstruction term
-- optional perceptual term when a perceptor checkpoint is explicitly enabled
+- v-space MSE term derived from `x_pred`
 
-The architecture itself does not depend on the perceptor.
+The trainer consumes the final pixel prediction and converts it to `v_pred` for the main loss:
 
-## 13. Gradient Flow For Deduplicated Conditions
+```text
+pred_x = model.predict_x(xt, timesteps, conditioning_tokens=...)
+pred_v = (pred_x - xt) / (1 - t)
+```
 
-Training batches deduplicate content and style encoder inputs before expanding them back to sample-level batches.
+So the refactor removes the old decoder and changes the trainer contract from direct `v_pred` output to `x_pred -> v_pred`.
 
-Current behavior:
+Inference sampling uses a fixed Euler ODE solver over `sample_steps` (default `20`), updating `x_t` with a single `v_pred` evaluation per step:
 
-- content/style encoder forward passes run on unique items only
-- expanded batch conditioning still drives the full DiT backbone and refiner
-- gradients returning to the deduplicated content/style condition banks are averaged by reuse count
-- averaged gradients still preserve differences from distinct `x_t / t / target` samples; only the duplicate-count scaling is removed
-- backbone and refiner gradients remain full-batch gradients
+```text
+x_{t + dt} = x_t + dt * v_pred(x_t, t)
+```
 
-So:
+## 10. Compatibility Note
 
-- encoder-side shared condition tensors use mean gradient over repeated references
-- backbone-side modules still optimize against the full effective batch
+This refactor intentionally removed:
+
+- patch/image U-Net refiners
+- `refiner_mode`
+- `detailer_*` configuration
+- the RMS `scale/gate` shortcut path
+
+As a result, checkpoints produced before this refactor are not expected to load into the new model definition.

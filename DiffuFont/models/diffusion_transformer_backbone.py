@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pixel-space DiT backbone for content+style glyph flow generation."""
+"""Pixel-space DiT backbone for content+style glyph x-pred generation."""
 
 from __future__ import annotations
 
@@ -65,11 +65,6 @@ def modulate(hidden_states: torch.Tensor, shift: torch.Tensor, scale: torch.Tens
     shift = _broadcast_modulation(hidden_states, shift)
     scale = _broadcast_modulation(hidden_states, scale)
     return hidden_states * (1.0 + scale) + shift
-
-
-def modulate_scale_only(hidden_states: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    scale = _broadcast_modulation(hidden_states, scale)
-    return hidden_states * (1.0 + scale)
 
 
 def _normalize_norm_variant(norm_variant: str) -> str:
@@ -167,24 +162,18 @@ class DiTBlock(nn.Module):
         self,
         patch_tokens: torch.Tensor,
         *,
-        self_attn_shift: torch.Tensor | None,
+        self_attn_shift: torch.Tensor,
         self_attn_scale: torch.Tensor,
         self_attn_gate: torch.Tensor,
-        ffn_shift: torch.Tensor | None,
+        ffn_shift: torch.Tensor,
         ffn_scale: torch.Tensor,
         ffn_gate: torch.Tensor,
     ) -> torch.Tensor:
         x = patch_tokens
-        if self_attn_shift is None:
-            q = modulate_scale_only(self.norm_self(x), self_attn_scale)
-        else:
-            q = modulate(self.norm_self(x), self_attn_shift, self_attn_scale)
+        q = modulate(self.norm_self(x), self_attn_shift, self_attn_scale)
         self_out, _ = self.self_attn(q, q, q, need_weights=False)
         x = x + _broadcast_modulation(self_out, self_attn_gate) * self_out
-        if ffn_shift is None:
-            mlp_out = self.mlp(modulate_scale_only(self.norm_mlp(x), ffn_scale))
-        else:
-            mlp_out = self.mlp(modulate(self.norm_mlp(x), ffn_shift, ffn_scale))
+        mlp_out = self.mlp(modulate(self.norm_mlp(x), ffn_shift, ffn_scale))
         x = x + _broadcast_modulation(mlp_out, ffn_gate) * mlp_out
         return x
 
@@ -193,6 +182,7 @@ class GlyphDiTBlock(nn.Module):
     def __init__(
         self,
         hidden_dim: int,
+        condition_dim: int,
         num_heads: int,
         mlp_ratio: float,
         *,
@@ -202,20 +192,22 @@ class GlyphDiTBlock(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_dim = int(hidden_dim)
+        self.condition_dim = int(condition_dim)
         self.use_content_injection = bool(use_content_injection)
         self.norm_variant = _normalize_norm_variant(norm_variant)
-        self.content_control_norm = (
-            _build_norm(hidden_dim, norm_variant=self.norm_variant)
+        self.condition_norm = (
+            _build_norm(self.condition_dim, norm_variant=self.norm_variant)
             if self.use_content_injection
             else None
         )
-        self.attn_time_norm = _build_norm(hidden_dim, norm_variant=self.norm_variant)
-        self.attn_time_to_token = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim),
+        self.condition_to_hidden = (
+            nn.Sequential(
+                nn.Linear(self.condition_dim, hidden_dim),
+            )
+            if self.use_content_injection
+            else None
         )
-        joint_out_dim = hidden_dim * (4 if self.norm_variant == "rms" else 6)
-        self.joint_mod = _build_zero_linear(hidden_dim, joint_out_dim)
+        self.joint_mod = _build_zero_linear(hidden_dim, hidden_dim * 6)
         self.dit_block = DiTBlock(
             hidden_dim,
             num_heads,
@@ -228,39 +220,41 @@ class GlyphDiTBlock(nn.Module):
         self,
         patch_tokens: torch.Tensor,
         *,
-        time_cond: torch.Tensor,
-        content_tokens: torch.Tensor | None,
+        time_hidden: torch.Tensor,
+        conditioning_tokens: torch.Tensor | None,
     ) -> torch.Tensor:
         x = patch_tokens
-        attn_time_tokens = self.attn_time_to_token(self.attn_time_norm(time_cond)).unsqueeze(1).expand_as(x)
-        sa_source = attn_time_tokens
+        if time_hidden.shape != x.shape:
+            raise RuntimeError(
+                "time hidden shape mismatch: "
+                f"expected {tuple(x.shape)}, got {tuple(time_hidden.shape)}"
+            )
+        joint_hidden = time_hidden
         if self.use_content_injection:
             if (
-                content_tokens is None
-                or self.content_control_norm is None
+                conditioning_tokens is None
+                or self.condition_norm is None
+                or self.condition_to_hidden is None
             ):
-                raise RuntimeError("content_tokens must be provided when content injection is enabled")
-            if content_tokens.shape != x.shape:
+                raise RuntimeError("conditioning_tokens must be provided when content injection is enabled")
+            expected_condition_shape = (x.size(0), x.size(1), self.condition_dim)
+            if conditioning_tokens.shape != expected_condition_shape:
                 raise RuntimeError(
-                    "content token shape mismatch: "
-                    f"expected {tuple(x.shape)}, got {tuple(content_tokens.shape)}"
+                    "conditioning token shape mismatch: "
+                    f"expected {expected_condition_shape}, got {tuple(conditioning_tokens.shape)}"
                 )
-            content_source = self.content_control_norm(content_tokens)
-            sa_source = sa_source + content_source
+            condition_hidden = self.condition_to_hidden(self.condition_norm(conditioning_tokens))
+            joint_hidden = joint_hidden + condition_hidden
+        modulation = self.joint_mod(F.silu(joint_hidden))
 
-        if self.norm_variant == "rms":
-            self_attn_scale, self_attn_gate, ffn_scale, ffn_gate = self.joint_mod(sa_source).chunk(4, dim=-1)
-            self_attn_shift = None
-            ffn_shift = None
-        else:
-            (
-                self_attn_shift,
-                self_attn_scale,
-                self_attn_gate,
-                ffn_shift,
-                ffn_scale,
-                ffn_gate,
-            ) = self.joint_mod(sa_source).chunk(6, dim=-1)
+        (
+            self_attn_shift,
+            self_attn_scale,
+            self_attn_gate,
+            ffn_shift,
+            ffn_scale,
+            ffn_gate,
+        ) = modulation.chunk(6, dim=-1)
 
         x = self.dit_block(
             x,
@@ -280,9 +274,10 @@ class DiffusionTransformerBackbone(nn.Module):
         *,
         in_channels: int = 1,
         image_size: int = 128,
-        patch_size: int = 16,
-        hidden_dim: int = 512,
-        depth: int = 16,
+        patch_size: int = 8,
+        hidden_dim: int = 256,
+        conditioning_dim: int | None = None,
+        depth: int = 12,
         num_heads: int = 8,
         mlp_ratio: float = 4.0,
         content_injection_layers: Sequence[int] | None = None,
@@ -297,6 +292,7 @@ class DiffusionTransformerBackbone(nn.Module):
         self.image_size = int(image_size)
         self.patch_size = int(patch_size)
         self.hidden_dim = int(hidden_dim)
+        self.conditioning_dim = self.hidden_dim if conditioning_dim is None else int(conditioning_dim)
         self.depth = int(depth)
         self.num_heads = int(num_heads)
         if str(conditioning_injection_mode) != "all":
@@ -331,12 +327,13 @@ class DiffusionTransformerBackbone(nn.Module):
             for block_idx in range(self.depth)
         ]
         self.has_content_injection = any(self.content_layer_mask)
+        self.patch_dim = self.in_channels * self.patch_size * self.patch_size
+        self.patch_embed_hidden_dim = max(128, self.patch_dim)
 
-        self.patch_embed = nn.Conv2d(
-            self.in_channels,
-            self.hidden_dim,
-            kernel_size=self.patch_size,
-            stride=self.patch_size,
+        self.patch_embed = nn.Sequential(
+            nn.Linear(self.patch_dim, self.patch_embed_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(self.patch_embed_hidden_dim, self.hidden_dim),
         )
         pos_embed = build_2d_sincos_pos_embed(self.hidden_dim, self.grid_size, self.grid_size)
         self.register_buffer("pos_embed", pos_embed.unsqueeze(0), persistent=False)
@@ -348,11 +345,13 @@ class DiffusionTransformerBackbone(nn.Module):
         )
         # Keep long-run time conditioning amplitude stable before it enters modulation heads.
         self.time_cond_norm = _build_norm(self.hidden_dim, norm_variant=self.norm_variant)
+        self.time_to_hidden = nn.Linear(self.hidden_dim, self.hidden_dim)
         self.blocks = nn.ModuleList()
         for block_idx in range(self.depth):
             self.blocks.append(
                 GlyphDiTBlock(
                     self.hidden_dim,
+                    self.conditioning_dim,
                     self.num_heads,
                     mlp_ratio,
                     use_content_injection=self.content_layer_mask[block_idx],
@@ -390,7 +389,7 @@ class DiffusionTransformerBackbone(nn.Module):
         image: torch.Tensor,
         timesteps: torch.Tensor,
         *,
-        content_tokens: torch.Tensor,
+        conditioning_tokens: torch.Tensor,
     ) -> torch.Tensor:
         if image.dim() != 4:
             raise ValueError(f"image must be 4D, got {tuple(image.shape)}")
@@ -402,28 +401,37 @@ class DiffusionTransformerBackbone(nn.Module):
                 f"got {tuple(image.shape)}"
             )
 
-        x = self.patch_embed(image).flatten(2).transpose(1, 2).contiguous()
+        x = (
+            image.unfold(2, self.patch_size, self.patch_size)
+            .unfold(3, self.patch_size, self.patch_size)
+            .permute(0, 2, 3, 1, 4, 5)
+            .contiguous()
+            .view(image.size(0), self.num_tokens, self.patch_dim)
+        )
+        x = self.patch_embed(x)
         x = x + self.pos_embed.to(device=x.device, dtype=x.dtype)
 
         time_cond = timestep_embedding(timesteps, self.hidden_dim).to(dtype=x.dtype)
         time_cond = self.time_mlp(time_cond)
         time_cond = self.time_cond_norm(time_cond)
+        time_hidden = self.time_to_hidden(time_cond).unsqueeze(1).expand_as(x)
 
         if self.has_content_injection:
-            content_tokens = content_tokens.to(device=x.device, dtype=x.dtype)
-            if content_tokens.shape != x.shape:
+            conditioning_tokens = conditioning_tokens.to(device=x.device, dtype=x.dtype)
+            expected_condition_shape = (x.size(0), x.size(1), self.conditioning_dim)
+            if conditioning_tokens.shape != expected_condition_shape:
                 raise RuntimeError(
-                    "content token shape mismatch: "
-                    f"expected {tuple(x.shape)}, got {tuple(content_tokens.shape)}"
+                    "conditioning token shape mismatch: "
+                    f"expected {expected_condition_shape}, got {tuple(conditioning_tokens.shape)}"
                 )
         else:
-            content_tokens = None
+            conditioning_tokens = None
 
         for block in self.blocks:
             x = block(
                 x,
-                time_cond=time_cond,
-                content_tokens=content_tokens if block.use_content_injection else None,
+                time_hidden=time_hidden,
+                conditioning_tokens=conditioning_tokens if block.use_content_injection else None,
             )
 
         x = self.final_norm(x)

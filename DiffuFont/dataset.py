@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LMDB-backed dataset for content+style glyph flow training."""
+"""LMDB-backed dataset for content+style glyph x-pred training."""
 
 from __future__ import annotations
 
