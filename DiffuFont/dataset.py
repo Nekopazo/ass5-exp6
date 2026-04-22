@@ -29,7 +29,7 @@ class FontImageDataset(Dataset):
         *,
         max_fonts: int = 0,
         style_ref_count: Optional[int] = None,
-        style_ref_count_min: int = 6,
+        style_ref_count_min: int = 8,
         style_ref_count_max: int = 8,
         include_positive_style: bool = False,
         random_seed: int = 42,
@@ -508,6 +508,8 @@ class CartesianFontCharBatchSampler(Sampler[List[int]]):
 
     def _chunk_items(self, items: List[Any], chunk_size: int) -> List[List[Any]]:
         chunks: List[List[Any]] = []
+        if not items:
+            return chunks
         for start in range(0, len(items), chunk_size):
             chunk = items[start : start + chunk_size]
             if len(chunk) < chunk_size and self.drop_last:

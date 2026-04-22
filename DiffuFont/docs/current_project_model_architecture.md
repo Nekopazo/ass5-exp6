@@ -13,26 +13,30 @@ Current model:
 - image size: `128x128`
 - default patch size: `8`
 - patch lattice: `16x16 = 256` tokens
+- patch embed bottleneck: `128`
 - content encoder output: `16x16x256`
 - style encoder output: `16x16x256`
+- content encoder block depth: `2` `DBlock`s per stage
+- style encoder block depth: `2` `DBlock`s per stage
 - style fusion: one-shot `content <- style` cross-attention outside the backbone
 - DiT hidden size: `256`
 - DiT depth: `12`
 - DiT heads: `8`
 - DiT feed-forward: `swiglu`
 - DiT normalization/modulation: `rms` + `shift/scale/gate`
-- output path: `DiT tokens -> patch projection -> unpatchify`
+- attention stabilization: head-wise `qk` RMS norm
+- output path: `DiT tokens -> final adaLN -> patch projection -> unpatchify`
 
 Effective path:
 
-1. Encode `content_img` into `16x16x256` content tokens.
-2. Encode all style references into `16x16x256` style tokens.
+1. Encode `content_img` with a `DBlock` conv pyramid into `16x16x256` content tokens.
+2. Encode all style references with a matching `DBlock` conv pyramid into `16x16x256` style tokens.
 3. Concatenate all style-reference tokens along the token axis.
 4. Run one cross-attention with content tokens as query and style tokens as key/value.
-5. Fuse `content` and `content + style_context` with `concat -> LayerNorm -> Linear(512 -> 256)`.
-6. Patchify `x_t` into `256` grayscale patches and project them into the DiT hidden dimension.
-7. Run the DiT backbone with timestep conditioning plus fused content tokens at every block.
-8. Project final DiT tokens back to patch pixels and unpatchify to `[B, 1, 128, 128]`.
+5. Concatenate `content` and `style_context` into a `512`-channel conditioner.
+6. Run bottleneck conv patch embedding on `x_t`: `Conv2d(1 -> 128, k=8, s=8)` then `Conv2d(128 -> 256, k=1)`.
+7. Run the DiT backbone with timestep conditioning plus the `512`-channel conditioner at every block.
+8. Run a conditioner-aware final adaLN head, then project final DiT tokens back to patch pixels and unpatchify to `[B, 1, 128, 128]`.
 
 There is no U-Net refiner in the active architecture.
 
@@ -45,6 +49,7 @@ There is no U-Net refiner in the active architecture.
 | `patch_size` | `8` |
 | `patch_grid_size` | `16` |
 | `num_patches` | `256` |
+| `patch_embed_bottleneck_dim` | `128` |
 | `encoder_hidden_dim` | `256` |
 | `dit_hidden_dim` | `256` |
 | `dit_depth` | runtime-configured, default `12` |
@@ -52,6 +57,7 @@ There is no U-Net refiner in the active architecture.
 | `dit_mlp_ratio` | `4.0` |
 | `ffn_activation` | `swiglu` |
 | `norm_variant` | `rms` |
+| `attention_qk_norm` | `head-wise rms` |
 | `content_style_fusion_heads` | `4` |
 | `content_injection_layers` | all DiT layers |
 
@@ -97,7 +103,11 @@ patch_tokens = backbone(
     conditioning_tokens=conditioning_tokens,
 )                                                                   # [B, 256, 256]
 
-pred_x = decode_patch_tokens(patch_tokens)                          # [B, 1, 128, 128]
+pred_x = decode_patch_tokens(
+    patch_tokens,
+    timesteps=timesteps,
+    conditioning_tokens=conditioning_tokens,
+)                                                                   # [B, 1, 128, 128]
 ```
 
 ## 4. Content Path
@@ -109,12 +119,12 @@ Shape trace:
 | stage | shape |
 | --- | --- |
 | input | `[B, 1, 128, 128]` |
-| stem conv | `[B, 64, 64, 64]` |
-| stem block | `[B, 64, 64, 64]` |
-| downsample stage 1 | `[B, 128, 32, 32]` |
-| residual block 1 | `[B, 128, 32, 32]` |
-| downsample stage 2 | `[B, 256, 16, 16]` |
-| residual block 2 | `[B, 256, 16, 16]` |
+| stage 0 downsample `DBlock` | `[B, 64, 64, 64]` |
+| stage 0 refine `DBlock` | `[B, 64, 64, 64]` |
+| stage 1 downsample `DBlock` | `[B, 128, 32, 32]` |
+| stage 1 refine `DBlock` | `[B, 128, 32, 32]` |
+| stage 2 downsample `DBlock` | `[B, 256, 16, 16]` |
+| stage 2 refine `DBlock` | `[B, 256, 16, 16]` |
 | flatten to tokens | `[B, 256, 256]` |
 
 ## 5. Style Path
@@ -129,12 +139,12 @@ Shape trace:
 | --- | --- |
 | `style_img` | `[B, R, 1, 128, 128]` |
 | flatten refs | `[B*R, 1, 128, 128]` |
-| stem conv | `[B*R, 64, 64, 64]` |
-| stem block | `[B*R, 64, 64, 64]` |
-| downsample stage 1 | `[B*R, 128, 32, 32]` |
-| residual block 1 | `[B*R, 128, 32, 32]` |
-| downsample stage 2 | `[B*R, 256, 16, 16]` |
-| residual block 2 | `[B*R, 256, 16, 16]` |
+| stage 0 downsample `DBlock` | `[B*R, 64, 64, 64]` |
+| stage 0 refine `DBlock` | `[B*R, 64, 64, 64]` |
+| stage 1 downsample `DBlock` | `[B*R, 128, 32, 32]` |
+| stage 1 refine `DBlock` | `[B*R, 128, 32, 32]` |
+| stage 2 downsample `DBlock` | `[B*R, 256, 16, 16]` |
+| stage 2 refine `DBlock` | `[B*R, 256, 16, 16]` |
 | flatten per ref | `[B*R, 256, 256]` |
 | regroup refs | `[B, R*256, 256]` |
 | token valid mask | `[B, R*256]` |
@@ -149,15 +159,13 @@ The style fusion happens exactly once outside the backbone.
 | key = `style_token_bank` | `[B, R*256, 256]` |
 | value = `style_token_bank` | `[B, R*256, 256]` |
 | `style_context` | `[B, 256, 256]` |
-| `content + style_context` | `[B, 256, 256]` |
 | `conditioning_tokens = concat(...)` | `[B, 256, 512]` |
 
 Equation:
 
 ```text
 style_context = CrossAttention(Q=content_tokens, K=style_tokens, V=style_tokens)
-fused_context = content_tokens + style_context
-conditioning_tokens = concat([content_tokens, fused_context], dim=-1)
+conditioning_tokens = concat([content_tokens, style_context], dim=-1)
 ```
 
 ## 7. DiT Backbone
@@ -167,16 +175,17 @@ Implemented by `DiffusionTransformerBackbone` and `GlyphDiTBlock` in `models/dif
 ### 7.1 Patch and Timestep Embedding
 
 ```text
-patch_pixels = patchify(x_t_image)                                  # [B, 256, 64]
-x = patch_embed(patch_pixels)                                       # [B, 256, 256]
-x = x + pos_embed                                                   # [B, 256, 256]
+x = Conv2d(1 -> 128, kernel=8, stride=8)(x_t_image)                # [B, 128, 16, 16]
+x = Conv2d(128 -> 256, kernel=1, stride=1)(x)                      # [B, 256, 16, 16]
+x = flatten(x)                                                     # [B, 256, 256]
+x = x + pos_embed                                                  # [B, 256, 256]
 
-time_cond = timestep_embedding(timesteps, 256)                      # [B, 256]
-time_cond = time_mlp(time_cond)                                     # [B, 256]
-time_cond = time_cond_norm(time_cond)                               # [B, 256]
+time_cond = timestep_embedding(timesteps, 256)                     # [B, 256]
+time_cond = time_mlp(time_cond)                                    # [B, 256]
+time_cond = time_cond_norm(time_cond)                              # [B, 256]
 ```
 
-For the default `8x8` grayscale patch, `patch_dim = 64`, so the embedding MLP is:
+For the default `8x8` grayscale patch, raw patch dim is `64`, and the active conv embed is:
 
 ```text
 64 -> 128 -> 256
@@ -210,55 +219,83 @@ There is no reduced `scale/gate` shortcut path in the active implementation.
 Current conditioning path inside each block:
 
 ```text
-time_hidden = time_to_hidden(time_cond)                            # [B, 256]
-time_hidden = time_hidden.unsqueeze(1).expand(B, N, 256)          # [B, 256, 256]
-
 cond_hidden = cond_to_hidden(norm(conditioning_tokens))            # [B, 256, 256]
+time_hidden = block_time_to_hidden(time_cond)                      # [B, 256]
+time_hidden = time_hidden.unsqueeze(1).expand(B, N, 256)          # [B, 256, 256]
 joint_hidden = SiLU(time_hidden + cond_hidden)                     # [B, 256, 256]
 
 mods = joint_mod(joint_hidden)                                     # [B, 256, 1536]
 ```
 
-`time_to_hidden` is shared by the whole backbone, so every block receives the same per-sample time hidden state and only learns its own conditioner projection plus modulation head.
+`time_cond` is shared by the whole backbone, but every block owns its own `time_to_hidden`, so each layer can learn its own timestep interpretation before mixing with the conditioner.
+
+Inside each attention layer, projected `q` and `k` are additionally normalized with per-head RMS norm before flash SDPA.
 
 ## 8. Output Head
 
-Implemented by `output_norm` and `output_proj` in `models/source_part_ref_dit.py`.
+Implemented by `output_norm`, `output_condition_norm`, `output_condition_to_hidden`, `output_time_to_hidden`, `output_mod`, and `output_proj` in `models/source_part_ref_dit.py`.
 
 Shape trace:
 
 | stage | shape |
 | --- | --- |
 | DiT output tokens | `[B, 256, 256]` |
-| output norm | `[B, 256, 256]` |
+| final conditioner hidden | `[B, 256, 256]` |
+| final adaLN modulation | `[B, 256, 256]` |
 | patch projection | `[B, 256, 64]` |
 | patch grid | `[B, 16, 16, 1, 8, 8]` |
 | unpatchify | `[B, 1, 128, 128]` |
 
-The output projection is zero-initialized so the model starts from a stable near-zero `x_pred`.
+The final modulation head and output projection are zero-initialized so the model starts from a stable near-zero `x_pred`.
 
 ## 9. Training Path
 
-`XPredTrainer` optimizes an `x_pred` backbone under a derived `v_pred` supervision target.
+`XPredTrainer` now mirrors JiT's `x_pred -> derived v_pred` training path.
 
 Active losses:
 
 - v-space MSE term derived from `x_pred`
+- optional dual-ref random-style supervision where both ref sets learn the same target with JiT-style `v-loss`
 
-The trainer consumes the final pixel prediction and converts it to `v_pred` for the main loss:
+The trainer samples timestep with a logistic-normal distribution and applies the same denominator clamp used during inference:
 
 ```text
+t = sigmoid(randn * p_std + p_mean)
+x0 = noise_scale * randn
+xt = t * x1 + (1 - t) * x0
+
+target_v = (x1 - xt) / clamp_min(1 - t, t_eps)
 pred_x = model.predict_x(xt, timesteps, conditioning_tokens=...)
-pred_v = (pred_x - xt) / (1 - t)
+pred_v = (pred_x - xt) / clamp_min(1 - t, t_eps)
 ```
 
-So the refactor removes the old decoder and changes the trainer contract from direct `v_pred` output to `x_pred -> v_pred`.
+So the refactor removes the old decoder and changes the trainer contract from direct `v_pred` output to `x_pred -> derived v_pred`.
 
-Inference sampling uses a fixed Euler ODE solver over `sample_steps` (default `20`), updating `x_t` with a single `v_pred` evaluation per step:
+When `consistency_lambda > 0` and `consistency_start_step` is explicitly reached, training also samples a second random style-reference set for the same target/font pair. Both ref sets use the same `xt` and `t`, and both branches are directly supervised toward the same target with JiT-style `v-loss`; the two branch losses are averaged with `consistency_lambda` used as the alternate-ref branch weight. `pred_x_ref_diff_l1` is logged only as a diagnostic and is not part of the loss.
+
+Inference sampling now matches JiT's ODE update more closely: Heun is used for all intermediate steps, and the last step falls back to Euler.
 
 ```text
+for intermediate steps:
+x_euler = x_t + dt * v_pred(x_t, t)
+x_{t + dt} = x_t + dt * 0.5 * (v_pred(x_t, t) + v_pred(x_euler, t + dt))
+
+last step:
 x_{t + dt} = x_t + dt * v_pred(x_t, t)
 ```
+
+Active optimizer and schedule defaults for diffusion training:
+
+- optimizer: `AdamW`
+- betas: `(0.9, 0.95)`
+- weight decay: `0.0`
+- learning-rate schedule: warmup then `constant` by default, optional `cosine`
+- EMA: `0.9999`, enabled from step `40000`
+- dual-ref random-style supervision: alternate-ref branch weight `= 1.0`, start step must be set explicitly
+- timestep sampling: `t = sigmoid(N(p_mean=-0.8, p_std=0.8))`
+- denominator clamp: `t_eps = 0.05`
+- noise scale: `1.0`
+- default sampling steps: `20`
 
 ## 10. Compatibility Note
 

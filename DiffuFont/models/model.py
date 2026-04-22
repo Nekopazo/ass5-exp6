@@ -9,7 +9,7 @@ import json
 import math
 from pathlib import Path
 import time
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 import torch
 import torch.nn.functional as F
@@ -81,6 +81,16 @@ def _apply_weight_decay_to_optimizer(optimizer: torch.optim.Optimizer, weight_de
     for group in optimizer.param_groups:
         current = float(group.get("weight_decay", 0.0))
         group["weight_decay"] = 0.0 if current == 0.0 else float(weight_decay)
+
+
+def _apply_adam_betas_to_optimizer(
+    optimizer: torch.optim.Optimizer,
+    *,
+    beta1: float,
+    beta2: float,
+) -> None:
+    for group in optimizer.param_groups:
+        group["betas"] = (float(beta1), float(beta2))
 
 
 class _ReuseCountMeanGrad(torch.autograd.Function):
@@ -209,6 +219,7 @@ class _BaseTrainer:
         total_steps: int,
         lr_warmup_steps: int = 0,
         lr_decay_start_step: Optional[int] = None,
+        lr_schedule: str = "constant",
         lr_min_scale: float = 0.1,
         log_every_steps: int,
         save_every_steps: Optional[int],
@@ -217,6 +228,8 @@ class _BaseTrainer:
         grad_clip_norm: Optional[float] = 1.0,
         grad_clip_min_norm: Optional[float] = None,
         weight_decay: float = 0.0,
+        adam_beta1: float = 0.9,
+        adam_beta2: float = 0.95,
         track_best_on_val: bool = False,
     ) -> None:
         self.model = model.to(device)
@@ -238,6 +251,7 @@ class _BaseTrainer:
         self.current_epoch = 0
         self.sample_every_steps: Optional[int] = None
         self.sample_batch: Optional[Dict[str, torch.Tensor]] = None
+        self.sample_batch_builder: Optional[Callable[[], Dict[str, torch.Tensor]]] = None
         self.sample_dir: Optional[Path] = None
         self.checkpoint_dir: Optional[Path] = None
         self.step_log_file: Optional[Path] = None
@@ -245,6 +259,8 @@ class _BaseTrainer:
         self.best_val_loss: Optional[float] = None
 
         self.weight_decay = max(0.0, float(weight_decay))
+        self.adam_beta1 = float(adam_beta1)
+        self.adam_beta2 = float(adam_beta2)
         param_groups, base_lrs, trainable_params = _build_adamw_param_groups(
             self.model,
             base_lr=float(lr),
@@ -253,13 +269,28 @@ class _BaseTrainer:
         if not trainable_params:
             raise RuntimeError("No trainable parameters found.")
         self.trainable_params = trainable_params
-        self.optimizer = torch.optim.AdamW(param_groups)
+        self.optimizer = torch.optim.AdamW(
+            param_groups,
+            betas=(self.adam_beta1, self.adam_beta2),
+        )
         self.base_lrs = base_lrs
         self.lr_warmup_steps = max(0, int(lr_warmup_steps))
         self.lr_decay_start_step = None if lr_decay_start_step is None else max(0, int(lr_decay_start_step))
+        self.lr_schedule = str(lr_schedule)
+        if self.lr_schedule not in {"constant", "cosine"}:
+            raise ValueError(f"lr_schedule must be 'constant' or 'cosine', got {lr_schedule!r}")
         self.lr_min_scale = float(min(max(0.0, float(lr_min_scale)), 1.0))
 
     def _lr_scale_for_step(self, step: int) -> float:
+        if self.lr_schedule == "constant":
+            if self.lr_warmup_steps <= 0:
+                return 1.0
+            clamped_step = min(max(int(step), 1), self.total_steps)
+            if clamped_step <= self.lr_warmup_steps:
+                return float(clamped_step) / float(max(1, self.lr_warmup_steps))
+            return 1.0
+        if self.lr_schedule != "cosine":
+            raise ValueError(f"unsupported lr_schedule: {self.lr_schedule!r}")
         return _hold_then_linear_scale(
             step=step,
             total_steps=self.total_steps,
@@ -443,10 +474,12 @@ class _BaseTrainer:
 
                 if (
                     self.sample_every_steps is not None
-                    and self.sample_batch is not None
+                    and (self.sample_batch is not None or self.sample_batch_builder is not None)
                     and self.sample_dir is not None
                     and self.global_step % self.sample_every_steps == 0
                 ):
+                    if self.sample_batch is None and self.sample_batch_builder is not None:
+                        self.sample_batch = self.sample_batch_builder()
                     self.sample_and_save(self.sample_batch, self.sample_dir)
 
                 if (
@@ -519,6 +552,7 @@ class FontPerceptorTrainer(_BaseTrainer):
             total_steps=total_steps,
             lr_warmup_steps=0,
             lr_decay_start_step=None,
+            lr_schedule="cosine",
             lr_min_scale=0.0,
             log_every_steps=log_every_steps,
             save_every_steps=save_every_steps,
@@ -717,18 +751,26 @@ class XPredTrainer(_BaseTrainer):
         total_steps: int = 100_000,
         lr_warmup_steps: int = 0,
         lr_decay_start_step: Optional[int] = None,
+        lr_schedule: str = "constant",
         lr_min_scale: float = 0.1,
-        v_loss_lambda: float = 1.0,
+        p_mean: float = -0.8,
+        p_std: float = 0.8,
+        t_eps: float = 5e-2,
+        noise_scale: float = 1.0,
         sample_steps: int = 20,
         ema_decay: float = 0.9999,
         ema_start_step: Optional[int] = None,
+        consistency_lambda: float = 1.0,
+        consistency_start_step: Optional[int] = None,
         log_every_steps: int = 100,
         save_every_steps: Optional[int] = None,
         val_every_steps: Optional[int] = None,
         val_max_batches: Optional[int] = 16,
         grad_clip_norm: Optional[float] = 1.0,
         grad_clip_min_norm: Optional[float] = None,
-        weight_decay: float = 0.01,
+        weight_decay: float = 0.0,
+        adam_beta1: float = 0.9,
+        adam_beta2: float = 0.95,
     ) -> None:
         super().__init__(
             model,
@@ -737,6 +779,7 @@ class XPredTrainer(_BaseTrainer):
             total_steps=total_steps,
             lr_warmup_steps=lr_warmup_steps,
             lr_decay_start_step=lr_decay_start_step,
+            lr_schedule=lr_schedule,
             lr_min_scale=lr_min_scale,
             log_every_steps=log_every_steps,
             save_every_steps=save_every_steps,
@@ -745,9 +788,14 @@ class XPredTrainer(_BaseTrainer):
             grad_clip_norm=grad_clip_norm,
             grad_clip_min_norm=grad_clip_min_norm,
             weight_decay=weight_decay,
+            adam_beta1=adam_beta1,
+            adam_beta2=adam_beta2,
             track_best_on_val=True,
         )
-        self.v_loss_lambda = float(v_loss_lambda)
+        self.p_mean = float(p_mean)
+        self.p_std = float(p_std)
+        self.t_eps = max(0.0, float(t_eps))
+        self.noise_scale = float(noise_scale)
         self.sample_steps = max(1, int(sample_steps))
         self.ema_model: Optional[nn.Module] = None
         self.ema_enabled = False
@@ -755,6 +803,9 @@ class XPredTrainer(_BaseTrainer):
         self.ema_start_step = self.total_steps + 1
         self._set_ema_decay(float(ema_decay))
         self._set_ema_start_step(ema_start_step)
+        self.consistency_lambda = max(0.0, float(consistency_lambda))
+        self.consistency_start_step = self.total_steps + 1
+        self._set_consistency_start_step(consistency_start_step)
 
     def _set_ema_decay(self, ema_decay: float) -> None:
         ema_decay = float(ema_decay)
@@ -768,8 +819,36 @@ class XPredTrainer(_BaseTrainer):
             self.ema_start_step = self.total_steps + 1
             return
         if ema_start_step is None:
-            ema_start_step = (self.total_steps // 2) + 1
+            ema_start_step = 40_000
         self.ema_start_step = max(1, min(int(ema_start_step), self.total_steps + 1))
+
+    def _set_consistency_start_step(self, consistency_start_step: Optional[int]) -> None:
+        if self.consistency_lambda <= 0.0:
+            self.consistency_start_step = self.total_steps + 1
+            return
+        if consistency_start_step is None:
+            self.consistency_start_step = self.total_steps + 1
+            return
+        self.consistency_start_step = max(1, min(int(consistency_start_step), self.total_steps + 1))
+
+    def _consistency_is_active(self, *, step: int) -> bool:
+        return self.consistency_lambda > 0.0 and int(step) >= int(self.consistency_start_step)
+
+    def _sample_t(self, batch_size: int, *, device: torch.device) -> torch.Tensor:
+        return torch.sigmoid(torch.randn(batch_size, device=device) * self.p_std + self.p_mean)
+
+    def _lr_scale_for_step(self, step: int) -> float:
+        return super()._lr_scale_for_step(step)
+
+    def _grad_clip_value_for_step(self, step: int) -> Optional[float]:
+        if self.grad_clip_norm is None:
+            return None
+        return _cosine_interpolate(
+            step=step,
+            total_steps=self.total_steps,
+            start_value=self.grad_clip_norm,
+            end_value=self.grad_clip_min_norm if self.grad_clip_min_norm is not None else self.grad_clip_norm,
+        )
 
     def _ensure_ema_model(self) -> None:
         if not self.ema_enabled:
@@ -852,21 +931,86 @@ class XPredTrainer(_BaseTrainer):
             content_index,
             average_grad_by_reuse=True,
         )
+        unique_content_query = model.precompute_content_query(unique_content_tokens)
+        content_query = self._expand_condition_batch(
+            unique_content_query,
+            content_index,
+            average_grad_by_reuse=True,
+        )
         style_token_bank, style_token_valid_mask = model.encode_style_token_bank(
             style_img=style,
             style_ref_mask=style_ref_mask,
         )
-        expanded_style_tokens = self._expand_condition_batch(
+        style_key, style_value = model.precompute_style_kv(
             style_token_bank,
+            token_valid_mask=style_token_valid_mask,
+        )
+        expanded_style_key = self._expand_condition_batch(
+            style_key,
             style_index,
             average_grad_by_reuse=True,
         )
-        expanded_style_token_valid_mask = self._expand_condition_batch(style_token_valid_mask, style_index)
-        return model.fuse_content_style_tokens(
-            content_tokens,
-            expanded_style_tokens,
-            token_valid_mask=expanded_style_token_valid_mask,
+        expanded_style_value = self._expand_condition_batch(
+            style_value,
+            style_index,
+            average_grad_by_reuse=True,
         )
+        return model.fuse_content_style_tokens_from_projected(
+            content_tokens,
+            content_query,
+            expanded_style_key,
+            expanded_style_value,
+        )
+
+    def _prepare_denoising_targets(
+        self,
+        target: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        x1 = target
+        x0 = torch.randn_like(x1) * self.noise_scale
+        timesteps = self._sample_t(x1.size(0), device=self.device)
+        t_view = timesteps.view(-1, 1, 1, 1).to(dtype=x1.dtype)
+        xt = t_view * x1 + (1.0 - t_view) * x0
+        denom = (1.0 - t_view).clamp_min(self.t_eps)
+        target_v = (x1 - xt) / denom
+        return timesteps, xt, denom, target_v, x1
+
+    def _forward_ref_branch(
+        self,
+        model: nn.Module,
+        *,
+        content: torch.Tensor,
+        content_index: torch.Tensor,
+        style: torch.Tensor,
+        style_ref_mask: Optional[torch.Tensor],
+        style_index: torch.Tensor,
+        timesteps: torch.Tensor,
+        xt: torch.Tensor,
+        denom: torch.Tensor,
+        target_v: torch.Tensor,
+        x1: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        conditioning_tokens = self._encode_conditions(
+            model,
+            content,
+            content_index,
+            style,
+            style_ref_mask,
+            style_index,
+        )
+        pred_x = model.predict_x(
+            xt,
+            timesteps,
+            conditioning_tokens=conditioning_tokens,
+        )
+        pred_v = (pred_x - xt) / denom
+        loss_v = F.mse_loss(pred_v.float(), target_v.float())
+        pred_x_l1 = F.l1_loss(pred_x.float(), x1.float())
+        return {
+            "pred_x": pred_x,
+            "loss_v": loss_v,
+            "pred_x_l1": pred_x_l1,
+        }
 
     def _compute_losses(
         self,
@@ -883,42 +1027,71 @@ class XPredTrainer(_BaseTrainer):
         content_index = batch["content_index"].to(self.device, dtype=torch.long)
         style = batch["style_img"].to(self.device)
         style_index = batch["style_index"].to(self.device, dtype=torch.long)
-        font_id = batch["font_id"].to(self.device)
+        style_alt = batch.get("style_img_alt")
+        if style_alt is not None:
+            style_alt = style_alt.to(self.device)
         style_ref_mask = batch.get("style_ref_mask")
         if style_ref_mask is not None:
             style_ref_mask = style_ref_mask.to(self.device)
+        style_ref_mask_alt = batch.get("style_ref_mask_alt")
+        if style_ref_mask_alt is not None:
+            style_ref_mask_alt = style_ref_mask_alt.to(self.device)
 
         with self._autocast_context():
-            x1 = target
-            x0 = torch.randn_like(x1)
-            t_eps = 0.02
-            timesteps = t_eps + (1.0 - 2.0 * t_eps) * torch.rand(x1.size(0), device=self.device)
-            t_view = timesteps.view(-1, 1, 1, 1).to(dtype=x1.dtype)
-            xt = (1.0 - t_view) * x0 + t_view * x1
-            target_v = x1 - x0
-            conditioning_tokens = self._encode_conditions(
+            timesteps, xt, denom, target_v, x1 = self._prepare_denoising_targets(target)
+            dual_ref_active = (
+                style_alt is not None
+                and style_ref_mask_alt is not None
+                and self._consistency_is_active(step=step)
+            )
+            primary_outputs = self._forward_ref_branch(
                 model,
-                content,
-                content_index,
-                style,
-                style_ref_mask,
-                style_index,
+                content=content,
+                content_index=content_index,
+                style=style,
+                style_ref_mask=style_ref_mask,
+                style_index=style_index,
+                timesteps=timesteps,
+                xt=xt,
+                denom=denom,
+                target_v=target_v,
+                x1=x1,
             )
-            pred_x = model.predict_x(
-                xt,
-                timesteps,
-                conditioning_tokens=conditioning_tokens,
-            )
-            denom = (1.0 - t_view).clamp_min(1e-6)
-            pred_v = (pred_x - xt) / denom
-            loss_v_per_sample = (pred_v.float() - target_v.float()).pow(2).reshape(target.size(0), -1).mean(dim=1)
-            loss_v = loss_v_per_sample.mean()
-            pred_x_l1 = (pred_x.float() - target.float()).abs().reshape(target.size(0), -1).mean(dim=1).mean()
-        loss = self.v_loss_lambda * loss_v
+            if dual_ref_active:
+                alt_outputs = self._forward_ref_branch(
+                    model,
+                    content=content,
+                    content_index=content_index,
+                    style=style_alt,
+                    style_ref_mask=style_ref_mask_alt,
+                    style_index=style_index,
+                    timesteps=timesteps,
+                    xt=xt,
+                    denom=denom,
+                    target_v=target_v,
+                    x1=x1,
+                )
+                alt_weight = float(self.consistency_lambda)
+                total_weight = 1.0 + alt_weight
+                loss_v = (primary_outputs["loss_v"] + alt_outputs["loss_v"] * alt_weight) / total_weight
+                pred_x_l1 = (primary_outputs["pred_x_l1"] + alt_outputs["pred_x_l1"] * alt_weight) / total_weight
+                loss_v_ref_alt = alt_outputs["loss_v"]
+                pred_x_ref_diff_l1 = F.l1_loss(
+                    primary_outputs["pred_x"].float(),
+                    alt_outputs["pred_x"].float(),
+                )
+            else:
+                loss_v = primary_outputs["loss_v"]
+                pred_x_l1 = primary_outputs["pred_x_l1"]
+                loss_v_ref_alt = primary_outputs["loss_v"].new_zeros(())
+                pred_x_ref_diff_l1 = pred_x_l1.new_zeros(())
+            loss = loss_v
         metrics = {
             "loss": loss,
             "loss_v": loss_v,
-            "loss_v_term": loss,
+            "loss_v_ref_main": primary_outputs["loss_v"],
+            "loss_v_ref_alt": loss_v_ref_alt,
+            "pred_x_ref_diff_l1": pred_x_ref_diff_l1,
             "pred_x_l1": pred_x_l1,
             "t_mean": timesteps.mean(),
         }
@@ -929,11 +1102,85 @@ class XPredTrainer(_BaseTrainer):
         next_step = self.global_step + 1
         self._set_learning_rate_for_step(next_step)
         self.optimizer.zero_grad(set_to_none=True)
-        metrics = self._compute_losses(
-            batch,
-            step=next_step,
+        dual_ref_active = (
+            batch.get("style_img_alt") is not None
+            and batch.get("style_ref_mask_alt") is not None
+            and self._consistency_is_active(step=next_step)
         )
-        metrics["loss"].backward()
+        if not dual_ref_active:
+            metrics = self._compute_losses(
+                batch,
+                step=next_step,
+            )
+            metrics["loss"].backward()
+        else:
+            target = batch["target"].to(self.device)
+            content = batch["content"].to(self.device)
+            content_index = batch["content_index"].to(self.device, dtype=torch.long)
+            style = batch["style_img"].to(self.device)
+            style_alt = batch["style_img_alt"].to(self.device)
+            style_index = batch["style_index"].to(self.device, dtype=torch.long)
+            style_ref_mask = batch.get("style_ref_mask")
+            if style_ref_mask is not None:
+                style_ref_mask = style_ref_mask.to(self.device)
+            style_ref_mask_alt = batch.get("style_ref_mask_alt")
+            if style_ref_mask_alt is not None:
+                style_ref_mask_alt = style_ref_mask_alt.to(self.device)
+
+            alt_weight = float(self.consistency_lambda)
+            total_weight = 1.0 + alt_weight
+
+            with self._autocast_context():
+                timesteps, xt, denom, target_v, x1 = self._prepare_denoising_targets(target)
+                primary_outputs = self._forward_ref_branch(
+                    self.model,
+                    content=content,
+                    content_index=content_index,
+                    style=style,
+                    style_ref_mask=style_ref_mask,
+                    style_index=style_index,
+                    timesteps=timesteps,
+                    xt=xt,
+                    denom=denom,
+                    target_v=target_v,
+                    x1=x1,
+                )
+                primary_weighted_loss = primary_outputs["loss_v"] / total_weight
+            primary_weighted_loss.backward()
+            pred_x_primary = primary_outputs["pred_x"].detach()
+            loss_v_ref_main = primary_outputs["loss_v"].detach()
+            pred_x_l1_ref_main = primary_outputs["pred_x_l1"].detach()
+
+            with self._autocast_context():
+                alt_outputs = self._forward_ref_branch(
+                    self.model,
+                    content=content,
+                    content_index=content_index,
+                    style=style_alt,
+                    style_ref_mask=style_ref_mask_alt,
+                    style_index=style_index,
+                    timesteps=timesteps,
+                    xt=xt,
+                    denom=denom,
+                    target_v=target_v,
+                    x1=x1,
+                )
+                alt_weighted_loss = (alt_outputs["loss_v"] * alt_weight) / total_weight
+                pred_x_ref_diff_l1 = F.l1_loss(
+                    pred_x_primary.float(),
+                    alt_outputs["pred_x"].float(),
+                )
+            alt_weighted_loss.backward()
+
+            metrics = {
+                "loss": (primary_weighted_loss.detach() + alt_weighted_loss.detach()),
+                "loss_v": (loss_v_ref_main + alt_outputs["loss_v"].detach() * alt_weight) / total_weight,
+                "loss_v_ref_main": loss_v_ref_main,
+                "loss_v_ref_alt": alt_outputs["loss_v"].detach(),
+                "pred_x_ref_diff_l1": pred_x_ref_diff_l1.detach(),
+                "pred_x_l1": (pred_x_l1_ref_main + alt_outputs["pred_x_l1"].detach() * alt_weight) / total_weight,
+                "t_mean": timesteps.mean().detach(),
+            }
         metrics.update(self._apply_grad_clip(step=next_step))
         self.optimizer.step()
         self._update_ema(step=next_step)
@@ -943,7 +1190,7 @@ class XPredTrainer(_BaseTrainer):
         self.model.eval()
         if self.ema_model is not None:
             self.ema_model.eval()
-        with torch.no_grad():
+        with torch.inference_mode():
             return _metrics_to_floats(
                 self._compute_losses(
                     batch,
@@ -974,7 +1221,7 @@ class XPredTrainer(_BaseTrainer):
             style_ref_mask = style_ref_mask.to(self.device)
 
         batch_size = int(content_index.size(0))
-        sample = torch.randn(
+        sample = self.noise_scale * torch.randn(
             batch_size,
             self.model.in_channels,
             self.model.image_size,
@@ -982,7 +1229,6 @@ class XPredTrainer(_BaseTrainer):
             device=self.device,
         )
         step_count = self.sample_steps if num_inference_steps is None else max(1, int(num_inference_steps))
-        dt = 1.0 / float(step_count)
         with self._autocast_context():
             conditioning_tokens = self._encode_conditions(
                 sample_model,
@@ -1000,16 +1246,21 @@ class XPredTrainer(_BaseTrainer):
                     conditioning_tokens=conditioning_tokens,
                 )
                 t_view = t_vec.view(-1, 1, 1, 1).to(dtype=x_t.dtype)
-                return (pred_x - x_t) / (1.0 - t_view).clamp_min(1e-6)
+                return (pred_x - x_t) / (1.0 - t_view).clamp_min(self.t_eps)
 
-            for step_idx in range(step_count):
-                t = torch.full(
-                    (batch_size,),
-                    float(step_idx) / float(step_count),
-                    device=self.device,
-                    dtype=torch.float32,
-                )
-                sample = sample + dt * predict_v(sample, t)
+            timesteps = torch.linspace(0.0, 1.0, step_count + 1, device=self.device, dtype=torch.float32)
+            for step_idx in range(max(0, step_count - 1)):
+                t = torch.full((batch_size,), float(timesteps[step_idx]), device=self.device, dtype=torch.float32)
+                t_next = torch.full((batch_size,), float(timesteps[step_idx + 1]), device=self.device, dtype=torch.float32)
+                dt = (t_next - t).view(-1, 1, 1, 1).to(dtype=sample.dtype)
+                v_t = predict_v(sample, t)
+                sample_euler = sample + dt * v_t
+                v_t_next = predict_v(sample_euler, t_next)
+                sample = sample + dt * (0.5 * (v_t + v_t_next))
+
+            t = torch.full((batch_size,), float(timesteps[-2]), device=self.device, dtype=torch.float32)
+            t_next = torch.full((batch_size,), float(timesteps[-1]), device=self.device, dtype=torch.float32)
+            sample = sample + (t_next - t).view(-1, 1, 1, 1).to(dtype=sample.dtype) * predict_v(sample, t)
 
         return sample.clamp(-1.0, 1.0).float()
 
@@ -1023,15 +1274,22 @@ class XPredTrainer(_BaseTrainer):
                 "optimizer_state": self.optimizer.state_dict(),
                 "trainer_config": {
                     "base_lrs": [float(lr) for lr in self.base_lrs],
+                    "lr_schedule": str(self.lr_schedule),
                     "lr_warmup_steps": int(self.lr_warmup_steps),
-                    "lr_decay_start_step": None if self.lr_decay_start_step is None else int(self.lr_decay_start_step),
                     "lr_min_scale": float(self.lr_min_scale),
                     "weight_decay": float(self.weight_decay),
-                    "v_loss_lambda": float(self.v_loss_lambda),
+                    "adam_betas": [float(self.adam_beta1), float(self.adam_beta2)],
+                    "loss_type": "jit_v_mse+dual_ref_v" if self.consistency_lambda > 0.0 else "jit_v_mse",
+                    "p_mean": float(self.p_mean),
+                    "p_std": float(self.p_std),
+                    "t_eps": float(self.t_eps),
+                    "noise_scale": float(self.noise_scale),
                     "sample_steps": int(self.sample_steps),
-                    "ode_solver": "euler",
+                    "ode_solver": "heun_last_euler",
                     "ema_decay": float(self.ema_decay),
                     "ema_start_step": int(self.ema_start_step),
+                    "consistency_lambda": float(self.consistency_lambda),
+                    "consistency_start_step": int(self.consistency_start_step),
                     "grad_clip_norm": None if self.grad_clip_norm is None else float(self.grad_clip_norm),
                     "grad_clip_min_norm": None if self.grad_clip_min_norm is None else float(self.grad_clip_min_norm),
                 },
@@ -1059,6 +1317,8 @@ class XPredTrainer(_BaseTrainer):
                     self.base_lrs = restored_base_lrs
             if "lr_warmup_steps" in trainer_config:
                 self.lr_warmup_steps = max(0, int(trainer_config["lr_warmup_steps"]))
+            if "lr_schedule" in trainer_config:
+                self.lr_schedule = str(trainer_config["lr_schedule"])
             if "lr_decay_start_step" in trainer_config:
                 lr_decay_start_step = trainer_config["lr_decay_start_step"]
                 self.lr_decay_start_step = None if lr_decay_start_step is None else max(0, int(lr_decay_start_step))
@@ -1067,8 +1327,24 @@ class XPredTrainer(_BaseTrainer):
             if "weight_decay" in trainer_config:
                 self.weight_decay = max(0.0, float(trainer_config["weight_decay"]))
                 _apply_weight_decay_to_optimizer(self.optimizer, self.weight_decay)
-            if "v_loss_lambda" in trainer_config:
-                self.v_loss_lambda = float(trainer_config["v_loss_lambda"])
+            if "adam_betas" in trainer_config:
+                adam_betas = trainer_config["adam_betas"]
+                if isinstance(adam_betas, (list, tuple)) and len(adam_betas) == 2:
+                    self.adam_beta1 = float(adam_betas[0])
+                    self.adam_beta2 = float(adam_betas[1])
+                    _apply_adam_betas_to_optimizer(
+                        self.optimizer,
+                        beta1=self.adam_beta1,
+                        beta2=self.adam_beta2,
+                    )
+            if "p_mean" in trainer_config:
+                self.p_mean = float(trainer_config["p_mean"])
+            if "p_std" in trainer_config:
+                self.p_std = float(trainer_config["p_std"])
+            if "t_eps" in trainer_config:
+                self.t_eps = max(0.0, float(trainer_config["t_eps"]))
+            if "noise_scale" in trainer_config:
+                self.noise_scale = float(trainer_config["noise_scale"])
             if "sample_steps" in trainer_config:
                 self.sample_steps = max(1, int(trainer_config["sample_steps"]))
             if "ema_decay" in trainer_config:
@@ -1077,6 +1353,10 @@ class XPredTrainer(_BaseTrainer):
                     self._set_ema_decay(ema_decay)
             if "ema_start_step" in trainer_config:
                 self._set_ema_start_step(int(trainer_config["ema_start_step"]))
+            if "consistency_lambda" in trainer_config:
+                self.consistency_lambda = max(0.0, float(trainer_config["consistency_lambda"]))
+            if "consistency_start_step" in trainer_config:
+                self._set_consistency_start_step(int(trainer_config["consistency_start_step"]))
             if "grad_clip_min_norm" in trainer_config and self.grad_clip_norm is not None:
                 restored_clip_min = trainer_config["grad_clip_min_norm"]
                 if restored_clip_min is None:

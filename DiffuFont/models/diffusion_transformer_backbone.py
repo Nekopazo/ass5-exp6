@@ -207,6 +207,7 @@ class GlyphDiTBlock(nn.Module):
             if self.use_content_injection
             else None
         )
+        self.time_to_hidden = nn.Linear(hidden_dim, hidden_dim)
         self.joint_mod = _build_zero_linear(hidden_dim, hidden_dim * 6)
         self.dit_block = DiTBlock(
             hidden_dim,
@@ -220,15 +221,16 @@ class GlyphDiTBlock(nn.Module):
         self,
         patch_tokens: torch.Tensor,
         *,
-        time_hidden: torch.Tensor,
+        time_cond: torch.Tensor,
         conditioning_tokens: torch.Tensor | None,
     ) -> torch.Tensor:
         x = patch_tokens
-        if time_hidden.shape != x.shape:
+        if time_cond.dim() != 2 or time_cond.shape != (x.size(0), self.hidden_dim):
             raise RuntimeError(
-                "time hidden shape mismatch: "
-                f"expected {tuple(x.shape)}, got {tuple(time_hidden.shape)}"
+                "time condition shape mismatch: "
+                f"expected {(x.size(0), self.hidden_dim)}, got {tuple(time_cond.shape)}"
             )
+        time_hidden = self.time_to_hidden(time_cond).unsqueeze(1).expand_as(x)
         joint_hidden = time_hidden
         if self.use_content_injection:
             if (
@@ -275,6 +277,7 @@ class DiffusionTransformerBackbone(nn.Module):
         in_channels: int = 1,
         image_size: int = 128,
         patch_size: int = 8,
+        patch_embed_bottleneck_dim: int = 128,
         hidden_dim: int = 256,
         conditioning_dim: int | None = None,
         depth: int = 12,
@@ -291,6 +294,11 @@ class DiffusionTransformerBackbone(nn.Module):
         self.in_channels = int(in_channels)
         self.image_size = int(image_size)
         self.patch_size = int(patch_size)
+        self.patch_embed_bottleneck_dim = int(patch_embed_bottleneck_dim)
+        if self.patch_embed_bottleneck_dim <= 0:
+            raise ValueError(
+                f"patch_embed_bottleneck_dim must be > 0, got {patch_embed_bottleneck_dim}"
+            )
         self.hidden_dim = int(hidden_dim)
         self.conditioning_dim = self.hidden_dim if conditioning_dim is None else int(conditioning_dim)
         self.depth = int(depth)
@@ -327,13 +335,19 @@ class DiffusionTransformerBackbone(nn.Module):
             for block_idx in range(self.depth)
         ]
         self.has_content_injection = any(self.content_layer_mask)
-        self.patch_dim = self.in_channels * self.patch_size * self.patch_size
-        self.patch_embed_hidden_dim = max(128, self.patch_dim)
-
-        self.patch_embed = nn.Sequential(
-            nn.Linear(self.patch_dim, self.patch_embed_hidden_dim),
-            nn.SiLU(),
-            nn.Linear(self.patch_embed_hidden_dim, self.hidden_dim),
+        self.patch_embed_proj1 = nn.Conv2d(
+            self.in_channels,
+            self.patch_embed_bottleneck_dim,
+            kernel_size=self.patch_size,
+            stride=self.patch_size,
+            bias=False,
+        )
+        self.patch_embed_proj2 = nn.Conv2d(
+            self.patch_embed_bottleneck_dim,
+            self.hidden_dim,
+            kernel_size=1,
+            stride=1,
+            bias=True,
         )
         pos_embed = build_2d_sincos_pos_embed(self.hidden_dim, self.grid_size, self.grid_size)
         self.register_buffer("pos_embed", pos_embed.unsqueeze(0), persistent=False)
@@ -345,7 +359,6 @@ class DiffusionTransformerBackbone(nn.Module):
         )
         # Keep long-run time conditioning amplitude stable before it enters modulation heads.
         self.time_cond_norm = _build_norm(self.hidden_dim, norm_variant=self.norm_variant)
-        self.time_to_hidden = nn.Linear(self.hidden_dim, self.hidden_dim)
         self.blocks = nn.ModuleList()
         for block_idx in range(self.depth):
             self.blocks.append(
@@ -384,6 +397,16 @@ class DiffusionTransformerBackbone(nn.Module):
             seen.add(layer_idx)
         return tuple(normalized)
 
+    def build_time_cond(
+        self,
+        timesteps: torch.Tensor,
+        *,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        time_cond = timestep_embedding(timesteps, self.hidden_dim).to(dtype=dtype)
+        time_cond = self.time_mlp(time_cond)
+        return self.time_cond_norm(time_cond)
+
     def forward(
         self,
         image: torch.Tensor,
@@ -401,20 +424,13 @@ class DiffusionTransformerBackbone(nn.Module):
                 f"got {tuple(image.shape)}"
             )
 
-        x = (
-            image.unfold(2, self.patch_size, self.patch_size)
-            .unfold(3, self.patch_size, self.patch_size)
-            .permute(0, 2, 3, 1, 4, 5)
-            .contiguous()
-            .view(image.size(0), self.num_tokens, self.patch_dim)
-        )
-        x = self.patch_embed(x)
+        x = self.patch_embed_proj2(self.patch_embed_proj1(image)).flatten(2).transpose(1, 2).contiguous()
         x = x + self.pos_embed.to(device=x.device, dtype=x.dtype)
 
-        time_cond = timestep_embedding(timesteps, self.hidden_dim).to(dtype=x.dtype)
-        time_cond = self.time_mlp(time_cond)
-        time_cond = self.time_cond_norm(time_cond)
-        time_hidden = self.time_to_hidden(time_cond).unsqueeze(1).expand_as(x)
+        time_cond = self.build_time_cond(
+            timesteps,
+            dtype=x.dtype,
+        )
 
         if self.has_content_injection:
             conditioning_tokens = conditioning_tokens.to(device=x.device, dtype=x.dtype)
@@ -430,7 +446,7 @@ class DiffusionTransformerBackbone(nn.Module):
         for block in self.blocks:
             x = block(
                 x,
-                time_hidden=time_hidden,
+                time_cond=time_cond,
                 conditioning_tokens=conditioning_tokens if block.use_content_injection else None,
             )
 

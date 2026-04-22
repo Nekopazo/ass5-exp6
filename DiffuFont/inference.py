@@ -42,10 +42,9 @@ def load_trainer(checkpoint_path: Path, device: torch.device) -> XPredTrainer:
 def sample_style_refs(sample: Dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
     style_img = sample["style_img"]
     style_ref_mask = sample["style_ref_mask"]
-    min_refs = int(sample.get("style_ref_count_min", style_img.size(0)))
     max_refs = min(int(sample.get("style_ref_count_max", style_img.size(0))), int(style_img.size(0)))
-    if max_refs < min_refs:
-        raise RuntimeError(f"Invalid style ref bounds: min_refs={min_refs} max_refs={max_refs}")
+    if max_refs <= 0:
+        raise RuntimeError(f"Invalid style ref count: max_refs={max_refs}")
     return style_img[:max_refs], style_ref_mask[:max_refs]
 
 
@@ -173,7 +172,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-fonts", type=int, default=0)
     parser.add_argument("--style-ref-count", type=int, default=0)
-    parser.add_argument("--style-ref-count-min", type=int, default=6)
+    parser.add_argument("--style-ref-count-min", type=int, default=8)
     parser.add_argument("--style-ref-count-max", type=int, default=8)
     parser.add_argument("--num-fonts", type=int, default=4)
     parser.add_argument("--num-chars", type=int, default=6)

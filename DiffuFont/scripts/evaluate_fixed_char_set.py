@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-seed", type=int, default=42)
     parser.add_argument("--num-target-chars", type=int, default=30)
     parser.add_argument("--target-char-source", type=str, default="all", choices=["all", "style_pool"])
-    parser.add_argument("--style-ref-count", type=int, default=6)
+    parser.add_argument("--style-ref-count", type=int, default=8)
     parser.add_argument("--style-pool-file", type=Path, default=None)
     parser.add_argument("--fonts-per-batch", type=int, default=4)
     parser.add_argument("--inference-steps", type=int, default=None)

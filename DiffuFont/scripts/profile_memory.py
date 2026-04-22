@@ -89,7 +89,7 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="cuda:1")
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--style-ref-count", type=int, default=0)
-    parser.add_argument("--style-ref-count-min", type=int, default=6)
+    parser.add_argument("--style-ref-count-min", type=int, default=8)
     parser.add_argument("--style-ref-count-max", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--max-fonts", type=int, default=0)
@@ -106,6 +106,10 @@ def main() -> None:
     parser.add_argument("--dit-depth", type=int, default=12)
     parser.add_argument("--dit-heads", type=int, default=8)
     parser.add_argument("--dit-mlp-ratio", type=float, default=4.0)
+    parser.add_argument("--p-mean", type=float, default=-0.8)
+    parser.add_argument("--p-std", type=float, default=0.8)
+    parser.add_argument("--t-eps", type=float, default=0.05)
+    parser.add_argument("--noise-scale", type=float, default=1.0)
     parser.add_argument("--ema-decay", type=float, default=0.9999)
     args = parser.parse_args()
 
@@ -152,7 +156,10 @@ def main() -> None:
         device,
         lr=1e-4,
         total_steps=1,
-        v_loss_lambda=1.0,
+        p_mean=float(args.p_mean),
+        p_std=float(args.p_std),
+        t_eps=float(args.t_eps),
+        noise_scale=float(args.noise_scale),
         sample_steps=20,
         ema_decay=float(args.ema_decay),
         log_every_steps=1,
@@ -173,16 +180,34 @@ def main() -> None:
     torch.cuda.empty_cache()
     with trainer._autocast_context():
         x1 = target
-        x0 = stage_record(device, "noise_sample", lambda: torch.randn_like(x1), records)
-        timesteps = stage_record(device, "time_sample", lambda: torch.rand(x1.size(0), device=device), records)
+        x0 = stage_record(device, "noise_sample", lambda: torch.randn_like(x1) * trainer.noise_scale, records)
+        timesteps = stage_record(
+            device,
+            "time_sample",
+            lambda: trainer._sample_t(x1.size(0), device=device),
+            records,
+        )
         t_view = timesteps.view(-1, 1, 1, 1).to(dtype=x1.dtype)
-        xt = stage_record(device, "xt_interpolate", lambda: (1.0 - t_view) * x0 + t_view * x1, records)
-        target_v = stage_record(device, "target_v", lambda: x1 - x0, records)
+        xt = stage_record(device, "xt_interpolate", lambda: t_view * x1 + (1.0 - t_view) * x0, records)
+        denom = stage_record(device, "denom", lambda: (1.0 - t_view).clamp_min(trainer.t_eps), records)
+        target_v = stage_record(device, "target_v", lambda: (x1 - xt) / denom, records)
         content_tokens = stage_record(device, "content_encode_tokens", lambda: trainer.model.encode_content_tokens(content), records)
         content_tokens = stage_record(
             device,
             "content_expand",
             lambda: content_tokens.index_select(0, content_index),
+            records,
+        )
+        content_query = stage_record(
+            device,
+            "content_query_project_unique",
+            lambda: trainer.model.precompute_content_query(content_tokens),
+            records,
+        )
+        content_query = stage_record(
+            device,
+            "content_query_expand",
+            lambda: content_query.index_select(0, content_index),
             records,
         )
         style_token_bank, style_token_valid_mask = stage_record(
@@ -194,25 +219,35 @@ def main() -> None:
             ),
             records,
         )
-        style_token_bank = stage_record(
+        style_key, style_value = stage_record(
             device,
-            "style_expand",
-            lambda: style_token_bank.index_select(0, style_index),
+            "style_kv_project_unique",
+            lambda: trainer.model.precompute_style_kv(
+                style_token_bank,
+                token_valid_mask=style_token_valid_mask,
+            ),
             records,
         )
-        style_token_valid_mask = stage_record(
+        style_key = stage_record(
             device,
-            "style_mask_expand",
-            lambda: style_token_valid_mask.index_select(0, style_index),
+            "style_key_expand",
+            lambda: style_key.index_select(0, style_index),
+            records,
+        )
+        style_value = stage_record(
+            device,
+            "style_value_expand",
+            lambda: style_value.index_select(0, style_index),
             records,
         )
         conditioning_tokens = stage_record(
             device,
             "content_style_fuse",
-            lambda: trainer.model.fuse_content_style_tokens(
+            lambda: trainer.model.fuse_content_style_tokens_from_projected(
                 content_tokens,
-                style_token_bank,
-                token_valid_mask=style_token_valid_mask,
+                content_query,
+                style_key,
+                style_value,
             ),
             records,
         )
@@ -226,12 +261,7 @@ def main() -> None:
             ),
             records,
         )
-        pred_v = stage_record(
-            device,
-            "predict_v",
-            lambda: (pred_x - xt) / (1.0 - t_view).clamp_min(1e-6),
-            records,
-        )
+        pred_v = stage_record(device, "pred_v", lambda: (pred_x - xt) / denom, records)
         loss = stage_record(device, "v_loss", lambda: F.mse_loss(pred_v, target_v), records)
 
     stage_record(device, "backward", lambda: loss.backward(), records)
@@ -251,6 +281,10 @@ def main() -> None:
             "num_workers": int(args.num_workers),
             "grad_clip_norm": float(args.grad_clip_norm),
             "ema_decay": float(args.ema_decay),
+            "p_mean": float(args.p_mean),
+            "p_std": float(args.p_std),
+            "t_eps": float(args.t_eps),
+            "noise_scale": float(args.noise_scale),
         },
         "largest_peak_stage": max(records, key=lambda row: row["peak_delta_gb"]),
         "largest_alloc_delta_stage": max(records, key=lambda row: row["allocated_delta_gb"]),

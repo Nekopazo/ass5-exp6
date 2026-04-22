@@ -184,9 +184,7 @@ def trace_fusion_path(
         token_valid_mask=token_valid_mask,
     )
     print(f"fusion.style_context: {shape_of(style_context)}")
-    fused_context = content_tokens + style_context
-    print(f"fusion.content_plus_style: {shape_of(fused_context)}")
-    conditioning_tokens = torch.cat([content_tokens, fused_context], dim=-1)
+    conditioning_tokens = torch.cat([content_tokens, style_context], dim=-1)
     print(f"fusion.conditioning_tokens: {shape_of(conditioning_tokens)}")
     return conditioning_tokens
 

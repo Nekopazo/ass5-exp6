@@ -5,13 +5,14 @@ ROOT="/scratch/yangximing/code/ass5-exp6/DiffuFont"
 PYTHON_BIN="/scratch/yangximing/miniconda3/envs/sg3/bin/python"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 LOG_MAX_LINES=1500
+PYTORCH_ALLOC_CONF_VALUE="expandable_segments:True"
 
 RUN_MODE="daemon"
 LOG_FILE=""
 PID_FILE=""
 SAVE_DIR="checkpoints/xpred_$(date '+%Y%m%d_%H%M%S')"
 
-RESUME_CKPT=""
+RESUME_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/xpred_20260421_134610/ckpt_step_40000.pt"
 DEVICE_ARG="cuda:1"
 SEED=42
 FONT_SPLIT="train"
@@ -26,15 +27,18 @@ LOG_EVERY=100
 VAL_EVERY=100
 VAL_MAX_BATCHES=16
 LR="1e-4"
-LR_WARMUP_STEPS=0
-LR_DECAY_START_STEP="40000"
+WEIGHT_DECAY="0.0"
+ADAM_BETA1="0.9"
+ADAM_BETA2="0.95"
+LR_SCHEDULE="constant"
+LR_WARMUP_STEPS=4000
 LR_MIN_SCALE="0.1"
 GRAD_CLIP_NORM="1.0"
 GRAD_CLIP_MIN_NORM="0.5"
 
 STYLE_REF_COUNT=0
-STYLE_REF_COUNT_MIN=4
-STYLE_REF_COUNT_MAX=6
+STYLE_REF_COUNT_MIN=8
+STYLE_REF_COUNT_MAX=8
 BATCH_SIZE=256
 NUM_WORKERS=2
 MAX_FONTS=0
@@ -47,13 +51,14 @@ DIT_DEPTH=12
 DIT_HEADS=8
 DIT_MLP_RATIO="4.0"
 
-V_LOSS_LAMBDA="1.0"
 SAMPLE_STEPS=20
-EMA_DECAY="0.999"
-EMA_START_STEP="70000"
+EMA_DECAY="0.9999"
+EMA_START_STEP="40000"
+CONSISTENCY_LAMBDA="1.0"
+CONSISTENCY_START_STEP="60000"
 TRAIN_SAMPLING="cartesian_font_char"
 CARTESIAN_FONTS_PER_BATCH=64
-CARTESIAN_CHARS_PER_BATCH=8
+CARTESIAN_CHARS_PER_BATCH=6
 
 EXTRA_TRAIN_ARGS=()
 
@@ -78,15 +83,19 @@ while [[ $# -gt 0 ]]; do
     --val-every-steps) VAL_EVERY="${2:?}"; shift 2 ;;
     --val-max-batches) VAL_MAX_BATCHES="${2:?}"; shift 2 ;;
     --lr) LR="${2:?}"; shift 2 ;;
+    --weight-decay) WEIGHT_DECAY="${2:?}"; shift 2 ;;
+    --adam-beta1) ADAM_BETA1="${2:?}"; shift 2 ;;
+    --adam-beta2) ADAM_BETA2="${2:?}"; shift 2 ;;
+    --lr-schedule) LR_SCHEDULE="${2:?}"; shift 2 ;;
     --lr-warmup-steps) LR_WARMUP_STEPS="${2:?}"; shift 2 ;;
-    --lr-decay-start-step) LR_DECAY_START_STEP="${2:?}"; shift 2 ;;
     --lr-min-scale) LR_MIN_SCALE="${2:?}"; shift 2 ;;
     --grad-clip-norm) GRAD_CLIP_NORM="${2:?}"; shift 2 ;;
     --grad-clip-min-norm) GRAD_CLIP_MIN_NORM="${2:?}"; shift 2 ;;
-    --v-loss-lambda) V_LOSS_LAMBDA="${2:?}"; shift 2 ;;
     --sample-steps) SAMPLE_STEPS="${2:?}"; shift 2 ;;
     --ema-decay) EMA_DECAY="${2:?}"; shift 2 ;;
     --ema-start-step) EMA_START_STEP="${2:?}"; shift 2 ;;
+    --consistency-lambda) CONSISTENCY_LAMBDA="${2:?}"; shift 2 ;;
+    --consistency-start-step) CONSISTENCY_START_STEP="${2:?}"; shift 2 ;;
     --style-ref-count) STYLE_REF_COUNT="${2:?}"; shift 2 ;;
     --style-ref-count-min) STYLE_REF_COUNT_MIN="${2:?}"; shift 2 ;;
     --style-ref-count-max) STYLE_REF_COUNT_MAX="${2:?}"; shift 2 ;;
@@ -100,9 +109,9 @@ while [[ $# -gt 0 ]]; do
     --dit-depth) DIT_DEPTH="${2:?}"; shift 2 ;;
     --dit-heads) DIT_HEADS="${2:?}"; shift 2 ;;
     --dit-mlp-ratio) DIT_MLP_RATIO="${2:?}"; shift 2 ;;
-    --flow-lambda|--flow-sample-steps|--refiner-mode|--detailer-base-channels|--detailer-max-channels|--detailer-bottleneck-channels|--use-cnn-perceptor|--no-use-cnn-perceptor|--perceptor-checkpoint|--perceptual-loss-lambda|--pixel-loss-lambda|--aux-loss-t-logistic-steepness|--perceptual-loss-t-midpoint|--pixel-loss-t-midpoint)
+    --flow-lambda|--flow-sample-steps|--refiner-mode|--detailer-base-channels|--detailer-max-channels|--detailer-bottleneck-channels|--use-cnn-perceptor|--no-use-cnn-perceptor|--perceptor-checkpoint|--perceptual-loss-lambda|--pixel-loss-lambda|--aux-loss-t-logistic-steepness|--perceptual-loss-t-midpoint|--pixel-loss-t-midpoint|--lr-decay-start-step)
       echo "[run_diffusion_colab] removed argument: $1" >&2
-      echo "[run_diffusion_colab] the refactored model uses x-pred + v-loss only and no longer accepts decoder or auxiliary-loss args" >&2
+      echo "[run_diffusion_colab] the refactored model uses JiT-style x-pred + v-loss, warmup plus constant LR by default, and no longer accepts removed decoder or auxiliary-loss args" >&2
       exit 2
       ;;
     --train-sampling) TRAIN_SAMPLING="${2:?}"; shift 2 ;;
@@ -116,14 +125,13 @@ done
 if [[ -z "${FONT_SPLIT_SEED}" ]]; then
   FONT_SPLIT_SEED="${SEED}"
 fi
-if [[ "${LR_DECAY_START_STEP}" == "-1" ]]; then
-  LR_DECAY_START_STEP="$(( TARGET_STEPS * 8 / 10 ))"
-fi
 if [[ -z "${EMA_START_STEP}" ]]; then
-  EMA_START_STEP="$(( TARGET_STEPS / 2 + 1 ))"
+  EMA_START_STEP="40000"
 fi
 cd "${ROOT}"
 mkdir -p logs checkpoints
+
+export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF_VALUE}"
 
 [[ -z "${LOG_FILE}" ]] && LOG_FILE="logs/$(basename "${SAVE_DIR}").log"
 [[ -z "${PID_FILE}" ]] && PID_FILE="logs/$(basename "${SAVE_DIR}").pid"
@@ -153,15 +161,19 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --val-every-steps "${VAL_EVERY}"
     --val-max-batches "${VAL_MAX_BATCHES}"
     --lr "${LR}"
+    --weight-decay "${WEIGHT_DECAY}"
+    --adam-beta1 "${ADAM_BETA1}"
+    --adam-beta2 "${ADAM_BETA2}"
+    --lr-schedule "${LR_SCHEDULE}"
     --lr-warmup-steps "${LR_WARMUP_STEPS}"
-    --lr-decay-start-step "${LR_DECAY_START_STEP}"
     --lr-min-scale "${LR_MIN_SCALE}"
     --grad-clip-norm "${GRAD_CLIP_NORM}"
     --grad-clip-min-norm "${GRAD_CLIP_MIN_NORM}"
-    --v-loss-lambda "${V_LOSS_LAMBDA}"
     --sample-steps "${SAMPLE_STEPS}"
     --ema-decay "${EMA_DECAY}"
     --ema-start-step "${EMA_START_STEP}"
+    --consistency-lambda "${CONSISTENCY_LAMBDA}"
+    --consistency-start-step "${CONSISTENCY_START_STEP}"
     --style-ref-count "${STYLE_REF_COUNT}"
     --style-ref-count-min "${STYLE_REF_COUNT_MIN}"
     --style-ref-count-max "${STYLE_REF_COUNT_MAX}"
@@ -346,8 +358,11 @@ cmd_common=(
   --font-split-seed "${FONT_SPLIT_SEED}"
   --font-train-ratio "${FONT_TRAIN_RATIO}"
   --lr "${LR}"
+  --weight-decay "${WEIGHT_DECAY}"
+  --adam-beta1 "${ADAM_BETA1}"
+  --adam-beta2 "${ADAM_BETA2}"
+  --lr-schedule "${LR_SCHEDULE}"
   --lr-warmup-steps "${LR_WARMUP_STEPS}"
-  --lr-decay-start-step "${LR_DECAY_START_STEP}"
   --lr-min-scale "${LR_MIN_SCALE}"
   --grad-clip-norm "${GRAD_CLIP_NORM}"
   --grad-clip-min-norm "${GRAD_CLIP_MIN_NORM}"
@@ -367,10 +382,11 @@ cmd_common=(
   --train-sampling "${TRAIN_SAMPLING}"
   --cartesian-fonts-per-batch "${CARTESIAN_FONTS_PER_BATCH}"
   --cartesian-chars-per-batch "${CARTESIAN_CHARS_PER_BATCH}"
-  --v-loss-lambda "${V_LOSS_LAMBDA}"
   --sample-steps "${SAMPLE_STEPS}"
   --ema-decay "${EMA_DECAY}"
   --ema-start-step "${EMA_START_STEP}"
+  --consistency-lambda "${CONSISTENCY_LAMBDA}"
+  --consistency-start-step "${CONSISTENCY_START_STEP}"
   --epochs "${EPOCHS}"
   --total-steps "${TARGET_STEPS}"
   --log-every-steps "${LOG_EVERY}"
@@ -391,12 +407,17 @@ echo "[run_diffusion_colab] mode=dit_xpred"
 echo "[run_diffusion_colab] save_dir=${SAVE_DIR}"
 echo "[run_diffusion_colab] log_file=${LOG_FILE}"
 echo "[run_diffusion_colab] requested_device=${DEVICE_ARG} seed=${SEED}"
+echo "[run_diffusion_colab] PYTORCH_ALLOC_CONF=${PYTORCH_ALLOC_CONF}"
 echo "[run_diffusion_colab] resume=${RESUME_CKPT:-<none>}"
-echo "[run_diffusion_colab] batch=${BATCH_SIZE} lr=${LR} lr_warmup_steps=${LR_WARMUP_STEPS} lr_decay_start_step=${LR_DECAY_START_STEP} lr_min_scale=${LR_MIN_SCALE} grad_clip_norm=${GRAD_CLIP_NORM}"
+echo "[run_diffusion_colab] batch=${BATCH_SIZE} lr=${LR} weight_decay=${WEIGHT_DECAY} adam_betas=(${ADAM_BETA1},${ADAM_BETA2}) lr_schedule=${LR_SCHEDULE} lr_warmup_steps=${LR_WARMUP_STEPS} lr_min_scale=${LR_MIN_SCALE} grad_clip_norm=${GRAD_CLIP_NORM}"
 echo "[run_diffusion_colab] style_ref_count=${STYLE_REF_COUNT} style_ref_count_min=${STYLE_REF_COUNT_MIN} style_ref_count_max=${STYLE_REF_COUNT_MAX}"
-echo "[run_diffusion_colab] patch_size=${PATCH_SIZE} image_size=${IMAGE_SIZE} sample_steps=${SAMPLE_STEPS} ode_solver=euler v_loss_lambda=${V_LOSS_LAMBDA} ema_decay=${EMA_DECAY} ema_start_step=${EMA_START_STEP}"
-echo "[run_diffusion_colab] dit_heads=${DIT_HEADS} main_path=swiglu+rms+cross_attn content_style_fusion_heads=4"
-echo "[run_diffusion_colab] output_path=pure_dit_patch_projection encoder_hidden_dim=${ENCODER_HIDDEN_DIM} dit_hidden_dim=${DIT_HIDDEN_DIM} dit_depth=${DIT_DEPTH}"
+LOSS_TYPE="jit_v_mse"
+if [[ "${CONSISTENCY_LAMBDA}" != "0" && "${CONSISTENCY_LAMBDA}" != "0.0" ]]; then
+  LOSS_TYPE="jit_v_mse+dual_ref_v"
+fi
+echo "[run_diffusion_colab] patch_size=${PATCH_SIZE} image_size=${IMAGE_SIZE} sample_steps=${SAMPLE_STEPS} ode_solver=heun_last_euler loss_type=${LOSS_TYPE} ema_decay=${EMA_DECAY} ema_start_step=${EMA_START_STEP} consistency_lambda=${CONSISTENCY_LAMBDA} consistency_start_step=${CONSISTENCY_START_STEP}"
+echo "[run_diffusion_colab] dit_heads=${DIT_HEADS} main_path=conv_patch_embed+swiglu+rms+qk_norm+cross_attn content_style_fusion_heads=4"
+echo "[run_diffusion_colab] output_path=final_adaln_patch_projection encoder_hidden_dim=${ENCODER_HIDDEN_DIM} dit_hidden_dim=${DIT_HIDDEN_DIM} dit_depth=${DIT_DEPTH}"
 echo "[run_diffusion_colab] content_injection_layers=1..${DIT_DEPTH}"
 echo "[run_diffusion_colab] train_sampling=${TRAIN_SAMPLING} cartesian_fonts_per_batch=${CARTESIAN_FONTS_PER_BATCH} cartesian_chars_per_batch=${CARTESIAN_CHARS_PER_BATCH}"
 
