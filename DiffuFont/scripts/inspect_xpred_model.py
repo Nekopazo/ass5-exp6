@@ -157,14 +157,10 @@ def trace_style_path(
     style_tokens = x.flatten(2).transpose(1, 2).contiguous()
     print(f"style.per_ref_spatial_tokens: {shape_of(style_tokens)}")
     tokens_per_ref = int(style_tokens.size(1))
-    style_tokens = style_tokens.view(batch, refs * tokens_per_ref, style_tokens.size(-1))
+    style_tokens = style_tokens.view(batch, refs, tokens_per_ref, style_tokens.size(-1))
     print(f"style.all_ref_spatial_tokens: {shape_of(style_tokens)}")
     ref_valid_mask = style_ref_mask.to(device=style_tokens.device, dtype=torch.bool)
-    token_valid_mask = (
-        ref_valid_mask[:, :, None]
-        .expand(batch, refs, tokens_per_ref)
-        .reshape(batch, refs * tokens_per_ref)
-    )
+    token_valid_mask = ref_valid_mask[:, :, None].expand(batch, refs, tokens_per_ref)
     print(f"style.all_ref_spatial_token_mask: {shape_of(token_valid_mask)}")
     style_token_bank = model.style_token_proj(style_tokens)
     print(f"style.token_bank: {shape_of(style_token_bank)}")
@@ -178,9 +174,15 @@ def trace_fusion_path(
     token_valid_mask: torch.Tensor,
 ) -> torch.Tensor:
     print_header("Fusion Path")
-    style_context = model.content_style_attn(
+    style_context_per_ref = model.content_style_attn(
         content_tokens,
         style_token_bank,
+        token_valid_mask=token_valid_mask,
+    )
+    print(f"fusion.style_context_per_ref: {shape_of(style_context_per_ref)}")
+    style_context = model.fuse_ref_style_contexts(
+        content_tokens,
+        style_context_per_ref,
         token_valid_mask=token_valid_mask,
     )
     print(f"fusion.style_context: {shape_of(style_context)}")

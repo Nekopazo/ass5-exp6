@@ -478,9 +478,11 @@ class _BaseTrainer:
                     and self.sample_dir is not None
                     and self.global_step % self.sample_every_steps == 0
                 ):
-                    if self.sample_batch is None and self.sample_batch_builder is not None:
-                        self.sample_batch = self.sample_batch_builder()
-                    self.sample_and_save(self.sample_batch, self.sample_dir)
+                    sample_batch = self.sample_batch
+                    if self.sample_batch_builder is not None:
+                        sample_batch = self.sample_batch_builder()
+                    if sample_batch is not None:
+                        self.sample_and_save(sample_batch, self.sample_dir)
 
                 if (
                     self.save_every_steps is not None
@@ -760,8 +762,6 @@ class XPredTrainer(_BaseTrainer):
         sample_steps: int = 20,
         ema_decay: float = 0.9999,
         ema_start_step: Optional[int] = None,
-        consistency_lambda: float = 1.0,
-        consistency_start_step: Optional[int] = None,
         log_every_steps: int = 100,
         save_every_steps: Optional[int] = None,
         val_every_steps: Optional[int] = None,
@@ -803,9 +803,6 @@ class XPredTrainer(_BaseTrainer):
         self.ema_start_step = self.total_steps + 1
         self._set_ema_decay(float(ema_decay))
         self._set_ema_start_step(ema_start_step)
-        self.consistency_lambda = max(0.0, float(consistency_lambda))
-        self.consistency_start_step = self.total_steps + 1
-        self._set_consistency_start_step(consistency_start_step)
 
     def _set_ema_decay(self, ema_decay: float) -> None:
         ema_decay = float(ema_decay)
@@ -821,18 +818,6 @@ class XPredTrainer(_BaseTrainer):
         if ema_start_step is None:
             ema_start_step = 40_000
         self.ema_start_step = max(1, min(int(ema_start_step), self.total_steps + 1))
-
-    def _set_consistency_start_step(self, consistency_start_step: Optional[int]) -> None:
-        if self.consistency_lambda <= 0.0:
-            self.consistency_start_step = self.total_steps + 1
-            return
-        if consistency_start_step is None:
-            self.consistency_start_step = self.total_steps + 1
-            return
-        self.consistency_start_step = max(1, min(int(consistency_start_step), self.total_steps + 1))
-
-    def _consistency_is_active(self, *, step: int) -> bool:
-        return self.consistency_lambda > 0.0 and int(step) >= int(self.consistency_start_step)
 
     def _sample_t(self, batch_size: int, *, device: torch.device) -> torch.Tensor:
         return torch.sigmoid(torch.randn(batch_size, device=device) * self.p_std + self.p_mean)
@@ -931,17 +916,17 @@ class XPredTrainer(_BaseTrainer):
             content_index,
             average_grad_by_reuse=True,
         )
+        style_token_bank, style_token_valid_mask = model.encode_style_token_bank(
+            style_img=style,
+            style_ref_mask=style_ref_mask,
+        )
         unique_content_query = model.precompute_content_query(unique_content_tokens)
         content_query = self._expand_condition_batch(
             unique_content_query,
             content_index,
             average_grad_by_reuse=True,
         )
-        style_token_bank, style_token_valid_mask = model.encode_style_token_bank(
-            style_img=style,
-            style_ref_mask=style_ref_mask,
-        )
-        style_key, style_value = model.precompute_style_kv(
+        style_key, style_value, style_key_valid_mask = model.precompute_style_bank_kv(
             style_token_bank,
             token_valid_mask=style_token_valid_mask,
         )
@@ -955,11 +940,19 @@ class XPredTrainer(_BaseTrainer):
             style_index,
             average_grad_by_reuse=True,
         )
-        return model.fuse_content_style_tokens_from_projected(
+        expanded_style_key_valid_mask = None
+        if style_key_valid_mask is not None:
+            expanded_style_key_valid_mask = self._expand_condition_batch(
+                style_key_valid_mask,
+                style_index,
+                average_grad_by_reuse=False,
+            )
+        return model.build_conditioning_tokens(
             content_tokens,
-            content_query,
-            expanded_style_key,
-            expanded_style_value,
+            content_query=content_query,
+            style_key=expanded_style_key,
+            style_value=expanded_style_value,
+            style_key_valid_mask=expanded_style_key_valid_mask,
         )
 
     def _prepare_denoising_targets(
@@ -1027,23 +1020,12 @@ class XPredTrainer(_BaseTrainer):
         content_index = batch["content_index"].to(self.device, dtype=torch.long)
         style = batch["style_img"].to(self.device)
         style_index = batch["style_index"].to(self.device, dtype=torch.long)
-        style_alt = batch.get("style_img_alt")
-        if style_alt is not None:
-            style_alt = style_alt.to(self.device)
         style_ref_mask = batch.get("style_ref_mask")
         if style_ref_mask is not None:
             style_ref_mask = style_ref_mask.to(self.device)
-        style_ref_mask_alt = batch.get("style_ref_mask_alt")
-        if style_ref_mask_alt is not None:
-            style_ref_mask_alt = style_ref_mask_alt.to(self.device)
 
         with self._autocast_context():
             timesteps, xt, denom, target_v, x1 = self._prepare_denoising_targets(target)
-            dual_ref_active = (
-                style_alt is not None
-                and style_ref_mask_alt is not None
-                and self._consistency_is_active(step=step)
-            )
             primary_outputs = self._forward_ref_branch(
                 model,
                 content=content,
@@ -1057,41 +1039,12 @@ class XPredTrainer(_BaseTrainer):
                 target_v=target_v,
                 x1=x1,
             )
-            if dual_ref_active:
-                alt_outputs = self._forward_ref_branch(
-                    model,
-                    content=content,
-                    content_index=content_index,
-                    style=style_alt,
-                    style_ref_mask=style_ref_mask_alt,
-                    style_index=style_index,
-                    timesteps=timesteps,
-                    xt=xt,
-                    denom=denom,
-                    target_v=target_v,
-                    x1=x1,
-                )
-                alt_weight = float(self.consistency_lambda)
-                total_weight = 1.0 + alt_weight
-                loss_v = (primary_outputs["loss_v"] + alt_outputs["loss_v"] * alt_weight) / total_weight
-                pred_x_l1 = (primary_outputs["pred_x_l1"] + alt_outputs["pred_x_l1"] * alt_weight) / total_weight
-                loss_v_ref_alt = alt_outputs["loss_v"]
-                pred_x_ref_diff_l1 = F.l1_loss(
-                    primary_outputs["pred_x"].float(),
-                    alt_outputs["pred_x"].float(),
-                )
-            else:
-                loss_v = primary_outputs["loss_v"]
-                pred_x_l1 = primary_outputs["pred_x_l1"]
-                loss_v_ref_alt = primary_outputs["loss_v"].new_zeros(())
-                pred_x_ref_diff_l1 = pred_x_l1.new_zeros(())
+            loss_v = primary_outputs["loss_v"]
+            pred_x_l1 = primary_outputs["pred_x_l1"]
             loss = loss_v
         metrics = {
             "loss": loss,
             "loss_v": loss_v,
-            "loss_v_ref_main": primary_outputs["loss_v"],
-            "loss_v_ref_alt": loss_v_ref_alt,
-            "pred_x_ref_diff_l1": pred_x_ref_diff_l1,
             "pred_x_l1": pred_x_l1,
             "t_mean": timesteps.mean(),
         }
@@ -1102,85 +1055,11 @@ class XPredTrainer(_BaseTrainer):
         next_step = self.global_step + 1
         self._set_learning_rate_for_step(next_step)
         self.optimizer.zero_grad(set_to_none=True)
-        dual_ref_active = (
-            batch.get("style_img_alt") is not None
-            and batch.get("style_ref_mask_alt") is not None
-            and self._consistency_is_active(step=next_step)
+        metrics = self._compute_losses(
+            batch,
+            step=next_step,
         )
-        if not dual_ref_active:
-            metrics = self._compute_losses(
-                batch,
-                step=next_step,
-            )
-            metrics["loss"].backward()
-        else:
-            target = batch["target"].to(self.device)
-            content = batch["content"].to(self.device)
-            content_index = batch["content_index"].to(self.device, dtype=torch.long)
-            style = batch["style_img"].to(self.device)
-            style_alt = batch["style_img_alt"].to(self.device)
-            style_index = batch["style_index"].to(self.device, dtype=torch.long)
-            style_ref_mask = batch.get("style_ref_mask")
-            if style_ref_mask is not None:
-                style_ref_mask = style_ref_mask.to(self.device)
-            style_ref_mask_alt = batch.get("style_ref_mask_alt")
-            if style_ref_mask_alt is not None:
-                style_ref_mask_alt = style_ref_mask_alt.to(self.device)
-
-            alt_weight = float(self.consistency_lambda)
-            total_weight = 1.0 + alt_weight
-
-            with self._autocast_context():
-                timesteps, xt, denom, target_v, x1 = self._prepare_denoising_targets(target)
-                primary_outputs = self._forward_ref_branch(
-                    self.model,
-                    content=content,
-                    content_index=content_index,
-                    style=style,
-                    style_ref_mask=style_ref_mask,
-                    style_index=style_index,
-                    timesteps=timesteps,
-                    xt=xt,
-                    denom=denom,
-                    target_v=target_v,
-                    x1=x1,
-                )
-                primary_weighted_loss = primary_outputs["loss_v"] / total_weight
-            primary_weighted_loss.backward()
-            pred_x_primary = primary_outputs["pred_x"].detach()
-            loss_v_ref_main = primary_outputs["loss_v"].detach()
-            pred_x_l1_ref_main = primary_outputs["pred_x_l1"].detach()
-
-            with self._autocast_context():
-                alt_outputs = self._forward_ref_branch(
-                    self.model,
-                    content=content,
-                    content_index=content_index,
-                    style=style_alt,
-                    style_ref_mask=style_ref_mask_alt,
-                    style_index=style_index,
-                    timesteps=timesteps,
-                    xt=xt,
-                    denom=denom,
-                    target_v=target_v,
-                    x1=x1,
-                )
-                alt_weighted_loss = (alt_outputs["loss_v"] * alt_weight) / total_weight
-                pred_x_ref_diff_l1 = F.l1_loss(
-                    pred_x_primary.float(),
-                    alt_outputs["pred_x"].float(),
-                )
-            alt_weighted_loss.backward()
-
-            metrics = {
-                "loss": (primary_weighted_loss.detach() + alt_weighted_loss.detach()),
-                "loss_v": (loss_v_ref_main + alt_outputs["loss_v"].detach() * alt_weight) / total_weight,
-                "loss_v_ref_main": loss_v_ref_main,
-                "loss_v_ref_alt": alt_outputs["loss_v"].detach(),
-                "pred_x_ref_diff_l1": pred_x_ref_diff_l1.detach(),
-                "pred_x_l1": (pred_x_l1_ref_main + alt_outputs["pred_x_l1"].detach() * alt_weight) / total_weight,
-                "t_mean": timesteps.mean().detach(),
-            }
+        metrics["loss"].backward()
         metrics.update(self._apply_grad_clip(step=next_step))
         self.optimizer.step()
         self._update_ema(step=next_step)
@@ -1238,12 +1117,24 @@ class XPredTrainer(_BaseTrainer):
                 style_ref_mask,
                 style_index,
             )
+            backbone_condition_hidden_cache = sample_model.precompute_backbone_condition_hidden_cache(
+                conditioning_tokens,
+                device=self.device,
+                dtype=conditioning_tokens.dtype,
+            )
+            output_condition_hidden = sample_model.precompute_output_condition_hidden(
+                conditioning_tokens,
+                device=self.device,
+                dtype=conditioning_tokens.dtype,
+            )
 
             def predict_v(x_t: torch.Tensor, t_vec: torch.Tensor) -> torch.Tensor:
                 pred_x = sample_model.predict_x(
                     x_t,
                     t_vec,
                     conditioning_tokens=conditioning_tokens,
+                    backbone_condition_hidden_cache=backbone_condition_hidden_cache,
+                    output_condition_hidden=output_condition_hidden,
                 )
                 t_view = t_vec.view(-1, 1, 1, 1).to(dtype=x_t.dtype)
                 return (pred_x - x_t) / (1.0 - t_view).clamp_min(self.t_eps)
@@ -1279,7 +1170,7 @@ class XPredTrainer(_BaseTrainer):
                     "lr_min_scale": float(self.lr_min_scale),
                     "weight_decay": float(self.weight_decay),
                     "adam_betas": [float(self.adam_beta1), float(self.adam_beta2)],
-                    "loss_type": "jit_v_mse+dual_ref_v" if self.consistency_lambda > 0.0 else "jit_v_mse",
+                    "loss_type": "jit_v_mse",
                     "p_mean": float(self.p_mean),
                     "p_std": float(self.p_std),
                     "t_eps": float(self.t_eps),
@@ -1288,8 +1179,6 @@ class XPredTrainer(_BaseTrainer):
                     "ode_solver": "heun_last_euler",
                     "ema_decay": float(self.ema_decay),
                     "ema_start_step": int(self.ema_start_step),
-                    "consistency_lambda": float(self.consistency_lambda),
-                    "consistency_start_step": int(self.consistency_start_step),
                     "grad_clip_norm": None if self.grad_clip_norm is None else float(self.grad_clip_norm),
                     "grad_clip_min_norm": None if self.grad_clip_min_norm is None else float(self.grad_clip_min_norm),
                 },
@@ -1353,10 +1242,6 @@ class XPredTrainer(_BaseTrainer):
                     self._set_ema_decay(ema_decay)
             if "ema_start_step" in trainer_config:
                 self._set_ema_start_step(int(trainer_config["ema_start_step"]))
-            if "consistency_lambda" in trainer_config:
-                self.consistency_lambda = max(0.0, float(trainer_config["consistency_lambda"]))
-            if "consistency_start_step" in trainer_config:
-                self._set_consistency_start_step(int(trainer_config["consistency_start_step"]))
             if "grad_clip_min_norm" in trainer_config and self.grad_clip_norm is not None:
                 restored_clip_min = trainer_config["grad_clip_min_norm"]
                 if restored_clip_min is None:

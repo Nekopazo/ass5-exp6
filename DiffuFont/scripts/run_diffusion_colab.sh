@@ -12,7 +12,7 @@ LOG_FILE=""
 PID_FILE=""
 SAVE_DIR="checkpoints/xpred_$(date '+%Y%m%d_%H%M%S')"
 
-RESUME_CKPT="/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/xpred_20260421_134610/ckpt_step_40000.pt"
+RESUME_CKPT=""
 DEVICE_ARG="cuda:1"
 SEED=42
 FONT_SPLIT="train"
@@ -20,7 +20,7 @@ FONT_SPLIT_SEED=""
 FONT_TRAIN_RATIO="0.95"
 
 EPOCHS=10000000
-TARGET_STEPS=150000
+TARGET_STEPS=200000
 SAVE_EVERY=5000
 SAMPLE_EVERY=300
 LOG_EVERY=100
@@ -37,7 +37,7 @@ GRAD_CLIP_NORM="1.0"
 GRAD_CLIP_MIN_NORM="0.5"
 
 STYLE_REF_COUNT=0
-STYLE_REF_COUNT_MIN=8
+STYLE_REF_COUNT_MIN=4
 STYLE_REF_COUNT_MAX=8
 BATCH_SIZE=256
 NUM_WORKERS=2
@@ -54,8 +54,6 @@ DIT_MLP_RATIO="4.0"
 SAMPLE_STEPS=20
 EMA_DECAY="0.9999"
 EMA_START_STEP="40000"
-CONSISTENCY_LAMBDA="1.0"
-CONSISTENCY_START_STEP="60000"
 TRAIN_SAMPLING="cartesian_font_char"
 CARTESIAN_FONTS_PER_BATCH=64
 CARTESIAN_CHARS_PER_BATCH=6
@@ -94,8 +92,6 @@ while [[ $# -gt 0 ]]; do
     --sample-steps) SAMPLE_STEPS="${2:?}"; shift 2 ;;
     --ema-decay) EMA_DECAY="${2:?}"; shift 2 ;;
     --ema-start-step) EMA_START_STEP="${2:?}"; shift 2 ;;
-    --consistency-lambda) CONSISTENCY_LAMBDA="${2:?}"; shift 2 ;;
-    --consistency-start-step) CONSISTENCY_START_STEP="${2:?}"; shift 2 ;;
     --style-ref-count) STYLE_REF_COUNT="${2:?}"; shift 2 ;;
     --style-ref-count-min) STYLE_REF_COUNT_MIN="${2:?}"; shift 2 ;;
     --style-ref-count-max) STYLE_REF_COUNT_MAX="${2:?}"; shift 2 ;;
@@ -172,8 +168,6 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --sample-steps "${SAMPLE_STEPS}"
     --ema-decay "${EMA_DECAY}"
     --ema-start-step "${EMA_START_STEP}"
-    --consistency-lambda "${CONSISTENCY_LAMBDA}"
-    --consistency-start-step "${CONSISTENCY_START_STEP}"
     --style-ref-count "${STYLE_REF_COUNT}"
     --style-ref-count-min "${STYLE_REF_COUNT_MIN}"
     --style-ref-count-max "${STYLE_REF_COUNT_MAX}"
@@ -385,8 +379,6 @@ cmd_common=(
   --sample-steps "${SAMPLE_STEPS}"
   --ema-decay "${EMA_DECAY}"
   --ema-start-step "${EMA_START_STEP}"
-  --consistency-lambda "${CONSISTENCY_LAMBDA}"
-  --consistency-start-step "${CONSISTENCY_START_STEP}"
   --epochs "${EPOCHS}"
   --total-steps "${TARGET_STEPS}"
   --log-every-steps "${LOG_EVERY}"
@@ -411,12 +403,8 @@ echo "[run_diffusion_colab] PYTORCH_ALLOC_CONF=${PYTORCH_ALLOC_CONF}"
 echo "[run_diffusion_colab] resume=${RESUME_CKPT:-<none>}"
 echo "[run_diffusion_colab] batch=${BATCH_SIZE} lr=${LR} weight_decay=${WEIGHT_DECAY} adam_betas=(${ADAM_BETA1},${ADAM_BETA2}) lr_schedule=${LR_SCHEDULE} lr_warmup_steps=${LR_WARMUP_STEPS} lr_min_scale=${LR_MIN_SCALE} grad_clip_norm=${GRAD_CLIP_NORM}"
 echo "[run_diffusion_colab] style_ref_count=${STYLE_REF_COUNT} style_ref_count_min=${STYLE_REF_COUNT_MIN} style_ref_count_max=${STYLE_REF_COUNT_MAX}"
-LOSS_TYPE="jit_v_mse"
-if [[ "${CONSISTENCY_LAMBDA}" != "0" && "${CONSISTENCY_LAMBDA}" != "0.0" ]]; then
-  LOSS_TYPE="jit_v_mse+dual_ref_v"
-fi
-echo "[run_diffusion_colab] patch_size=${PATCH_SIZE} image_size=${IMAGE_SIZE} sample_steps=${SAMPLE_STEPS} ode_solver=heun_last_euler loss_type=${LOSS_TYPE} ema_decay=${EMA_DECAY} ema_start_step=${EMA_START_STEP} consistency_lambda=${CONSISTENCY_LAMBDA} consistency_start_step=${CONSISTENCY_START_STEP}"
-echo "[run_diffusion_colab] dit_heads=${DIT_HEADS} main_path=conv_patch_embed+swiglu+rms+qk_norm+cross_attn content_style_fusion_heads=4"
+echo "[run_diffusion_colab] patch_size=${PATCH_SIZE} image_size=${IMAGE_SIZE} sample_steps=${SAMPLE_STEPS} ode_solver=heun_last_euler loss_type=jit_v_mse ema_decay=${EMA_DECAY} ema_start_step=${EMA_START_STEP}"
+echo "[run_diffusion_colab] dit_heads=${DIT_HEADS} style_fusion=concat_cross_attention main_path=conv_patch_embed+swiglu+rms+qk_norm content_style_fusion_heads=4"
 echo "[run_diffusion_colab] output_path=final_adaln_patch_projection encoder_hidden_dim=${ENCODER_HIDDEN_DIM} dit_hidden_dim=${DIT_HIDDEN_DIM} dit_depth=${DIT_DEPTH}"
 echo "[run_diffusion_colab] content_injection_layers=1..${DIT_DEPTH}"
 echo "[run_diffusion_colab] train_sampling=${TRAIN_SAMPLING} cartesian_fonts_per_batch=${CARTESIAN_FONTS_PER_BATCH} cartesian_chars_per_batch=${CARTESIAN_CHARS_PER_BATCH}"

@@ -77,8 +77,18 @@ class SDPAAttention(nn.Module):
         self.k_norm = _HeadRMSNorm(self.head_dim)
 
     def project_query(self, query: torch.Tensor) -> torch.Tensor:
-        bsz, q_len, _ = query.shape
-        q = self.q_proj(query).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        projected_query = self.q_proj(query)
+        return self.prepare_projected_query(projected_query)
+
+    def prepare_projected_query(self, projected_query: torch.Tensor) -> torch.Tensor:
+        if projected_query.dim() != 3:
+            raise ValueError(f"projected_query must be 3D [B, T, D], got {tuple(projected_query.shape)}")
+        bsz, q_len, embed_dim = projected_query.shape
+        if embed_dim != self.embed_dim:
+            raise ValueError(
+                f"projected_query embed dim mismatch: expected {self.embed_dim}, got {embed_dim}"
+            )
+        q = projected_query.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         return self.q_norm(q)
 
     def project_key_value(self, key: torch.Tensor, value: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -99,6 +109,7 @@ class SDPAAttention(nn.Module):
         key: torch.Tensor,
         value: torch.Tensor,
         *,
+        key_valid_mask: Optional[torch.Tensor] = None,
         need_weights: bool = False,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         if query.dim() != 4 or key.dim() != 4 or value.dim() != 4:
@@ -123,12 +134,29 @@ class SDPAAttention(nn.Module):
                 "projected q/k/v head_dim mismatch: "
                 f"expected {self.head_dim}, got {query.size(3)}, {key.size(3)}, {value.size(3)}"
             )
-        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+        attn_mask = None
+        if key_valid_mask is not None:
+            expected_mask_shape = (key.size(0), key.size(2))
+            if key_valid_mask.shape != expected_mask_shape:
+                raise ValueError(
+                    "key_valid_mask shape mismatch: "
+                    f"expected {expected_mask_shape}, got {tuple(key_valid_mask.shape)}"
+                )
+            key_valid_mask = key_valid_mask.to(device=key.device, dtype=torch.bool)
+            if bool((~key_valid_mask).all(dim=1).any()):
+                raise ValueError("key_valid_mask must keep at least one key per attention batch")
+            attn_mask = key_valid_mask[:, None, None, :]
+        kernel_context = (
+            sdpa_kernel(SDPBackend.FLASH_ATTENTION)
+            if attn_mask is None
+            else sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH])
+        )
+        with kernel_context:
             out = F.scaled_dot_product_attention(
                 query,
                 key,
                 value,
-                attn_mask=None,
+                attn_mask=attn_mask,
                 dropout_p=0.0,
                 is_causal=False,
             )
@@ -157,17 +185,10 @@ class SDPAAttention(nn.Module):
                 f"key_padding_mask must have shape {(bsz, k_len)}, got {tuple(key_padding_mask.shape)}"
             )
 
-        attn_mask = None
+        key_valid_mask = None
         if key_padding_mask is not None:
-            key_padding_mask = key_padding_mask.bool()
-            if key_padding_mask.any():
-                attn_mask = (~key_padding_mask).unsqueeze(1).unsqueeze(2)
-        if attn_mask is not None:
-            raise RuntimeError(
-                "Flash-only SDPA does not support non-null attn_mask in this project. "
-                "Current training pipeline assumes all style refs are valid."
-            )
-        return self.attend_projected(q, k, v, need_weights=need_weights)
+            key_valid_mask = ~key_padding_mask.to(device=key.device, dtype=torch.bool)
+        return self.attend_projected(q, k, v, key_valid_mask=key_valid_mask, need_weights=need_weights)
 
 
 enable_torch_sdpa_backends()

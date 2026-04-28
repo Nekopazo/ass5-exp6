@@ -195,15 +195,28 @@ class GlyphDiTBlock(nn.Module):
         self.condition_dim = int(condition_dim)
         self.use_content_injection = bool(use_content_injection)
         self.norm_variant = _normalize_norm_variant(norm_variant)
-        self.condition_norm = (
-            _build_norm(self.condition_dim, norm_variant=self.norm_variant)
+        if self.use_content_injection and (self.condition_dim % 2) != 0:
+            raise ValueError(
+                f"conditioning dim must be even for content/style split, got {self.condition_dim}"
+            )
+        self.condition_half_dim = self.condition_dim // 2
+        self.content_condition_norm = (
+            _build_norm(self.condition_half_dim, norm_variant=self.norm_variant)
             if self.use_content_injection
             else None
         )
-        self.condition_to_hidden = (
-            nn.Sequential(
-                nn.Linear(self.condition_dim, hidden_dim),
-            )
+        self.style_condition_norm = (
+            _build_norm(self.condition_half_dim, norm_variant=self.norm_variant)
+            if self.use_content_injection
+            else None
+        )
+        self.content_condition_to_hidden = (
+            nn.Linear(self.condition_half_dim, hidden_dim)
+            if self.use_content_injection
+            else None
+        )
+        self.style_condition_to_hidden = (
+            nn.Linear(self.condition_half_dim, hidden_dim)
             if self.use_content_injection
             else None
         )
@@ -223,6 +236,8 @@ class GlyphDiTBlock(nn.Module):
         *,
         time_cond: torch.Tensor,
         conditioning_tokens: torch.Tensor | None,
+        conditioning_norm_parts: tuple[torch.Tensor, torch.Tensor] | None = None,
+        condition_hidden: torch.Tensor | None = None,
     ) -> torch.Tensor:
         x = patch_tokens
         if time_cond.dim() != 2 or time_cond.shape != (x.size(0), self.hidden_dim):
@@ -234,19 +249,43 @@ class GlyphDiTBlock(nn.Module):
         joint_hidden = time_hidden
         if self.use_content_injection:
             if (
-                conditioning_tokens is None
-                or self.condition_norm is None
-                or self.condition_to_hidden is None
+                condition_hidden is None
+                and conditioning_tokens is None
+                and conditioning_norm_parts is None
+            ):
+                raise RuntimeError("conditioning input must be provided when content injection is enabled")
+            if condition_hidden is not None:
+                if condition_hidden.shape != x.shape:
+                    raise RuntimeError(
+                        "condition_hidden shape mismatch: "
+                        f"expected {tuple(x.shape)}, got {tuple(condition_hidden.shape)}"
+                    )
+            elif (
+                self.content_condition_norm is None
+                or self.style_condition_norm is None
+                or self.content_condition_to_hidden is None
+                or self.style_condition_to_hidden is None
             ):
                 raise RuntimeError("conditioning_tokens must be provided when content injection is enabled")
-            expected_condition_shape = (x.size(0), x.size(1), self.condition_dim)
-            if conditioning_tokens.shape != expected_condition_shape:
-                raise RuntimeError(
-                    "conditioning token shape mismatch: "
-                    f"expected {expected_condition_shape}, got {tuple(conditioning_tokens.shape)}"
-                )
-            condition_hidden = self.condition_to_hidden(self.condition_norm(conditioning_tokens))
-            joint_hidden = joint_hidden + condition_hidden
+            if condition_hidden is None:
+                if conditioning_norm_parts is None:
+                    expected_condition_shape = (x.size(0), x.size(1), self.condition_dim)
+                    if conditioning_tokens is None or conditioning_tokens.shape != expected_condition_shape:
+                        raise RuntimeError(
+                            "conditioning token shape mismatch: "
+                            f"expected {expected_condition_shape}, got "
+                            f"{None if conditioning_tokens is None else tuple(conditioning_tokens.shape)}"
+                        )
+                    content_tokens, style_tokens = conditioning_tokens.split(self.condition_half_dim, dim=-1)
+                    content_normed = self.content_condition_norm(content_tokens)
+                    style_normed = self.style_condition_norm(style_tokens)
+                else:
+                    content_normed, style_normed = conditioning_norm_parts
+                content_hidden = self.content_condition_to_hidden(content_normed)
+                style_hidden = self.style_condition_to_hidden(style_normed)
+                joint_hidden = time_hidden + content_hidden + style_hidden
+            else:
+                joint_hidden = time_hidden + condition_hidden
         modulation = self.joint_mod(F.silu(joint_hidden))
 
         (
@@ -407,12 +446,75 @@ class DiffusionTransformerBackbone(nn.Module):
         time_cond = self.time_mlp(time_cond)
         return self.time_cond_norm(time_cond)
 
+    def normalize_conditioning_tokens(
+        self,
+        conditioning_tokens: torch.Tensor,
+        *,
+        batch_size: int,
+        token_count: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        if not self.has_content_injection:
+            return None
+        conditioning_tokens = conditioning_tokens.to(device=device, dtype=dtype)
+        expected_condition_shape = (int(batch_size), int(token_count), self.conditioning_dim)
+        if conditioning_tokens.shape != expected_condition_shape:
+            raise RuntimeError(
+                "conditioning token shape mismatch: "
+                f"expected {expected_condition_shape}, got {tuple(conditioning_tokens.shape)}"
+            )
+        first_injection_block = next(block for block in self.blocks if block.use_content_injection)
+        if first_injection_block.content_condition_norm is None or first_injection_block.style_condition_norm is None:
+            raise RuntimeError("content injection block is missing condition norms")
+        content_tokens, style_tokens = conditioning_tokens.split(
+            first_injection_block.condition_half_dim,
+            dim=-1,
+        )
+        return (
+            first_injection_block.content_condition_norm(content_tokens),
+            first_injection_block.style_condition_norm(style_tokens),
+        )
+
+    def build_condition_hidden_cache(
+        self,
+        conditioning_tokens: torch.Tensor,
+        *,
+        batch_size: int,
+        token_count: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> list[torch.Tensor | None]:
+        norm_parts = self.normalize_conditioning_tokens(
+            conditioning_tokens,
+            batch_size=batch_size,
+            token_count=token_count,
+            device=device,
+            dtype=dtype,
+        )
+        if norm_parts is None:
+            return [None for _ in self.blocks]
+        content_normed, style_normed = norm_parts
+        cache: list[torch.Tensor | None] = []
+        for block in self.blocks:
+            if not block.use_content_injection:
+                cache.append(None)
+                continue
+            if block.content_condition_to_hidden is None or block.style_condition_to_hidden is None:
+                raise RuntimeError("content injection block is missing condition projections")
+            cache.append(
+                block.content_condition_to_hidden(content_normed)
+                + block.style_condition_to_hidden(style_normed)
+            )
+        return cache
+
     def forward(
         self,
         image: torch.Tensor,
         timesteps: torch.Tensor,
         *,
         conditioning_tokens: torch.Tensor,
+        condition_hidden_cache: list[torch.Tensor | None] | None = None,
     ) -> torch.Tensor:
         if image.dim() != 4:
             raise ValueError(f"image must be 4D, got {tuple(image.shape)}")
@@ -432,22 +534,32 @@ class DiffusionTransformerBackbone(nn.Module):
             dtype=x.dtype,
         )
 
+        conditioning_norm_parts = None
         if self.has_content_injection:
-            conditioning_tokens = conditioning_tokens.to(device=x.device, dtype=x.dtype)
-            expected_condition_shape = (x.size(0), x.size(1), self.conditioning_dim)
-            if conditioning_tokens.shape != expected_condition_shape:
-                raise RuntimeError(
-                    "conditioning token shape mismatch: "
-                    f"expected {expected_condition_shape}, got {tuple(conditioning_tokens.shape)}"
+            if condition_hidden_cache is not None:
+                if len(condition_hidden_cache) != len(self.blocks):
+                    raise RuntimeError(
+                        "condition_hidden_cache length mismatch: "
+                        f"expected {len(self.blocks)}, got {len(condition_hidden_cache)}"
+                    )
+            else:
+                conditioning_norm_parts = self.normalize_conditioning_tokens(
+                    conditioning_tokens,
+                    batch_size=x.size(0),
+                    token_count=x.size(1),
+                    device=x.device,
+                    dtype=x.dtype,
                 )
-        else:
-            conditioning_tokens = None
+        elif condition_hidden_cache is not None:
+            raise RuntimeError("condition_hidden_cache was provided but this backbone has no content injection")
 
-        for block in self.blocks:
+        for block_idx, block in enumerate(self.blocks):
             x = block(
                 x,
                 time_cond=time_cond,
-                conditioning_tokens=conditioning_tokens if block.use_content_injection else None,
+                conditioning_tokens=None if condition_hidden_cache is not None else conditioning_tokens,
+                conditioning_norm_parts=conditioning_norm_parts if block.use_content_injection else None,
+                condition_hidden=None if condition_hidden_cache is None else condition_hidden_cache[block_idx],
             )
 
         x = self.final_norm(x)

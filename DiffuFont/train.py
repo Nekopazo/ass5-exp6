@@ -8,7 +8,6 @@ import json
 import math
 from pathlib import Path
 import random
-import sys
 from typing import Dict
 
 import numpy as np
@@ -152,21 +151,11 @@ class XPredBatchCollator:
     def __call__(self, samples) -> Dict[str, torch.Tensor]:
         excluded_by_font = self._build_excluded_style_indices(samples)
         shared_style_indices = self._sample_shared_style_indices(excluded_by_font)
-        shared_style_indices_alt = self._sample_shared_style_indices(
-            excluded_by_font,
-            avoid_indices=shared_style_indices,
-        )
         content, content_index = _pack_unique_content(samples)
         style_img, style_ref_mask, style_index, style_font, style_char_id = self._pack_unique_style(
             samples,
             shared_style_indices=shared_style_indices,
         )
-        style_img_alt, style_ref_mask_alt, style_index_alt, _, _ = self._pack_unique_style(
-            samples,
-            shared_style_indices=shared_style_indices_alt,
-        )
-        if not torch.equal(style_index, style_index_alt):
-            raise RuntimeError("style_index mismatch between primary and alternate style batches")
         return {
             "font": [sample["font"] for sample in samples],
             "font_id": torch.tensor([sample["font_id"] for sample in samples], dtype=torch.long),
@@ -177,8 +166,6 @@ class XPredBatchCollator:
             "target": torch.stack([sample["target"] for sample in samples], dim=0),
             "style_img": style_img,
             "style_ref_mask": style_ref_mask,
-            "style_img_alt": style_img_alt,
-            "style_ref_mask_alt": style_ref_mask_alt,
             "style_index": style_index,
             "style_font": style_font,
             "style_char_id": style_char_id,
@@ -207,7 +194,7 @@ class StyleEvalBatchCollator:
         ref_count = min(int(self.dataset.style_ref_count_max), len(ordered_candidates))
         if ref_count < 1:
             raise RuntimeError("Validation batch has no available style references.")
-        return ordered_candidates[:ref_count]
+        return random.sample(ordered_candidates, k=ref_count)
 
     def _pack_unique_style(
         self,
@@ -338,8 +325,6 @@ def slice_batch(batch: Dict[str, torch.Tensor], count: int) -> Dict[str, torch.T
             "content_index",
             "style_img",
             "style_ref_mask",
-            "style_img_alt",
-            "style_ref_mask_alt",
             "style_index",
             "style_font",
             "style_char_id",
@@ -355,10 +340,6 @@ def slice_batch(batch: Dict[str, torch.Tensor], count: int) -> Dict[str, torch.T
     output["content_index"] = content_index
     output["style_img"] = batch["style_img"][style_positions]
     output["style_ref_mask"] = batch["style_ref_mask"][style_positions]
-    if "style_img_alt" in batch:
-        output["style_img_alt"] = batch["style_img_alt"][style_positions]
-    if "style_ref_mask_alt" in batch:
-        output["style_ref_mask_alt"] = batch["style_ref_mask_alt"][style_positions]
     output["style_index"] = style_index
     output["style_font"] = [batch["style_font"][idx] for idx in style_positions.tolist()]
     output["style_char_id"] = batch["style_char_id"][style_positions]
@@ -374,8 +355,6 @@ def concat_batches(*batches: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]
             "content_index",
             "style_img",
             "style_ref_mask",
-            "style_img_alt",
-            "style_ref_mask_alt",
             "style_index",
             "style_font",
             "style_char_id",
@@ -400,13 +379,6 @@ def concat_batches(*batches: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]
     ref_count = min(int(batch["style_img"].size(1)) for batch in batches)
     merged["style_img"] = torch.cat([batch["style_img"][:, :ref_count] for batch in batches], dim=0)
     merged["style_ref_mask"] = torch.cat([batch["style_ref_mask"][:, :ref_count] for batch in batches], dim=0)
-    if all("style_img_alt" in batch for batch in batches):
-        merged["style_img_alt"] = torch.cat([batch["style_img_alt"][:, :ref_count] for batch in batches], dim=0)
-    if all("style_ref_mask_alt" in batch for batch in batches):
-        merged["style_ref_mask_alt"] = torch.cat(
-            [batch["style_ref_mask_alt"][:, :ref_count] for batch in batches],
-            dim=0,
-        )
     style_indices = []
     style_offset = 0
     for batch in batches:
@@ -424,8 +396,10 @@ def apply_fixed_style_refs(
     val_dataset: FontImageDataset | None,
     *,
     seen_count: int,
+    seed: int,
+    ref_count: int | None = None,
 ) -> Dict[str, torch.Tensor]:
-    ref_count = int(batch["style_img"].size(1))
+    ref_count = int(batch["style_img"].size(1)) if ref_count is None else max(1, int(ref_count))
     shared_candidates: set[int] | None = None
     for idx, (font_name, char_id) in enumerate(zip(batch["style_font"], batch["style_char_id"].tolist(), strict=True)):
         dataset = train_dataset if idx < seen_count else val_dataset
@@ -437,7 +411,8 @@ def apply_fixed_style_refs(
         raise RuntimeError(
             f"Sample batch needs {ref_count} shared fixed style refs, only found {0 if shared_candidates is None else len(shared_candidates)}."
         )
-    shared_style_indices = sorted(int(idx) for idx in shared_candidates)[:ref_count]
+    rng = random.Random(int(seed))
+    shared_style_indices = rng.sample(sorted(int(idx) for idx in shared_candidates), k=ref_count)
     fixed_style_imgs = []
     fixed_style_masks = []
     for idx, font_name in enumerate(batch["style_font"]):
@@ -452,10 +427,6 @@ def apply_fixed_style_refs(
         fixed_style_masks.append(style_ref_mask)
     batch["style_img"] = torch.stack(fixed_style_imgs, dim=0)
     batch["style_ref_mask"] = torch.stack(fixed_style_masks, dim=0)
-    if "style_img_alt" in batch:
-        batch["style_img_alt"] = batch["style_img"]
-    if "style_ref_mask_alt" in batch:
-        batch["style_ref_mask_alt"] = batch["style_ref_mask"]
     return batch
 
 
@@ -481,7 +452,14 @@ def build_sample_batch(
     )
     seen_batch = slice_batch(next(iter(seen_loader)), seen_count)
     if val_dataset is None or len(val_dataset.font_names) == 0:
-        return seen_batch
+        return apply_fixed_style_refs(
+            seen_batch,
+            train_dataset,
+            None,
+            seen_count=seen_count,
+            seed=seed + 2000,
+            ref_count=int(train_dataset.style_ref_count_max),
+        )
 
     unseen_count = min(4, len(val_dataset.font_names))
     unseen_loader = build_dataloader(
@@ -503,6 +481,8 @@ def build_sample_batch(
         train_dataset,
         val_dataset,
         seen_count=seen_count,
+        seed=seed + 2000,
+        ref_count=min(int(train_dataset.style_ref_count_max), int(val_dataset.style_ref_count_max)),
     )
 
 
@@ -574,10 +554,7 @@ def main() -> None:
     parser.add_argument("--noise-scale", type=float, default=1.0)
     parser.add_argument("--ema-decay", type=float, required=True)
     parser.add_argument("--ema-start-step", type=int, default=40000)
-    parser.add_argument("--consistency-lambda", type=float, default=1.0)
-    parser.add_argument("--consistency-start-step", type=int, default=-1)
     args = parser.parse_args()
-    raw_argv = sys.argv[1:]
 
     set_global_seed(int(args.seed))
     enable_torch_sdpa_backends()
@@ -601,8 +578,6 @@ def main() -> None:
         raise ValueError("total_steps must be > 0.")
     if float(args.weight_decay) < 0.0:
         raise ValueError("weight_decay must be >= 0.")
-    if float(args.consistency_lambda) < 0.0:
-        raise ValueError("consistency_lambda must be >= 0.")
     if int(args.lr_warmup_steps) < 0:
         raise ValueError("lr_warmup_steps must be >= 0.")
     if float(args.lr_min_scale) < 0.0 or float(args.lr_min_scale) > 1.0:
@@ -697,8 +672,6 @@ def main() -> None:
         sample_steps=int(args.sample_steps),
         ema_decay=float(args.ema_decay),
         ema_start_step=int(args.ema_start_step),
-        consistency_lambda=float(args.consistency_lambda),
-        consistency_start_step=None if int(args.consistency_start_step) < 0 else int(args.consistency_start_step),
         log_every_steps=log_every_steps,
         save_every_steps=resolved_save_every_steps,
         val_every_steps=val_every_steps,
@@ -710,18 +683,7 @@ def main() -> None:
     if args.resume is not None:
         trainer.load(args.resume)
         print(f"[train] resumed from {args.resume}")
-        if "--consistency-lambda" in raw_argv:
-            trainer.consistency_lambda = max(0.0, float(args.consistency_lambda))
-        if "--consistency-start-step" in raw_argv:
-            trainer._set_consistency_start_step(
-                None if int(args.consistency_start_step) < 0 else int(args.consistency_start_step)
-            )
     args.save_dir.mkdir(parents=True, exist_ok=True)
-    print(
-        "[train] effective consistency "
-        f"lambda={trainer.consistency_lambda} "
-        f"start_step={None if int(trainer.consistency_start_step) > int(trainer.total_steps) else int(trainer.consistency_start_step)}"
-    )
 
     trainer.sample_batch_builder = lambda: build_sample_batch(dataset, val_dataset, device=device, seed=int(args.seed))
     trainer.sample_every_steps = resolved_sample_every_steps
@@ -741,7 +703,7 @@ def main() -> None:
     run_config["val_samples"] = 0 if val_dataset is None else int(len(val_dataset.samples))
     run_config["computed_total_steps"] = int(total_steps)
     run_config["model_type"] = "dit_xpred"
-    run_config["loss_type"] = "jit_v_mse+dual_ref_v" if float(args.consistency_lambda) > 0.0 else "jit_v_mse"
+    run_config["loss_type"] = "jit_v_mse"
     run_config["lr_schedule"] = str(args.lr_schedule)
     run_config["lr_warmup_steps"] = int(args.lr_warmup_steps)
     run_config["lr_min_scale"] = float(args.lr_min_scale)
@@ -751,8 +713,6 @@ def main() -> None:
     run_config["p_std"] = float(args.p_std)
     run_config["t_eps"] = float(args.t_eps)
     run_config["noise_scale"] = float(args.noise_scale)
-    run_config["consistency_lambda"] = float(args.consistency_lambda)
-    run_config["consistency_start_step"] = None if int(args.consistency_start_step) < 0 else int(args.consistency_start_step)
     run_config["ffn_activation"] = "swiglu"
     run_config["norm_variant"] = "rms"
     run_config["ode_solver"] = "heun_last_euler"

@@ -1,67 +1,116 @@
-# 中文字风格迁移 Diffusion Transformer（增强版）
+# 中文字风格迁移 Diffusion Transformer
 
-## 1. 任务定义
-目标：在保留 **content 字形结构** 的前提下，将其迁移到目标 **style 风格**，通过 diffusion Transformer 生成清晰图像。
+## 1. 当前目标
 
-## 2. 总体结构
-输入：
-- x_content
-- x_style
-- z_t
+输入一个 content 字形结构图和多张 style reference 图，生成目标字体下的同一个汉字。当前模型是 `SourcePartRefDiT`，训练目标是 x-pred，并从 `x_pred` 推导 `v_pred` 做 loss。
 
-流程：
-1. CNN 编码 content / style → 16×16×256
-2. content 作为 Query 查询 style（cross-attention）
-3. 残差融合并拼接
-4. 投影到主干维度
-5. patchify z_t → Transformer（12层）
-6. adaLN-Zero 注入
-7. 输出 x_pred
+## 2. 当前默认结构
 
-## 3. 条件编码
-Content: [B,1,128,128] → [B,16,16,256]  
-Style:   [B,1,128,128] → [B,16,16,256]
+默认配置：
 
-## 4. Cross-Attention
-F_c → [B,256,256]  
-F_s → [B,256,256]  
+- 图像：`128x128` 灰度图
+- patch size：`8`
+- token 数：`16x16 = 256`
+- content token：`[B, 256, 256]`
+- style token bank：`[B, R, 256, 256]`
+- 条件 token：`[B, 256, 512]`
+- DiT hidden dim：`256`
+- DiT block：默认 12 层
+- style fusion：固定 `cross_attn_concat`
 
-Q = F_c, K = F_s, V = F_s  
-F_cs = Attn(Q,K,V)
+## 3. 编码流程
 
-## 5. 条件融合
-F_fuse = F_c + F_cs  
-F_cat = concat(F_c, F_fuse)  
-F_cond = Linear(512 → D)
+```text
+content_img -> ContentEncoder -> content_tokens              # [B, 256, 256]
+style_img   -> StyleEncoder   -> style_token_bank            # [B, R, 256, 256]
+```
 
-## 6. Patch Embedding
-z_t → patches (8×8) → dim=64  
-64 → 128 → D  
+content 和 style 都经过卷积金字塔下采样到 `16x16`，再展平成 token。
 
-## 7. Transformer（12层）
-结构：
-- RMSNorm
-- SwiGLU
-- RoPE
-- qk-norm（可选）
-- adaLN-Zero
+## 4. 拼接 Cross-Attention
 
-每层：
-T → RMSNorm → scale/shift → SA → gate → residual  
-T → RMSNorm → scale/shift → FFN(SwiGLU) → gate → residual  
+当前模型只保留拼接 cross-attention：先把多张 ref 的 style tokens 拼接，再由 content 查询：
 
-## 8. 输出
-T → Linear → patch → 图像
+```text
+style_tokens_concat = [B, R*256, 256]
+Q = Wq(norm(content_tokens))
+K,V = Wk/Wv(norm(style_tokens_concat))
+style_key_valid_mask = reshape(style_ref_mask, [B, R*256])
+style_context = Attention(Q, K, V, key_mask=style_key_valid_mask)  # [B, 256, 256]
+conditioning_tokens = concat(content_tokens, style_context)   # [B, 256, 512]
+```
 
-## 9. 训练
-z_t = t x + (1-t) ε  
-x_pred = net(z_t)  
-v_pred = (x_pred - z_t)/(1-t)  
-loss = ||v_pred - v||^2
+含义：每个 content token 会在所有有效 ref 的所有 style token 里查询需要的风格信息。无效或 padding 的 ref token 会被真正从 attention key 里 mask 掉，不再占用 softmax 权重。得到的 `style_context` 仍然是 style value 经过注意力权重重组后的结果，不是原始 content，也不是简单平均。
 
-## 10. 核心原则
-- x-pred 是关键
-- content 控结构
-- style 控外观
-- patch size 控细节
-- bottleneck 提升泛化
+没有每张 ref 独立查询后的平均分支，也没有 ref-level gate 分支。
+
+## 5. DiT 条件注入
+
+每个 DiT block 都把 `conditioning_tokens` 拆成 content/style 两半：
+
+```text
+content_hidden = Linear(RMSNorm(content_tokens))
+style_hidden   = Linear(RMSNorm(style_tokens))
+
+time_hidden = Linear(time_cond)
+joint_hidden = SiLU(time_hidden + content_hidden + style_hidden)
+mods = Linear(joint_hidden)
+```
+
+`mods` 产生 self-attention 和 FFN 的 shift、scale、gate：
+
+```text
+self_attn_shift, self_attn_scale, self_attn_gate,
+ffn_shift,       ffn_scale,       ffn_gate
+```
+
+## 6. Output Head
+
+最后输出头也使用同样的三项相加：
+
+```text
+content_hidden = Linear(RMSNorm(content_tokens))
+style_hidden   = Linear(RMSNorm(style_tokens))
+time_hidden    = Linear(time_cond)
+
+joint_hidden = SiLU(time_hidden + content_hidden + style_hidden)
+shift, scale = Linear(joint_hidden).chunk(2)
+
+x = RMSNorm(patch_tokens)
+x = x * (1 + scale) + shift
+patch_pixels = Linear(x)
+unpatchify -> pred_x
+```
+
+## 7. 推理缓存
+
+推理时，`conditioning_tokens` 不随 denoise step 变化，所以会提前缓存：
+
+- 每个 block 的 content/style condition projection
+- output head 的 content/style condition projection
+
+每一步仍然重新算 timestep 相关 modulation。这个缓存只减少重复计算，不改变输出。
+
+sample 可视化不会长期把 sample batch 缓存在 GPU 上；每次到 `sample_every_steps` 都重新构造 batch 并重新推理。style ref 使用固定 seed 选出同一组 ref。
+
+训练阶段可以在 `style_ref_count_min` 到 `style_ref_count_max` 之间随机采样 ref 数；验证和 sample 可视化固定使用 `style_ref_count_max`。
+
+## 8. 训练目标
+
+```text
+t = sigmoid(randn * p_std + p_mean)
+x0 = noise_scale * randn
+xt = t * x1 + (1 - t) * x0
+
+pred_x = model(xt, t, condition)
+target_v = (x1 - xt) / clamp_min(1 - t, t_eps)
+pred_v   = (pred_x - xt) / clamp_min(1 - t, t_eps)
+loss = mse(pred_v, target_v)
+```
+
+核心原则：
+
+- content 主要提供结构和 token 对齐位置。
+- style_context 是 content 查询 style value 后得到的风格条件。
+- 默认 concat cross-attention 让一个 content token 直接访问所有 ref 的 style token。
+- ref 数增加不一定单调变好，需要看训练时 ref 分布、注意力分散和 style 一致性。

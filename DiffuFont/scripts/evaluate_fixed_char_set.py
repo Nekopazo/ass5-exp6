@@ -116,7 +116,16 @@ def resolve_run_paths(args: argparse.Namespace, train_config: dict[str, Any]) ->
 
 
 def load_style_pool(path: Path) -> list[str]:
-    chars = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if path.suffix.lower() == ".json":
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            chars = [str(char) for char in raw.keys()]
+        elif isinstance(raw, list):
+            chars = [str(char) for char in raw]
+        else:
+            raise RuntimeError(f"Unsupported JSON style pool format: {path}")
+    else:
+        chars = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     if not chars:
         raise RuntimeError(f"Style pool file is empty: {path}")
     return chars
@@ -735,7 +744,7 @@ def main() -> None:
     style_pool_path = (
         args.style_pool_file.resolve()
         if args.style_pool_file is not None
-        else (root / "fontprocessing" / "outputs_notosanssc_3500_k16_final" / "reference_400.txt")
+        else (root / "CharacterData" / "CharList.json")
     )
     style_pool_chars = load_style_pool(style_pool_path)
     dataset, train_fonts, val_fonts = load_datasets(root, train_config)

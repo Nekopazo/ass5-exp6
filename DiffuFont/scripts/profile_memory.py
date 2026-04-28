@@ -242,8 +242,8 @@ def main() -> None:
         )
         conditioning_tokens = stage_record(
             device,
-            "content_style_fuse",
-            lambda: trainer.model.fuse_content_style_tokens_from_projected(
+            "external_content_style_fusion",
+            lambda: trainer.model.content_style_attn.fuse_content_style_tokens_from_preprojected_query(
                 content_tokens,
                 content_query,
                 style_key,

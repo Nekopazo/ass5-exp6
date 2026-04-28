@@ -222,7 +222,7 @@ class StyleEncoder(ConvPyramidEncoder):
 
 
 class ContentStyleCrossAttention(nn.Module):
-    """Cross-attention with content queries and style key/value tokens."""
+    """External content<-style fusion utilities for concat cross-attention."""
 
     def __init__(self, embed_dim: int, num_heads: int) -> None:
         super().__init__()
@@ -243,73 +243,118 @@ class ContentStyleCrossAttention(nn.Module):
         *,
         token_valid_mask: Optional[torch.Tensor] = None,
     ) -> None:
-        if style_tokens.dim() != 3:
-            raise ValueError(f"style_tokens must be 3D, got {tuple(style_tokens.shape)}")
+        if style_tokens.dim() != 4:
+            raise ValueError(f"style_tokens must be 4D [B, R, T, D], got {tuple(style_tokens.shape)}")
         if token_valid_mask is not None:
-            if token_valid_mask.shape != style_tokens.shape[:2]:
+            if token_valid_mask.shape != style_tokens.shape[:3]:
                 raise ValueError(
-                    f"token_valid_mask shape mismatch: expected {tuple(style_tokens.shape[:2])}, "
+                    f"token_valid_mask shape mismatch: expected {tuple(style_tokens.shape[:3])}, "
                     f"got {tuple(token_valid_mask.shape)}"
                 )
-            if bool((~token_valid_mask).any().item()):
-                raise RuntimeError(
-                    "ContentStyleCrossAttention requires all style refs to be valid in the current path."
-                )
 
-    def project_style_kv(
+    def project_style_bank_kv(
         self,
         style_tokens: torch.Tensor,
         *,
         token_valid_mask: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         self._validate_style_inputs(style_tokens, token_valid_mask=token_valid_mask)
-        return self.attn.project_key_value(self.token_norm(style_tokens), style_tokens)
+        batch_size, num_refs, tokens_per_ref, hidden_dim = style_tokens.shape
+        normed_tokens = self.token_norm(style_tokens)
+        style_key_valid_mask = None
+        if token_valid_mask is not None:
+            token_valid_mask = token_valid_mask.to(device=style_tokens.device, dtype=torch.bool)
+            if bool((~token_valid_mask).all(dim=(1, 2)).any()):
+                raise ValueError("token_valid_mask must keep at least one style token per sample")
+            if not bool(token_valid_mask.all()):
+                style_key_valid_mask = token_valid_mask.reshape(batch_size, num_refs * tokens_per_ref)[:, None, :]
+        concat_tokens = normed_tokens.reshape(batch_size, num_refs * tokens_per_ref, hidden_dim)
+        key, value = self.attn.project_key_value(concat_tokens, concat_tokens)
+        concat_len = int(key.size(2))
+        return (
+            key.view(batch_size, 1, self.num_heads, concat_len, self.attn.head_dim),
+            value.view(batch_size, 1, self.num_heads, concat_len, self.attn.head_dim),
+            style_key_valid_mask,
+        )
 
     def project_content_query(self, content_tokens: torch.Tensor) -> torch.Tensor:
         if content_tokens.dim() != 3:
-            raise ValueError(f"content_tokens must be 3D, got {tuple(content_tokens.shape)}")
+            raise ValueError(f"content_tokens must be 3D [B, T, D], got {tuple(content_tokens.shape)}")
         return self.attn.project_query(self.query_norm(content_tokens))
 
-    def forward_projected(
+    def fuse_content_style_tokens_from_projected(
         self,
-        content_query: torch.Tensor,
+        content_tokens: torch.Tensor,
         style_key: torch.Tensor,
         style_value: torch.Tensor,
     ) -> torch.Tensor:
-        if content_query.dim() != 4:
-            raise ValueError(
-                f"content_query must be projected tensor shaped [B, H, T, D], got {tuple(content_query.shape)}"
-            )
-        if style_key.dim() != 4 or style_value.dim() != 4:
-            raise ValueError(
-                "style_key/style_value must be projected tensors shaped [B, H, T, D], got "
-                f"{tuple(style_key.shape)} and {tuple(style_value.shape)}"
-            )
-        if content_query.size(0) != style_key.size(0) or style_key.size(0) != style_value.size(0):
-            raise ValueError(
-                "content/projected-style batch mismatch: "
-                f"{tuple(content_query.shape)} vs {tuple(style_key.shape)} vs {tuple(style_value.shape)}"
-            )
-        style_context, _ = self.attn.attend_projected(content_query, style_key, style_value, need_weights=False)
-        return style_context
+        content_query = self.project_content_query(content_tokens)
+        return self.fuse_content_style_tokens_from_preprojected_query(
+            content_tokens,
+            content_query,
+            style_key,
+            style_value,
+        )
 
-    def forward(
+    def fuse_content_style_tokens_from_preprojected_query(
         self,
         content_tokens: torch.Tensor,
-        style_tokens: torch.Tensor,
-        *,
-        token_valid_mask: Optional[torch.Tensor] = None,
+        content_query: torch.Tensor,
+        style_key: torch.Tensor,
+        style_value: torch.Tensor,
+        style_key_valid_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if content_tokens.dim() != 3:
-            raise ValueError(f"content_tokens must be 3D, got {tuple(content_tokens.shape)}")
-        if content_tokens.size(0) != style_tokens.size(0):
+            raise ValueError(f"content_tokens must be 3D [B, T, D], got {tuple(content_tokens.shape)}")
+        if content_query.dim() != 4:
             raise ValueError(
-                "content_tokens/style_tokens batch mismatch: "
-                f"{tuple(content_tokens.shape)} vs {tuple(style_tokens.shape)}"
+                f"content_query must be 4D [B, H, T, Dh], got {tuple(content_query.shape)}"
             )
-        style_key, style_value = self.project_style_kv(style_tokens, token_valid_mask=token_valid_mask)
-        content_query = self.project_content_query(content_tokens)
-        return self.forward_projected(content_query, style_key, style_value)
+        if style_key.dim() != 5 or style_value.dim() != 5:
+            raise ValueError(
+                "style_key/style_value must be 5D [B, R, H, T, D], got "
+                f"{tuple(style_key.shape)} and {tuple(style_value.shape)}"
+            )
+        if style_key.shape != style_value.shape:
+            raise ValueError(
+                "style_key/style_value shape mismatch: "
+                f"{tuple(style_key.shape)} vs {tuple(style_value.shape)}"
+            )
+        batch_size, query_len, hidden_dim = content_tokens.shape
+        key_batch, num_refs, num_heads, tokens_per_ref, head_dim = style_key.shape
+        if key_batch != batch_size:
+            raise ValueError(f"style_key batch mismatch: expected {batch_size}, got {key_batch}")
+        expected_query_shape = (batch_size, num_heads, query_len, head_dim)
+        if content_query.shape != expected_query_shape:
+            raise ValueError(
+                "content_query shape mismatch: "
+                f"expected {expected_query_shape}, got {tuple(content_query.shape)}"
+            )
+        if style_key_valid_mask is not None:
+            expected_mask_shape = (batch_size, num_refs, tokens_per_ref)
+            if style_key_valid_mask.shape != expected_mask_shape:
+                raise ValueError(
+                    "style_key_valid_mask shape mismatch: "
+                    f"expected {expected_mask_shape}, got {tuple(style_key_valid_mask.shape)}"
+                )
+            style_key_valid_mask = style_key_valid_mask.to(device=style_key.device, dtype=torch.bool)
+            style_key_valid_mask = style_key_valid_mask.reshape(batch_size * num_refs, tokens_per_ref)
+        expanded_query = (
+            content_query.unsqueeze(1)
+            .expand(batch_size, num_refs, num_heads, query_len, head_dim)
+            .reshape(batch_size * num_refs, num_heads, query_len, head_dim)
+        )
+        flat_style_key = style_key.reshape(batch_size * num_refs, num_heads, tokens_per_ref, head_dim)
+        flat_style_value = style_value.reshape(batch_size * num_refs, num_heads, tokens_per_ref, head_dim)
+        style_context, _ = self.attn.attend_projected(
+            expanded_query,
+            flat_style_key,
+            flat_style_value,
+            key_valid_mask=style_key_valid_mask,
+            need_weights=False,
+        )
+        style_context = style_context.view(batch_size, query_len, self.embed_dim)
+        return torch.cat([content_tokens, style_context], dim=-1).contiguous()
 
 
 class SourcePartRefDiT(nn.Module):
@@ -420,8 +465,23 @@ class SourcePartRefDiT(nn.Module):
             norm_variant=self.norm_variant,
         )
         self.output_norm = _build_norm(self.dit_hidden_dim, norm_variant=self.norm_variant)
-        self.output_condition_norm = _build_norm(self.conditioning_dim, norm_variant=self.norm_variant)
-        self.output_condition_to_hidden = nn.Linear(self.conditioning_dim, self.dit_hidden_dim)
+        self.output_condition_half_dim = self.encoder_hidden_dim
+        self.output_content_condition_norm = _build_norm(
+            self.output_condition_half_dim,
+            norm_variant=self.norm_variant,
+        )
+        self.output_style_condition_norm = _build_norm(
+            self.output_condition_half_dim,
+            norm_variant=self.norm_variant,
+        )
+        self.output_content_condition_to_hidden = nn.Linear(
+            self.output_condition_half_dim,
+            self.dit_hidden_dim,
+        )
+        self.output_style_condition_to_hidden = nn.Linear(
+            self.output_condition_half_dim,
+            self.dit_hidden_dim,
+        )
         self.output_time_to_hidden = nn.Linear(self.dit_hidden_dim, self.dit_hidden_dim)
         self.output_mod = _build_zero_linear(self.dit_hidden_dim, self.dit_hidden_dim * 2)
         self.output_proj = nn.Linear(self.dit_hidden_dim, self.output_patch_dim)
@@ -508,11 +568,10 @@ class SourcePartRefDiT(nn.Module):
         style_features = self.style_encoder.forward_features(flat_style)
         style_tokens = style_features.flatten(2).transpose(1, 2).contiguous()
         tokens_per_ref = int(style_tokens.size(1))
-        style_tokens = style_tokens.view(batch, refs * tokens_per_ref, self.style_token_hidden_dim)
+        style_tokens = style_tokens.view(batch, refs, tokens_per_ref, self.style_token_hidden_dim)
         token_valid_mask = (
             ref_valid_mask[:, :, None]
             .expand(batch, refs, tokens_per_ref)
-            .reshape(batch, refs * tokens_per_ref)
         )
         return style_tokens, token_valid_mask
 
@@ -525,29 +584,15 @@ class SourcePartRefDiT(nn.Module):
             style_img,
             style_ref_mask=style_ref_mask,
         )
-        return self.style_token_proj(style_tokens), token_valid_mask
+        return self.style_token_proj(style_tokens).contiguous(), token_valid_mask
 
-    def fuse_content_style_tokens(
-        self,
-        content_tokens: torch.Tensor,
-        style_tokens: torch.Tensor,
-        *,
-        token_valid_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        style_context = self.content_style_attn(
-            content_tokens,
-            style_tokens,
-            token_valid_mask=token_valid_mask,
-        )
-        return torch.cat([content_tokens, style_context], dim=-1).contiguous()
-
-    def precompute_style_kv(
+    def precompute_style_bank_kv(
         self,
         style_tokens: torch.Tensor,
         *,
         token_valid_mask: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.content_style_attn.project_style_kv(
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        return self.content_style_attn.project_style_bank_kv(
             style_tokens,
             token_valid_mask=token_valid_mask,
         )
@@ -558,19 +603,69 @@ class SourcePartRefDiT(nn.Module):
     ) -> torch.Tensor:
         return self.content_style_attn.project_content_query(content_tokens)
 
-    def fuse_content_style_tokens_from_projected(
+    def build_conditioning_tokens(
         self,
         content_tokens: torch.Tensor,
-        content_query: torch.Tensor,
-        style_key: torch.Tensor,
-        style_value: torch.Tensor,
+        style_token_bank: Optional[torch.Tensor] = None,
+        *,
+        token_valid_mask: Optional[torch.Tensor] = None,
+        content_query: Optional[torch.Tensor] = None,
+        style_key: Optional[torch.Tensor] = None,
+        style_value: Optional[torch.Tensor] = None,
+        style_key_valid_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        style_context = self.content_style_attn.forward_projected(
+        if content_query is None:
+            content_query = self.precompute_content_query(content_tokens)
+        if style_key is None or style_value is None:
+            if style_token_bank is None:
+                raise ValueError("style_token_bank is required when precomputed style_key/style_value are not provided")
+            style_key, style_value, style_key_valid_mask = self.precompute_style_bank_kv(
+                style_token_bank,
+                token_valid_mask=token_valid_mask,
+            )
+        return self.content_style_attn.fuse_content_style_tokens_from_preprojected_query(
+            content_tokens,
             content_query,
             style_key,
             style_value,
+            style_key_valid_mask=style_key_valid_mask,
         )
-        return torch.cat([content_tokens, style_context], dim=-1).contiguous()
+
+    def precompute_backbone_condition_hidden_cache(
+        self,
+        conditioning_tokens: torch.Tensor,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> list[torch.Tensor | None]:
+        return self.backbone.build_condition_hidden_cache(
+            conditioning_tokens,
+            batch_size=int(conditioning_tokens.size(0)),
+            token_count=int(conditioning_tokens.size(1)),
+            device=device,
+            dtype=dtype,
+        )
+
+    def precompute_output_condition_hidden(
+        self,
+        conditioning_tokens: torch.Tensor,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        expected_condition_shape = (conditioning_tokens.size(0), self.num_patches, self.conditioning_dim)
+        if conditioning_tokens.shape != expected_condition_shape:
+            raise ValueError(
+                "conditioning token shape mismatch for final head: "
+                f"expected {expected_condition_shape}, got {tuple(conditioning_tokens.shape)}"
+            )
+        conditioning_tokens = conditioning_tokens.to(device=device, dtype=dtype)
+        content_tokens, style_tokens = conditioning_tokens.split(self.output_condition_half_dim, dim=-1)
+        return self.output_content_condition_to_hidden(
+            self.output_content_condition_norm(content_tokens)
+        ) + self.output_style_condition_to_hidden(
+            self.output_style_condition_norm(style_tokens)
+        )
 
     def decode_patch_tokens(
         self,
@@ -578,6 +673,7 @@ class SourcePartRefDiT(nn.Module):
         *,
         timesteps: torch.Tensor,
         conditioning_tokens: torch.Tensor,
+        output_condition_hidden: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if patch_tokens.dim() != 3:
             raise ValueError(f"patch_tokens must be 3D, got {tuple(patch_tokens.shape)}")
@@ -595,14 +691,29 @@ class SourcePartRefDiT(nn.Module):
 
         time_hidden = self.output_time_to_hidden(
             self.backbone.build_time_cond(
-            timesteps,
-            dtype=patch_tokens.dtype,
+                timesteps,
+                dtype=patch_tokens.dtype,
             )
         ).unsqueeze(1)
-        condition_hidden = self.output_condition_to_hidden(
-            self.output_condition_norm(conditioning_tokens.to(device=patch_tokens.device, dtype=patch_tokens.dtype))
-        )
-        shift, scale = self.output_mod(F.silu(time_hidden + condition_hidden)).chunk(2, dim=-1)
+        if output_condition_hidden is None:
+            conditioning_tokens = conditioning_tokens.to(device=patch_tokens.device, dtype=patch_tokens.dtype)
+            content_tokens, style_tokens = conditioning_tokens.split(self.output_condition_half_dim, dim=-1)
+            content_hidden = self.output_content_condition_to_hidden(
+                self.output_content_condition_norm(content_tokens)
+            )
+            style_hidden = self.output_style_condition_to_hidden(
+                self.output_style_condition_norm(style_tokens)
+            )
+            joint_hidden = time_hidden + content_hidden + style_hidden
+        elif output_condition_hidden.shape != (patch_tokens.size(0), self.num_patches, self.dit_hidden_dim):
+            raise ValueError(
+                "output_condition_hidden shape mismatch: "
+                f"expected {(patch_tokens.size(0), self.num_patches, self.dit_hidden_dim)}, "
+                f"got {tuple(output_condition_hidden.shape)}"
+            )
+        else:
+            joint_hidden = time_hidden + output_condition_hidden
+        shift, scale = self.output_mod(F.silu(joint_hidden)).chunk(2, dim=-1)
         patch_pixels = self.output_proj(modulate(self.output_norm(patch_tokens), shift, scale))
         patch_pixels = patch_pixels.view(
             patch_tokens.size(0),
@@ -624,16 +735,20 @@ class SourcePartRefDiT(nn.Module):
         timesteps: torch.Tensor,
         *,
         conditioning_tokens: torch.Tensor,
+        backbone_condition_hidden_cache: Optional[list[torch.Tensor | None]] = None,
+        output_condition_hidden: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         patch_tokens = self.backbone(
             x_t_image,
             timesteps,
             conditioning_tokens=conditioning_tokens,
+            condition_hidden_cache=backbone_condition_hidden_cache,
         )
         return self.decode_patch_tokens(
             patch_tokens,
             timesteps=timesteps,
             conditioning_tokens=conditioning_tokens,
+            output_condition_hidden=output_condition_hidden,
         )
 
     def forward(
@@ -646,20 +761,14 @@ class SourcePartRefDiT(nn.Module):
         style_ref_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         content_tokens = self.encode_content_tokens(content_img)
-        content_query = self.precompute_content_query(content_tokens)
         style_token_bank, token_valid_mask = self.encode_style_token_bank(
             style_img,
             style_ref_mask=style_ref_mask,
         )
-        style_key, style_value = self.precompute_style_kv(
+        conditioning_tokens = self.build_conditioning_tokens(
+            content_tokens,
             style_token_bank,
             token_valid_mask=token_valid_mask,
-        )
-        conditioning_tokens = self.fuse_content_style_tokens_from_projected(
-            content_tokens,
-            content_query,
-            style_key,
-            style_value,
         )
         return self.predict_x(
             x_t_image,
