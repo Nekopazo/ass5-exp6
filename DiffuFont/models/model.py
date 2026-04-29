@@ -16,9 +16,6 @@ import torch.nn.functional as F
 from torch import nn
 from torchvision.utils import save_image
 
-from .font_perceptor import FontPerceptor
-
-
 def _metrics_to_floats(metrics: Dict[str, torch.Tensor | float | int]) -> Dict[str, float]:
     output: Dict[str, float] = {}
     for key, value in metrics.items():
@@ -527,222 +524,6 @@ class _BaseTrainer:
         return None
 
 
-class FontPerceptorTrainer(_BaseTrainer):
-    def __init__(
-        self,
-        model: FontPerceptor,
-        device: torch.device,
-        *,
-        lr: float = 2e-4,
-        total_steps: int = 50_000,
-        font_loss_lambda_start: float = 0.2,
-        font_loss_lambda_end: float = 0.05,
-        font_label_smoothing: float = 0.05,
-        char_label_smoothing: float = 0.0,
-        qualify_min_char_acc: float = 0.70,
-        log_every_steps: int = 100,
-        save_every_steps: Optional[int] = None,
-        val_every_steps: Optional[int] = None,
-        val_max_batches: Optional[int] = 16,
-        grad_clip_norm: Optional[float] = 1.0,
-        grad_clip_min_norm: Optional[float] = None,
-    ) -> None:
-        super().__init__(
-            model,
-            device,
-            lr=lr,
-            total_steps=total_steps,
-            lr_warmup_steps=0,
-            lr_decay_start_step=None,
-            lr_schedule="cosine",
-            lr_min_scale=0.0,
-            log_every_steps=log_every_steps,
-            save_every_steps=save_every_steps,
-            val_every_steps=val_every_steps,
-            val_max_batches=val_max_batches,
-            grad_clip_norm=grad_clip_norm,
-            grad_clip_min_norm=grad_clip_min_norm,
-            weight_decay=1e-4,
-            track_best_on_val=False,
-        )
-        self.font_loss_lambda_start = max(0.0, float(font_loss_lambda_start))
-        self.font_loss_lambda_end = max(0.0, float(font_loss_lambda_end))
-        if self.font_loss_lambda_end > self.font_loss_lambda_start:
-            raise ValueError(
-                "font_loss_lambda_end must be <= font_loss_lambda_start, "
-                f"got start={self.font_loss_lambda_start} end={self.font_loss_lambda_end}"
-            )
-        self.font_label_smoothing = min(max(float(font_label_smoothing), 0.0), 0.2)
-        self.char_label_smoothing = min(max(float(char_label_smoothing), 0.0), 0.2)
-        self.qualify_min_char_acc = float(qualify_min_char_acc)
-        self.best_train_loss: Optional[float] = None
-
-    def _lr_scale_for_step(self, step: int) -> float:
-        return _cosine_decay_scale(
-            step=step,
-            total_steps=self.total_steps,
-            warmup_steps=self.lr_warmup_steps,
-            min_scale=self.lr_min_scale,
-        )
-
-    def _font_loss_lambda_for_step(self, step: int) -> float:
-        return _cosine_interpolate(
-            step=step,
-            total_steps=self.total_steps,
-            start_value=self.font_loss_lambda_start,
-            end_value=self.font_loss_lambda_end,
-        )
-
-    def _compute_losses(self, batch: Dict[str, torch.Tensor], *, step: Optional[int] = None) -> Dict[str, torch.Tensor | float]:
-        if step is None:
-            step = self.global_step + 1
-        images = batch["target"].to(self.device)
-        font_ids = batch["font_id"].to(self.device, dtype=torch.long)
-        char_ids = batch["char_id"].to(self.device, dtype=torch.long)
-        font_loss_lambda = self._font_loss_lambda_for_step(int(step))
-        with self._autocast_context():
-            outputs = self.model(images)
-            font_logits = outputs["font_logits"]
-            char_logits = outputs["char_logits"]
-            loss_font_ce = F.cross_entropy(
-                font_logits,
-                font_ids,
-                label_smoothing=self.font_label_smoothing,
-            )
-            loss_char_ce = F.cross_entropy(
-                char_logits,
-                char_ids,
-                label_smoothing=self.char_label_smoothing,
-            )
-            loss = loss_char_ce + font_loss_lambda * loss_font_ce
-
-        font_acc = (font_logits.argmax(dim=1) == font_ids).float().mean()
-        char_acc = (char_logits.argmax(dim=1) == char_ids).float().mean()
-        qualified_now = float(char_acc.detach().item()) >= self.qualify_min_char_acc
-        metrics: Dict[str, torch.Tensor | float] = {
-            "loss": loss,
-            "loss_font_ce": loss_font_ce,
-            "loss_char_ce": loss_char_ce,
-            "font_acc": font_acc,
-            "char_acc": char_acc,
-            "font_loss_lambda": float(font_loss_lambda),
-            "font_label_smoothing": float(self.font_label_smoothing),
-            "char_label_smoothing": float(self.char_label_smoothing),
-            "qualified_now": float(qualified_now),
-        }
-        return metrics
-
-    def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
-        self.model.train()
-        next_step = self.global_step + 1
-        self._set_learning_rate_for_step(next_step)
-        self.optimizer.zero_grad(set_to_none=True)
-        metrics = self._compute_losses(batch, step=next_step)
-        metrics["loss"].backward()
-        metrics.update(self._apply_grad_clip(step=next_step))
-        self.optimizer.step()
-        return _metrics_to_floats(metrics)
-
-    def eval_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
-        self.model.eval()
-        with torch.no_grad():
-            return _metrics_to_floats(self._compute_losses(batch, step=self.global_step))
-
-    def on_after_train_step(self, batch: Dict[str, torch.Tensor], metrics: Dict[str, float]) -> None:
-        if self.checkpoint_dir is None:
-            return
-        current_train_loss = float(metrics["loss"])
-        if self.best_train_loss is not None and current_train_loss >= self.best_train_loss:
-            return
-        self.best_train_loss = current_train_loss
-        best_path = self.checkpoint_dir / "best.pt"
-        self.save(best_path)
-        (self.checkpoint_dir / "best_train_metrics.json").write_text(
-            json.dumps(
-                {
-                    "step": int(self.global_step),
-                    "epoch": int(self.current_epoch),
-                    "best_metric_key": "loss",
-                    **{key: float(value) for key, value in metrics.items()},
-                },
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            ),
-            encoding="utf-8",
-        )
-
-    def save(self, path: str | Path) -> None:
-        torch.save(
-            {
-                "stage": "font_perceptor",
-                "model_state": self.model.state_dict(),
-                "model_config": self.model.export_config(),
-                "optimizer_state": self.optimizer.state_dict(),
-                "trainer_config": {
-                    "lr_schedule": "cosine",
-                    "lr_warmup_steps": int(self.lr_warmup_steps),
-                    "lr_min_scale": float(self.lr_min_scale),
-                    "weight_decay": float(self.weight_decay),
-                    "font_loss_lambda_start": float(self.font_loss_lambda_start),
-                    "font_loss_lambda_end": float(self.font_loss_lambda_end),
-                    "font_label_smoothing": float(self.font_label_smoothing),
-                    "char_label_smoothing": float(self.char_label_smoothing),
-                    "qualify_min_char_acc": float(self.qualify_min_char_acc),
-                    "best_train_loss": None if self.best_train_loss is None else float(self.best_train_loss),
-                    "grad_clip_norm": None if self.grad_clip_norm is None else float(self.grad_clip_norm),
-                    "grad_clip_min_norm": None if self.grad_clip_min_norm is None else float(self.grad_clip_min_norm),
-                },
-                "step": int(self.global_step),
-                "epoch": int(self.current_epoch),
-            },
-            Path(path),
-        )
-
-    def load(self, path: str | Path) -> None:
-        checkpoint = torch.load(path, map_location=self.device)
-        if "model_state" not in checkpoint:
-            raise RuntimeError("Font perceptor checkpoint is missing 'model_state'.")
-        self.model.load_state_dict(checkpoint["model_state"], strict=True)
-        if "optimizer_state" in checkpoint:
-            self.optimizer.load_state_dict(checkpoint["optimizer_state"])
-        trainer_config = checkpoint.get("trainer_config", {})
-        if isinstance(trainer_config, dict):
-            if "lr_warmup_steps" in trainer_config:
-                self.lr_warmup_steps = max(0, int(trainer_config["lr_warmup_steps"]))
-            if "lr_min_scale" in trainer_config:
-                self.lr_min_scale = float(min(max(0.0, float(trainer_config["lr_min_scale"])), 1.0))
-            if "weight_decay" in trainer_config:
-                self.weight_decay = max(0.0, float(trainer_config["weight_decay"]))
-                _apply_weight_decay_to_optimizer(self.optimizer, self.weight_decay)
-            if "font_loss_lambda_start" in trainer_config:
-                self.font_loss_lambda_start = max(0.0, float(trainer_config["font_loss_lambda_start"]))
-            if "font_loss_lambda_end" in trainer_config:
-                self.font_loss_lambda_end = max(0.0, float(trainer_config["font_loss_lambda_end"]))
-            if self.font_loss_lambda_end > self.font_loss_lambda_start:
-                raise ValueError(
-                    "font_loss_lambda_end must be <= font_loss_lambda_start after load, "
-                    f"got start={self.font_loss_lambda_start} end={self.font_loss_lambda_end}"
-                )
-            if "font_label_smoothing" in trainer_config:
-                self.font_label_smoothing = min(max(float(trainer_config["font_label_smoothing"]), 0.0), 0.2)
-            if "char_label_smoothing" in trainer_config:
-                self.char_label_smoothing = min(max(float(trainer_config["char_label_smoothing"]), 0.0), 0.2)
-            self.qualify_min_char_acc = float(
-                trainer_config.get("qualify_min_char_acc", self.qualify_min_char_acc)
-            )
-            restored_best_train_loss = trainer_config.get("best_train_loss")
-            self.best_train_loss = None if restored_best_train_loss is None else float(restored_best_train_loss)
-            if "grad_clip_min_norm" in trainer_config and self.grad_clip_norm is not None:
-                restored_clip_min = trainer_config["grad_clip_min_norm"]
-                if restored_clip_min is None:
-                    self.grad_clip_min_norm = self.grad_clip_norm
-                else:
-                    self.grad_clip_min_norm = max(0.0, min(float(restored_clip_min), self.grad_clip_norm))
-        self.global_step = int(checkpoint.get("step", 0))
-        self.current_epoch = int(checkpoint.get("epoch", 0))
-
-
 class XPredTrainer(_BaseTrainer):
     def __init__(
         self,
@@ -759,6 +540,7 @@ class XPredTrainer(_BaseTrainer):
         p_std: float = 0.8,
         t_eps: float = 5e-2,
         noise_scale: float = 1.0,
+        prediction_type: str = "x",
         sample_steps: int = 20,
         ema_decay: float = 0.9999,
         ema_start_step: Optional[int] = None,
@@ -796,6 +578,7 @@ class XPredTrainer(_BaseTrainer):
         self.p_std = float(p_std)
         self.t_eps = max(0.0, float(t_eps))
         self.noise_scale = float(noise_scale)
+        self.prediction_type = self._normalize_prediction_type(prediction_type)
         self.sample_steps = max(1, int(sample_steps))
         self.ema_model: Optional[nn.Module] = None
         self.ema_enabled = False
@@ -803,6 +586,13 @@ class XPredTrainer(_BaseTrainer):
         self.ema_start_step = self.total_steps + 1
         self._set_ema_decay(float(ema_decay))
         self._set_ema_start_step(ema_start_step)
+
+    @staticmethod
+    def _normalize_prediction_type(prediction_type: str) -> str:
+        prediction_type = str(prediction_type).lower().strip()
+        if prediction_type not in {"x", "noise", "velocity"}:
+            raise ValueError(f"prediction_type must be one of x, noise, velocity, got {prediction_type!r}")
+        return prediction_type
 
     def _set_ema_decay(self, ema_decay: float) -> None:
         ema_decay = float(ema_decay)
@@ -907,7 +697,6 @@ class XPredTrainer(_BaseTrainer):
         content: torch.Tensor,
         content_index: torch.Tensor,
         style: torch.Tensor,
-        style_ref_mask: Optional[torch.Tensor],
         style_index: torch.Tensor,
     ) -> torch.Tensor:
         unique_content_tokens = model.encode_content_tokens(content)
@@ -916,20 +705,14 @@ class XPredTrainer(_BaseTrainer):
             content_index,
             average_grad_by_reuse=True,
         )
-        style_token_bank, style_token_valid_mask = model.encode_style_token_bank(
-            style_img=style,
-            style_ref_mask=style_ref_mask,
-        )
+        style_token_bank = model.encode_style_token_bank(style_img=style)
         unique_content_query = model.precompute_content_query(unique_content_tokens)
         content_query = self._expand_condition_batch(
             unique_content_query,
             content_index,
             average_grad_by_reuse=True,
         )
-        style_key, style_value, style_key_valid_mask = model.precompute_style_bank_kv(
-            style_token_bank,
-            token_valid_mask=style_token_valid_mask,
-        )
+        style_key, style_value = model.precompute_style_bank_kv(style_token_bank)
         expanded_style_key = self._expand_condition_batch(
             style_key,
             style_index,
@@ -940,33 +723,46 @@ class XPredTrainer(_BaseTrainer):
             style_index,
             average_grad_by_reuse=True,
         )
-        expanded_style_key_valid_mask = None
-        if style_key_valid_mask is not None:
-            expanded_style_key_valid_mask = self._expand_condition_batch(
-                style_key_valid_mask,
-                style_index,
-                average_grad_by_reuse=False,
-            )
         return model.build_conditioning_tokens(
             content_tokens,
             content_query=content_query,
             style_key=expanded_style_key,
             style_value=expanded_style_value,
-            style_key_valid_mask=expanded_style_key_valid_mask,
         )
 
     def _prepare_denoising_targets(
         self,
         target: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         x1 = target
         x0 = torch.randn_like(x1) * self.noise_scale
         timesteps = self._sample_t(x1.size(0), device=self.device)
         t_view = timesteps.view(-1, 1, 1, 1).to(dtype=x1.dtype)
         xt = t_view * x1 + (1.0 - t_view) * x0
-        denom = (1.0 - t_view).clamp_min(self.t_eps)
-        target_v = (x1 - xt) / denom
-        return timesteps, xt, denom, target_v, x1
+        target_velocity = x1 - x0
+        return timesteps, xt, t_view, x0, target_velocity, x1
+
+    def _prediction_to_x_and_velocity(
+        self,
+        prediction: torch.Tensor,
+        *,
+        xt: torch.Tensor,
+        t_view: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.prediction_type == "x":
+            pred_x = prediction
+            pred_velocity = (pred_x - xt) / (1.0 - t_view).clamp_min(self.t_eps)
+            return pred_x, pred_velocity
+        if self.prediction_type == "noise":
+            pred_noise = prediction
+            pred_velocity = (xt - pred_noise) / t_view.clamp_min(self.t_eps)
+            pred_x = xt + (1.0 - t_view) * pred_velocity
+            return pred_x, pred_velocity
+        if self.prediction_type == "velocity":
+            pred_velocity = prediction
+            pred_x = xt + (1.0 - t_view) * pred_velocity
+            return pred_x, pred_velocity
+        raise RuntimeError(f"unsupported prediction_type={self.prediction_type!r}")
 
     def _forward_ref_branch(
         self,
@@ -975,12 +771,11 @@ class XPredTrainer(_BaseTrainer):
         content: torch.Tensor,
         content_index: torch.Tensor,
         style: torch.Tensor,
-        style_ref_mask: Optional[torch.Tensor],
         style_index: torch.Tensor,
         timesteps: torch.Tensor,
         xt: torch.Tensor,
-        denom: torch.Tensor,
-        target_v: torch.Tensor,
+        t_view: torch.Tensor,
+        target_velocity: torch.Tensor,
         x1: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
         conditioning_tokens = self._encode_conditions(
@@ -988,20 +783,24 @@ class XPredTrainer(_BaseTrainer):
             content,
             content_index,
             style,
-            style_ref_mask,
             style_index,
         )
-        pred_x = model.predict_x(
+        prediction = model.predict(
             xt,
             timesteps,
             conditioning_tokens=conditioning_tokens,
         )
-        pred_v = (pred_x - xt) / denom
-        loss_v = F.mse_loss(pred_v.float(), target_v.float())
+        pred_x, pred_velocity = self._prediction_to_x_and_velocity(
+            prediction,
+            xt=xt,
+            t_view=t_view,
+        )
+        velocity_mse = F.mse_loss(pred_velocity.float(), target_velocity.float())
         pred_x_l1 = F.l1_loss(pred_x.float(), x1.float())
         return {
+            "prediction": prediction,
             "pred_x": pred_x,
-            "loss_v": loss_v,
+            "velocity_mse": velocity_mse,
             "pred_x_l1": pred_x_l1,
         }
 
@@ -1020,31 +819,27 @@ class XPredTrainer(_BaseTrainer):
         content_index = batch["content_index"].to(self.device, dtype=torch.long)
         style = batch["style_img"].to(self.device)
         style_index = batch["style_index"].to(self.device, dtype=torch.long)
-        style_ref_mask = batch.get("style_ref_mask")
-        if style_ref_mask is not None:
-            style_ref_mask = style_ref_mask.to(self.device)
 
         with self._autocast_context():
-            timesteps, xt, denom, target_v, x1 = self._prepare_denoising_targets(target)
+            timesteps, xt, t_view, _, target_velocity, x1 = self._prepare_denoising_targets(target)
             primary_outputs = self._forward_ref_branch(
                 model,
                 content=content,
                 content_index=content_index,
                 style=style,
-                style_ref_mask=style_ref_mask,
                 style_index=style_index,
                 timesteps=timesteps,
                 xt=xt,
-                denom=denom,
-                target_v=target_v,
+                t_view=t_view,
+                target_velocity=target_velocity,
                 x1=x1,
             )
-            loss_v = primary_outputs["loss_v"]
+            velocity_mse = primary_outputs["velocity_mse"]
             pred_x_l1 = primary_outputs["pred_x_l1"]
-            loss = loss_v
+            loss = velocity_mse
         metrics = {
             "loss": loss,
-            "loss_v": loss_v,
+            "loss_v": velocity_mse,
             "pred_x_l1": pred_x_l1,
             "t_mean": timesteps.mean(),
         }
@@ -1086,7 +881,6 @@ class XPredTrainer(_BaseTrainer):
         content_index: torch.Tensor,
         style_img: torch.Tensor,
         style_index: torch.Tensor,
-        style_ref_mask: Optional[torch.Tensor] = None,
         num_inference_steps: Optional[int] = None,
         use_ema: bool = True,
     ) -> torch.Tensor:
@@ -1096,8 +890,6 @@ class XPredTrainer(_BaseTrainer):
         content_index = content_index.to(self.device, dtype=torch.long)
         style_img = style_img.to(self.device)
         style_index = style_index.to(self.device, dtype=torch.long)
-        if style_ref_mask is not None:
-            style_ref_mask = style_ref_mask.to(self.device)
 
         batch_size = int(content_index.size(0))
         sample = self.noise_scale * torch.randn(
@@ -1114,7 +906,6 @@ class XPredTrainer(_BaseTrainer):
                 content,
                 content_index,
                 style_img,
-                style_ref_mask,
                 style_index,
             )
             backbone_condition_hidden_cache = sample_model.precompute_backbone_condition_hidden_cache(
@@ -1129,7 +920,7 @@ class XPredTrainer(_BaseTrainer):
             )
 
             def predict_v(x_t: torch.Tensor, t_vec: torch.Tensor) -> torch.Tensor:
-                pred_x = sample_model.predict_x(
+                prediction = sample_model.predict(
                     x_t,
                     t_vec,
                     conditioning_tokens=conditioning_tokens,
@@ -1137,7 +928,12 @@ class XPredTrainer(_BaseTrainer):
                     output_condition_hidden=output_condition_hidden,
                 )
                 t_view = t_vec.view(-1, 1, 1, 1).to(dtype=x_t.dtype)
-                return (pred_x - x_t) / (1.0 - t_view).clamp_min(self.t_eps)
+                _, pred_velocity = self._prediction_to_x_and_velocity(
+                    prediction,
+                    xt=x_t,
+                    t_view=t_view,
+                )
+                return pred_velocity
 
             timesteps = torch.linspace(0.0, 1.0, step_count + 1, device=self.device, dtype=torch.float32)
             for step_idx in range(max(0, step_count - 1)):
@@ -1171,6 +967,7 @@ class XPredTrainer(_BaseTrainer):
                     "weight_decay": float(self.weight_decay),
                     "adam_betas": [float(self.adam_beta1), float(self.adam_beta2)],
                     "loss_type": "jit_v_mse",
+                    "prediction_type": str(self.prediction_type),
                     "p_mean": float(self.p_mean),
                     "p_std": float(self.p_std),
                     "t_eps": float(self.t_eps),
@@ -1234,6 +1031,7 @@ class XPredTrainer(_BaseTrainer):
                 self.t_eps = max(0.0, float(trainer_config["t_eps"]))
             if "noise_scale" in trainer_config:
                 self.noise_scale = float(trainer_config["noise_scale"])
+            self.prediction_type = self._normalize_prediction_type(trainer_config["prediction_type"])
             if "sample_steps" in trainer_config:
                 self.sample_steps = max(1, int(trainer_config["sample_steps"]))
             if "ema_decay" in trainer_config:
@@ -1271,20 +1069,17 @@ class XPredTrainer(_BaseTrainer):
     @torch.no_grad()
     def sample_and_save(self, batch: Dict[str, torch.Tensor], out_dir: Path) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
-        target = batch["target"][:8].to(self.device)
+        sample_count = min(16, int(batch["target"].size(0)))
+        target = batch["target"][:sample_count].to(self.device)
         content = batch["content"]
-        content_index = batch["content_index"][:8]
+        content_index = batch["content_index"][:sample_count]
         style = batch["style_img"]
-        style_index = batch["style_index"][:8]
-        style_ref_mask = batch.get("style_ref_mask")
-        if style_ref_mask is not None:
-            style_ref_mask = style_ref_mask.to(self.device)
+        style_index = batch["style_index"][:sample_count]
         sample = self.sample(
             content,
             content_index=content_index,
             style_img=style,
             style_index=style_index,
-            style_ref_mask=style_ref_mask,
             num_inference_steps=self.sample_steps,
         )
         content = content.to(self.device)

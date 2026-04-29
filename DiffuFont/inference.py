@@ -29,6 +29,7 @@ def load_trainer(checkpoint_path: Path, device: torch.device) -> XPredTrainer:
         model,
         device,
         total_steps=1,
+        prediction_type=str(trainer_config["prediction_type"]),
         sample_steps=int(trainer_config.get("sample_steps", 20)),
         ema_decay=float(trainer_config.get("ema_decay", 0.9999)),
     )
@@ -39,21 +40,21 @@ def load_trainer(checkpoint_path: Path, device: torch.device) -> XPredTrainer:
     return trainer
 
 
-def sample_style_refs(sample: Dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+def sample_style_refs(sample: Dict[str, torch.Tensor]) -> torch.Tensor:
     style_img = sample["style_img"]
-    style_ref_mask = sample["style_ref_mask"]
     max_refs = min(int(sample.get("style_ref_count_max", style_img.size(0))), int(style_img.size(0)))
     if max_refs <= 0:
         raise RuntimeError(f"Invalid style ref count: max_refs={max_refs}")
-    return style_img[:max_refs], style_ref_mask[:max_refs]
+    return style_img[:max_refs]
 
 
 def tensor_to_pil(tensor: torch.Tensor, size: int = 128) -> Image.Image:
     x = tensor.detach().cpu().float()
-    if x.dim() == 3:
-        x = x[0]
-    x = ((x.clamp(-1.0, 1.0) + 1.0) * 127.5).round().byte().numpy()
-    return Image.fromarray(x, mode="L").resize((size, size), Image.Resampling.LANCZOS)
+    if x.dim() != 3 or int(x.size(0)) != 3:
+        raise ValueError(f"expected RGB tensor shape (3,H,W), got {tuple(x.shape)}")
+    x = ((x.clamp(-1.0, 1.0) + 1.0) * 127.5).round().byte()
+    x = x.permute(1, 2, 0).numpy()
+    return Image.fromarray(x, mode="RGB").resize((size, size), Image.Resampling.LANCZOS)
 
 
 def find_sample_index(dataset: FontImageDataset, font_name: str, char: str) -> int:
@@ -106,15 +107,13 @@ def run_inference(
         for char in chars:
             sample = dataset[find_sample_index(dataset, font_name, char)]
             content = sample["content"].unsqueeze(0)
-            style_refs, style_ref_mask = sample_style_refs(sample)
+            style_refs = sample_style_refs(sample)
             style = style_refs.unsqueeze(0)
-            style_ref_mask = style_ref_mask.unsqueeze(0)
             generation = trainer.sample(
                 content,
                 content_index=torch.tensor([0], dtype=torch.long),
                 style_img=style,
                 style_index=torch.tensor([0], dtype=torch.long),
-                style_ref_mask=style_ref_mask,
                 num_inference_steps=int(inference_steps),
             )
             font_rows[char] = {

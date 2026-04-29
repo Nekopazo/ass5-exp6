@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Sequence
 from typing import Optional
 
@@ -27,198 +26,111 @@ def _group_count(channels: int) -> int:
     return 1
 
 
-class DBlock(nn.Module):
-    """Residual block with optional stage-level spatial downsampling."""
+class ResDownBlock(nn.Module):
+    """Residual downsampling block for glyph token encoders."""
 
-    def __init__(self, in_channels: int, out_channels: int, *, downsample: bool) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+    ) -> None:
         self.in_channels = int(in_channels)
         self.out_channels = int(out_channels)
-        self.downsample = bool(downsample)
-        self.norm1 = nn.GroupNorm(_group_count(self.in_channels), self.in_channels)
-        self.norm2 = nn.GroupNorm(_group_count(self.out_channels), self.out_channels)
-        self.conv1 = nn.Conv2d(
-            self.in_channels,
-            self.out_channels,
-            kernel_size=3,
-            stride=2 if self.downsample else 1,
-            padding=1,
+        super().__init__()
+        self.main = nn.Sequential(
+            nn.GroupNorm(_group_count(self.in_channels), self.in_channels),
+            nn.SiLU(),
+            nn.Conv2d(self.in_channels, self.out_channels, kernel_size=3, padding=1, bias=False),
+            nn.GroupNorm(_group_count(self.out_channels), self.out_channels),
+            nn.SiLU(),
+            nn.Conv2d(self.out_channels, self.out_channels, kernel_size=3, padding=1, bias=False),
+            nn.AvgPool2d(2),
         )
-        self.conv2 = nn.Conv2d(self.out_channels, self.out_channels, kernel_size=3, padding=1)
-        self.conv_sc = (
-            None
-            if self.in_channels == self.out_channels
-            else nn.Conv2d(self.in_channels, self.out_channels, kernel_size=1)
+        self.shortcut = nn.Sequential(
+            nn.AvgPool2d(2),
+            nn.Conv2d(self.in_channels, self.out_channels, kernel_size=1, bias=False),
         )
-        self.pool = nn.AvgPool2d(2) if self.downsample else nn.Identity()
-
-    def shortcut(self, x: torch.Tensor) -> torch.Tensor:
-        residual = x
-        if self.conv_sc is not None:
-            residual = self.conv_sc(residual)
-        return self.pool(residual)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        residual = self.shortcut(x)
-        x = self.conv1(F.silu(self.norm1(x)))
-        x = self.conv2(F.silu(self.norm2(x)))
-        return x + residual
+        return self.main(x) + self.shortcut(x)
 
 
-class ConvPyramidEncoder(nn.Module):
-    """Shared DBlock pyramid template used by both content and style encoders."""
+class CustomResidualGlyphEncoder(nn.Module):
+    """Fixed RGB glyph encoder producing a 16x16 map of 256-dim tokens."""
 
     def __init__(
         self,
         *,
-        in_channels: int,
-        stage_channels: Sequence[int],
-        block_depth: int = 1,
-        output_grid_size: Optional[int] = None,
+        in_channels: int = 3,
+        image_size: int = 128,
+        output_grid_size: int = 16,
+        hidden_dim: int = 256,
+        base_channels: int = 64,
+        max_channels: int = 256,
+        block_depth: int = 3,
     ) -> None:
         super().__init__()
-        normalized_stage_channels = [int(ch) for ch in stage_channels]
-        if not normalized_stage_channels:
-            raise ValueError("stage_channels must be non-empty")
-        self.block_depth = max(1, int(block_depth))
-
-        self.in_channels = int(in_channels)
-        self.stage_channels = normalized_stage_channels
-        self.output_grid_size = None if output_grid_size is None else int(output_grid_size)
-        self.stages = nn.ModuleList()
-        prev_channels = self.in_channels
-        for out_channels in self.stage_channels:
-            blocks = [DBlock(prev_channels, out_channels, downsample=True)]
-            blocks.extend(
-                DBlock(out_channels, out_channels, downsample=False)
-                for _ in range(self.block_depth - 1)
+        if int(in_channels) != 3:
+            raise ValueError(f"CustomResidualGlyphEncoder requires RGB input, got {in_channels}")
+        if int(image_size) != 128:
+            raise ValueError(f"CustomResidualGlyphEncoder is fixed to image_size=128, got {image_size}")
+        if int(output_grid_size) != 16:
+            raise ValueError(f"CustomResidualGlyphEncoder is fixed to output_grid_size=16, got {output_grid_size}")
+        if int(hidden_dim) != 256:
+            raise ValueError(f"CustomResidualGlyphEncoder is fixed to hidden_dim=256, got {hidden_dim}")
+        if int(base_channels) != 64 or int(max_channels) != 256:
+            raise ValueError(
+                "CustomResidualGlyphEncoder is fixed to base_channels=64 and max_channels=256, "
+                f"got {base_channels} and {max_channels}"
             )
-            self.stages.append(nn.Sequential(*blocks))
-            prev_channels = out_channels
+        if int(block_depth) != 3:
+            raise ValueError(f"CustomResidualGlyphEncoder is fixed to 3 ResDownBlocks, got {block_depth}")
+        self.image_size = int(image_size)
+        self.output_grid_size = int(output_grid_size)
+        self.hidden_dim = int(hidden_dim)
+        self.base_channels = int(base_channels)
+        self.max_channels = int(max_channels)
+        self.block_depth = 3
+        self.downsample_depth = 3
+        self.local_hidden_dim = self.hidden_dim
+        self.blocks = nn.ModuleList(
+            (
+                ResDownBlock(3, 64),
+                ResDownBlock(64, 128),
+                ResDownBlock(128, 256),
+            )
+        )
+        self.tail = nn.Sequential(
+            nn.GroupNorm(_group_count(self.hidden_dim), self.hidden_dim),
+            nn.SiLU(),
+            nn.Conv2d(self.hidden_dim, self.hidden_dim, kernel_size=1),
+        )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_features(self, x: torch.Tensor) -> list[torch.Tensor]:
         if x.dim() != 4:
             raise ValueError(f"expected BCHW tensor, got {tuple(x.shape)}")
-        for stage in self.stages:
-            x = stage(x)
-        if self.output_grid_size is not None and x.shape[-2:] != (self.output_grid_size, self.output_grid_size):
-            x = F.interpolate(
-                x,
-                size=(self.output_grid_size, self.output_grid_size),
-                mode="bilinear",
-                align_corners=False,
-            )
-        return x
-
-
-def _build_pyramid_stage_channels(
-    *,
-    image_size: int,
-    output_grid_size: int,
-    hidden_dim: int,
-    base_channels: int,
-    max_channels: int,
-) -> tuple[list[int], int]:
-    if image_size % output_grid_size != 0:
-        raise ValueError(
-            f"image_size must be divisible by output_grid_size, got {image_size} vs {output_grid_size}"
-        )
-    downsample_factor = int(image_size) // int(output_grid_size)
-    if downsample_factor < 1:
-        raise ValueError(f"Invalid downsample factor: {downsample_factor}")
-    downsample_depth = int(round(math.log2(downsample_factor))) if downsample_factor > 1 else 0
-    if 2**downsample_depth != downsample_factor:
-        raise ValueError(
-            f"image_size/output_grid_size must be a power of two, got {image_size}/{output_grid_size}"
-        )
-
-    remaining_downsample_depth = max(0, downsample_depth - 1)
-    stage_channels = [int(base_channels)]
-    for stage_idx in range(remaining_downsample_depth):
-        out_channels = hidden_dim if stage_idx == remaining_downsample_depth - 1 else min(
-            base_channels * (2 ** (stage_idx + 1)),
-            max_channels,
-        )
-        stage_channels.append(int(out_channels))
-    return stage_channels, int(downsample_depth)
-
-
-class ContentEncoder(ConvPyramidEncoder):
-    """CNN content encoder that downsamples to the DiT patch grid."""
-
-    def __init__(
-        self,
-        *,
-        image_size: int = 128,
-        output_grid_size: int = 16,
-        hidden_dim: int = 256,
-        base_channels: int = 64,
-        max_channels: int = 256,
-        block_depth: int = 2,
-    ) -> None:
-        self.image_size = int(image_size)
-        self.hidden_dim = int(hidden_dim)
-        self.base_channels = int(base_channels)
-        self.max_channels = int(max_channels)
-        self.block_depth = max(1, int(block_depth))
-        stage_channels, downsample_depth = _build_pyramid_stage_channels(
-            image_size=int(image_size),
-            output_grid_size=int(output_grid_size),
-            hidden_dim=int(hidden_dim),
-            base_channels=int(base_channels),
-            max_channels=int(max_channels),
-        )
-        self.downsample_depth = int(downsample_depth)
-
-        super().__init__(
-            in_channels=1,
-            stage_channels=stage_channels,
-            block_depth=self.block_depth,
-            output_grid_size=int(output_grid_size),
-        )
-        self.output_grid_size = int(output_grid_size)
-
-
-class StyleEncoder(ConvPyramidEncoder):
-    """CNN style encoder sharing the same spatial token lattice as content."""
-
-    def __init__(
-        self,
-        *,
-        in_channels: int = 1,
-        image_size: int = 128,
-        output_grid_size: int = 16,
-        hidden_dim: int = 256,
-        base_channels: int = 64,
-        max_channels: int = 256,
-        block_depth: int = 2,
-    ) -> None:
-        self.image_size = int(image_size)
-        self.output_grid_size = int(output_grid_size)
-        self.hidden_dim = int(hidden_dim)
-        self.base_channels = int(base_channels)
-        self.max_channels = int(max_channels)
-        self.block_depth = max(1, int(block_depth))
-        stage_channels, self.downsample_depth = _build_pyramid_stage_channels(
-            image_size=int(image_size),
-            output_grid_size=int(output_grid_size),
-            hidden_dim=int(hidden_dim),
-            base_channels=int(base_channels),
-            max_channels=int(max_channels),
-        )
-        self.local_hidden_dim = int(stage_channels[-1])
-        super().__init__(
-            in_channels=int(in_channels),
-            stage_channels=stage_channels,
-            block_depth=self.block_depth,
-            output_grid_size=int(output_grid_size),
-        )
-
-    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
-        return super().forward(x)
+        if x.shape[1:] != (3, 128, 128):
+            raise ValueError(f"expected RGB 128x128 glyph tensor, got {tuple(x.shape)}")
+        features: list[torch.Tensor] = []
+        for block in self.blocks:
+            x = block(x)
+            features.append(x)
+        x = self.tail(x)
+        features.append(x)
+        return features
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_features(x)
+        return self.forward_features(x)[-1]
+
+
+class ContentEncoder(CustomResidualGlyphEncoder):
+    """Content glyph encoder with the shared architecture and separate weights."""
+    pass
+
+
+class StyleEncoder(CustomResidualGlyphEncoder):
+    """Style glyph encoder with the shared architecture and separate weights."""
+    pass
 
 
 class ContentStyleCrossAttention(nn.Module):
@@ -237,44 +149,23 @@ class ContentStyleCrossAttention(nn.Module):
         self.token_norm = nn.LayerNorm(self.embed_dim, elementwise_affine=False, eps=1e-6)
         self.attn = SDPAAttention(self.embed_dim, self.num_heads)
 
-    def _validate_style_inputs(
-        self,
-        style_tokens: torch.Tensor,
-        *,
-        token_valid_mask: Optional[torch.Tensor] = None,
-    ) -> None:
+    def _validate_style_inputs(self, style_tokens: torch.Tensor) -> None:
         if style_tokens.dim() != 4:
             raise ValueError(f"style_tokens must be 4D [B, R, T, D], got {tuple(style_tokens.shape)}")
-        if token_valid_mask is not None:
-            if token_valid_mask.shape != style_tokens.shape[:3]:
-                raise ValueError(
-                    f"token_valid_mask shape mismatch: expected {tuple(style_tokens.shape[:3])}, "
-                    f"got {tuple(token_valid_mask.shape)}"
-                )
 
     def project_style_bank_kv(
         self,
         style_tokens: torch.Tensor,
-        *,
-        token_valid_mask: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        self._validate_style_inputs(style_tokens, token_valid_mask=token_valid_mask)
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        self._validate_style_inputs(style_tokens)
         batch_size, num_refs, tokens_per_ref, hidden_dim = style_tokens.shape
         normed_tokens = self.token_norm(style_tokens)
-        style_key_valid_mask = None
-        if token_valid_mask is not None:
-            token_valid_mask = token_valid_mask.to(device=style_tokens.device, dtype=torch.bool)
-            if bool((~token_valid_mask).all(dim=(1, 2)).any()):
-                raise ValueError("token_valid_mask must keep at least one style token per sample")
-            if not bool(token_valid_mask.all()):
-                style_key_valid_mask = token_valid_mask.reshape(batch_size, num_refs * tokens_per_ref)[:, None, :]
         concat_tokens = normed_tokens.reshape(batch_size, num_refs * tokens_per_ref, hidden_dim)
         key, value = self.attn.project_key_value(concat_tokens, concat_tokens)
         concat_len = int(key.size(2))
         return (
             key.view(batch_size, 1, self.num_heads, concat_len, self.attn.head_dim),
             value.view(batch_size, 1, self.num_heads, concat_len, self.attn.head_dim),
-            style_key_valid_mask,
         )
 
     def project_content_query(self, content_tokens: torch.Tensor) -> torch.Tensor:
@@ -302,7 +193,6 @@ class ContentStyleCrossAttention(nn.Module):
         content_query: torch.Tensor,
         style_key: torch.Tensor,
         style_value: torch.Tensor,
-        style_key_valid_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if content_tokens.dim() != 3:
             raise ValueError(f"content_tokens must be 3D [B, T, D], got {tuple(content_tokens.shape)}")
@@ -330,15 +220,6 @@ class ContentStyleCrossAttention(nn.Module):
                 "content_query shape mismatch: "
                 f"expected {expected_query_shape}, got {tuple(content_query.shape)}"
             )
-        if style_key_valid_mask is not None:
-            expected_mask_shape = (batch_size, num_refs, tokens_per_ref)
-            if style_key_valid_mask.shape != expected_mask_shape:
-                raise ValueError(
-                    "style_key_valid_mask shape mismatch: "
-                    f"expected {expected_mask_shape}, got {tuple(style_key_valid_mask.shape)}"
-                )
-            style_key_valid_mask = style_key_valid_mask.to(device=style_key.device, dtype=torch.bool)
-            style_key_valid_mask = style_key_valid_mask.reshape(batch_size * num_refs, tokens_per_ref)
         expanded_query = (
             content_query.unsqueeze(1)
             .expand(batch_size, num_refs, num_heads, query_len, head_dim)
@@ -350,7 +231,6 @@ class ContentStyleCrossAttention(nn.Module):
             expanded_query,
             flat_style_key,
             flat_style_value,
-            key_valid_mask=style_key_valid_mask,
             need_weights=False,
         )
         style_context = style_context.view(batch_size, query_len, self.embed_dim)
@@ -363,13 +243,13 @@ class SourcePartRefDiT(nn.Module):
     def __init__(
         self,
         *,
-        in_channels: int = 1,
+        in_channels: int = 3,
         image_size: int = 128,
         patch_size: int = 8,
-        patch_embed_bottleneck_dim: int = 128,
+        patch_embed_bottleneck_dim: int = 0,
         encoder_hidden_dim: int = 256,
-        content_encoder_block_depth: int = 2,
-        style_encoder_block_depth: int = 2,
+        content_encoder_block_depth: int = 3,
+        style_encoder_block_depth: int = 3,
         dit_hidden_dim: int = 256,
         dit_depth: int = 12,
         dit_heads: int = 8,
@@ -381,8 +261,8 @@ class SourcePartRefDiT(nn.Module):
         content_style_fusion_heads: int = 4,
     ) -> None:
         super().__init__()
-        if int(in_channels) != 1:
-            raise ValueError(f"Only grayscale glyphs are supported, got in_channels={in_channels}")
+        if int(in_channels) != 3:
+            raise ValueError(f"Only RGB glyphs are supported, got in_channels={in_channels}")
         if image_size % patch_size != 0:
             raise ValueError(f"image_size must be divisible by patch_size, got {image_size} vs {patch_size}")
         self.in_channels = int(in_channels)
@@ -427,6 +307,7 @@ class SourcePartRefDiT(nn.Module):
         self.output_patch_dim = self.in_channels * self.patch_size * self.patch_size
 
         self.content_encoder = ContentEncoder(
+            in_channels=self.in_channels,
             image_size=self.image_size,
             output_grid_size=self.patch_grid_size,
             hidden_dim=self.encoder_hidden_dim,
@@ -500,10 +381,13 @@ class SourcePartRefDiT(nn.Module):
 
         patch_proj1 = self.backbone.patch_embed_proj1.weight.data
         nn.init.xavier_uniform_(patch_proj1.view(patch_proj1.shape[0], -1))
-        patch_proj2 = self.backbone.patch_embed_proj2.weight.data
-        nn.init.xavier_uniform_(patch_proj2.view(patch_proj2.shape[0], -1))
-        if self.backbone.patch_embed_proj2.bias is not None:
-            nn.init.constant_(self.backbone.patch_embed_proj2.bias, 0)
+        if self.backbone.patch_embed_proj1.bias is not None:
+            nn.init.constant_(self.backbone.patch_embed_proj1.bias, 0)
+        if self.backbone.use_patch_embed_bottleneck:
+            patch_proj2 = self.backbone.patch_embed_proj2.weight.data
+            nn.init.xavier_uniform_(patch_proj2.view(patch_proj2.shape[0], -1))
+            if self.backbone.patch_embed_proj2.bias is not None:
+                nn.init.constant_(self.backbone.patch_embed_proj2.bias, 0)
 
         nn.init.normal_(self.backbone.time_mlp[0].weight, std=0.02)
         nn.init.normal_(self.backbone.time_mlp[2].weight, std=0.02)
@@ -542,60 +426,32 @@ class SourcePartRefDiT(nn.Module):
         content_features = self.content_encoder(content_img)
         return content_features.flatten(2).transpose(1, 2).contiguous()
 
-    def _encode_style_features(
-        self,
-        style_img: torch.Tensor,
-        style_ref_mask: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def _encode_style_features(self, style_img: torch.Tensor) -> torch.Tensor:
         if style_img.dim() == 4:
             style_img = style_img.unsqueeze(1)
         if style_img.dim() != 5:
             raise ValueError(f"style_img must be BCHW or BRCHW, got {tuple(style_img.shape)}")
 
         batch, refs, channels, height, width = style_img.shape
-        if style_ref_mask is None:
-            ref_valid_mask = torch.ones((batch, refs), device=style_img.device, dtype=torch.bool)
-        else:
-            ref_valid_mask = style_ref_mask.to(device=style_img.device, dtype=torch.bool)
-        if ref_valid_mask.shape != (batch, refs):
-            raise RuntimeError(
-                f"style_ref_mask shape mismatch: expected {(batch, refs)}, got {tuple(ref_valid_mask.shape)}"
-            )
-        if bool((~ref_valid_mask).all(dim=1).any()):
-            raise RuntimeError("style_ref_mask must keep at least one reference per sample")
+        if refs <= 0:
+            raise RuntimeError("style_img must contain at least one reference per sample")
 
         flat_style = style_img.view(batch * refs, channels, height, width)
-        style_features = self.style_encoder.forward_features(flat_style)
+        style_features = self.style_encoder.forward_features(flat_style)[-1]
         style_tokens = style_features.flatten(2).transpose(1, 2).contiguous()
         tokens_per_ref = int(style_tokens.size(1))
         style_tokens = style_tokens.view(batch, refs, tokens_per_ref, self.style_token_hidden_dim)
-        token_valid_mask = (
-            ref_valid_mask[:, :, None]
-            .expand(batch, refs, tokens_per_ref)
-        )
-        return style_tokens, token_valid_mask
+        return style_tokens
 
-    def encode_style_token_bank(
-        self,
-        style_img: torch.Tensor,
-        style_ref_mask: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        style_tokens, token_valid_mask = self._encode_style_features(
-            style_img,
-            style_ref_mask=style_ref_mask,
-        )
-        return self.style_token_proj(style_tokens).contiguous(), token_valid_mask
+    def encode_style_token_bank(self, style_img: torch.Tensor) -> torch.Tensor:
+        style_tokens = self._encode_style_features(style_img)
+        return self.style_token_proj(style_tokens).contiguous()
 
     def precompute_style_bank_kv(
         self,
         style_tokens: torch.Tensor,
-        *,
-        token_valid_mask: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        return self.content_style_attn.project_style_bank_kv(
-            style_tokens,
-            token_valid_mask=token_valid_mask,
-        )
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.content_style_attn.project_style_bank_kv(style_tokens)
 
     def precompute_content_query(
         self,
@@ -608,27 +464,21 @@ class SourcePartRefDiT(nn.Module):
         content_tokens: torch.Tensor,
         style_token_bank: Optional[torch.Tensor] = None,
         *,
-        token_valid_mask: Optional[torch.Tensor] = None,
         content_query: Optional[torch.Tensor] = None,
         style_key: Optional[torch.Tensor] = None,
         style_value: Optional[torch.Tensor] = None,
-        style_key_valid_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if content_query is None:
             content_query = self.precompute_content_query(content_tokens)
         if style_key is None or style_value is None:
             if style_token_bank is None:
                 raise ValueError("style_token_bank is required when precomputed style_key/style_value are not provided")
-            style_key, style_value, style_key_valid_mask = self.precompute_style_bank_kv(
-                style_token_bank,
-                token_valid_mask=token_valid_mask,
-            )
+            style_key, style_value = self.precompute_style_bank_kv(style_token_bank)
         return self.content_style_attn.fuse_content_style_tokens_from_preprojected_query(
             content_tokens,
             content_query,
             style_key,
             style_value,
-            style_key_valid_mask=style_key_valid_mask,
         )
 
     def precompute_backbone_condition_hidden_cache(
@@ -729,7 +579,7 @@ class SourcePartRefDiT(nn.Module):
             .view(patch_tokens.size(0), self.in_channels, self.image_size, self.image_size)
         )
 
-    def predict_x(
+    def predict(
         self,
         x_t_image: torch.Tensor,
         timesteps: torch.Tensor,
@@ -758,19 +608,14 @@ class SourcePartRefDiT(nn.Module):
         content_img: torch.Tensor,
         *,
         style_img: torch.Tensor,
-        style_ref_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         content_tokens = self.encode_content_tokens(content_img)
-        style_token_bank, token_valid_mask = self.encode_style_token_bank(
-            style_img,
-            style_ref_mask=style_ref_mask,
-        )
+        style_token_bank = self.encode_style_token_bank(style_img)
         conditioning_tokens = self.build_conditioning_tokens(
             content_tokens,
             style_token_bank,
-            token_valid_mask=token_valid_mask,
         )
-        return self.predict_x(
+        return self.predict(
             x_t_image,
             timesteps,
             conditioning_tokens=conditioning_tokens,

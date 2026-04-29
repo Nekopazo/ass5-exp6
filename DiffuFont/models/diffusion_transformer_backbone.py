@@ -313,10 +313,10 @@ class DiffusionTransformerBackbone(nn.Module):
     def __init__(
         self,
         *,
-        in_channels: int = 1,
+        in_channels: int = 3,
         image_size: int = 128,
         patch_size: int = 8,
-        patch_embed_bottleneck_dim: int = 128,
+        patch_embed_bottleneck_dim: int = 0,
         hidden_dim: int = 256,
         conditioning_dim: int | None = None,
         depth: int = 12,
@@ -334,10 +334,7 @@ class DiffusionTransformerBackbone(nn.Module):
         self.image_size = int(image_size)
         self.patch_size = int(patch_size)
         self.patch_embed_bottleneck_dim = int(patch_embed_bottleneck_dim)
-        if self.patch_embed_bottleneck_dim <= 0:
-            raise ValueError(
-                f"patch_embed_bottleneck_dim must be > 0, got {patch_embed_bottleneck_dim}"
-            )
+        self.use_patch_embed_bottleneck = self.patch_embed_bottleneck_dim > 0
         self.hidden_dim = int(hidden_dim)
         self.conditioning_dim = self.hidden_dim if conditioning_dim is None else int(conditioning_dim)
         self.depth = int(depth)
@@ -374,20 +371,29 @@ class DiffusionTransformerBackbone(nn.Module):
             for block_idx in range(self.depth)
         ]
         self.has_content_injection = any(self.content_layer_mask)
-        self.patch_embed_proj1 = nn.Conv2d(
-            self.in_channels,
-            self.patch_embed_bottleneck_dim,
-            kernel_size=self.patch_size,
-            stride=self.patch_size,
-            bias=False,
-        )
-        self.patch_embed_proj2 = nn.Conv2d(
-            self.patch_embed_bottleneck_dim,
-            self.hidden_dim,
-            kernel_size=1,
-            stride=1,
-            bias=True,
-        )
+        if self.use_patch_embed_bottleneck:
+            self.patch_embed_proj1 = nn.Conv2d(
+                self.in_channels,
+                self.patch_embed_bottleneck_dim,
+                kernel_size=self.patch_size,
+                stride=self.patch_size,
+                bias=False,
+            )
+            self.patch_embed_proj2 = nn.Conv2d(
+                self.patch_embed_bottleneck_dim,
+                self.hidden_dim,
+                kernel_size=1,
+                stride=1,
+                bias=True,
+            )
+        else:
+            self.patch_embed_proj1 = nn.Conv2d(
+                self.in_channels,
+                self.hidden_dim,
+                kernel_size=self.patch_size,
+                stride=self.patch_size,
+                bias=True,
+            )
         pos_embed = build_2d_sincos_pos_embed(self.hidden_dim, self.grid_size, self.grid_size)
         self.register_buffer("pos_embed", pos_embed.unsqueeze(0), persistent=False)
 
@@ -445,6 +451,12 @@ class DiffusionTransformerBackbone(nn.Module):
         time_cond = timestep_embedding(timesteps, self.hidden_dim).to(dtype=dtype)
         time_cond = self.time_mlp(time_cond)
         return self.time_cond_norm(time_cond)
+
+    def patch_embed(self, image: torch.Tensor) -> torch.Tensor:
+        patch_tokens_2d = self.patch_embed_proj1(image)
+        if self.use_patch_embed_bottleneck:
+            patch_tokens_2d = self.patch_embed_proj2(patch_tokens_2d)
+        return patch_tokens_2d.flatten(2).transpose(1, 2).contiguous()
 
     def normalize_conditioning_tokens(
         self,
@@ -526,7 +538,7 @@ class DiffusionTransformerBackbone(nn.Module):
                 f"got {tuple(image.shape)}"
             )
 
-        x = self.patch_embed_proj2(self.patch_embed_proj1(image)).flatten(2).transpose(1, 2).contiguous()
+        x = self.patch_embed(image)
         x = x + self.pos_embed.to(device=x.device, dtype=x.dtype)
 
         time_cond = self.build_time_cond(

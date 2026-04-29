@@ -35,7 +35,7 @@ class FontImageDataset(Dataset):
         random_seed: int = 42,
         font_split: str = "all",
         font_split_seed: int = 42,
-        font_train_ratio: float = 0.9,
+        train_ratio: float = 0.9,
         content_lmdb: Optional[Union[str, Path]] = None,
         train_lmdb: Optional[Union[str, Path]] = None,
         transform=None,
@@ -57,9 +57,9 @@ class FontImageDataset(Dataset):
         if self.font_split not in {"train", "test", "all"}:
             raise ValueError(f"font_split must be one of train/test/all, got {font_split!r}")
         self.font_split_seed = int(font_split_seed)
-        self.font_train_ratio = float(font_train_ratio)
-        if not (0.0 < self.font_train_ratio < 1.0):
-            raise ValueError(f"font_train_ratio must be in (0, 1), got {font_train_ratio}")
+        self.train_ratio = float(train_ratio)
+        if not (0.0 < self.train_ratio < 1.0):
+            raise ValueError(f"train_ratio must be in (0, 1), got {train_ratio}")
         self.transform = transform
         self.style_transform = style_transform if style_transform is not None else transform
         self.load_style_refs = bool(load_style_refs)
@@ -75,6 +75,8 @@ class FontImageDataset(Dataset):
         self.char_list: List[str] = json.loads(char_list_path.read_text(encoding="utf-8"))
         raw_font_list: List[str] = json.loads(font_list_path.read_text(encoding="utf-8"))
         self.font_list_stems: List[str] = [Path(x).stem for x in raw_font_list]
+        self.split_char_indices = self._build_split_char_indices()
+        self.split_char_index_set = set(self.split_char_indices)
 
         if content_lmdb is None:
             content_lmdb = self.root / "DataPreparation" / "LMDB" / "ContentFont.lmdb"
@@ -114,13 +116,27 @@ class FontImageDataset(Dataset):
         print(
             f"[FontImageDataset] samples={len(self.samples)} "
             f"fonts={len(self.font_names)} "
+            f"chars={len(self.split_char_indices)}/{len(self.char_list)} "
             f"style_ref_count_min={self.style_ref_count_min} "
             f"style_ref_count_max={self.style_ref_count_max} "
             f"load_style_refs={self.load_style_refs} "
             f"positive_pairs={self.include_positive_style} "
             f"font_split={self.font_split} font_split_seed={self.font_split_seed} "
-            f"font_train_ratio={self.font_train_ratio:.2f}"
+            f"train_ratio={self.train_ratio:.2f}"
         )
+
+    def _build_split_char_indices(self) -> List[int]:
+        all_indices = list(range(len(self.char_list)))
+        if self.font_split == "all" or len(all_indices) <= 1:
+            return all_indices
+
+        shuffled = list(all_indices)
+        split_rng = random.Random(self.font_split_seed + 1_000_003)
+        split_rng.shuffle(shuffled)
+        train_count = int(len(shuffled) * self.train_ratio)
+        train_count = max(1, min(len(shuffled) - 1, train_count))
+        selected = set(shuffled[:train_count] if self.font_split == "train" else shuffled[train_count:])
+        return [idx for idx in all_indices if idx in selected]
 
     def _scan_lmdb_font_names(self, txn) -> List[str]:
         names = set()
@@ -136,7 +152,8 @@ class FontImageDataset(Dataset):
 
     def _build_indices_for_font(self, font_name: str, c_txn, t_txn) -> List[int]:
         valid_indices: List[int] = []
-        for idx, ch in enumerate(self.char_list):
+        for idx in self.split_char_indices:
+            ch = self.char_list[idx]
             content_key = f"ContentFont@{ch}".encode("utf-8")
             target_key = f"{font_name}@{ch}".encode("utf-8")
             if c_txn.get(content_key) is None:
@@ -171,7 +188,7 @@ class FontImageDataset(Dataset):
         split_rng = random.Random(self.font_split_seed)
         split_rng.shuffle(shuffled)
 
-        train_count = int(len(shuffled) * self.font_train_ratio)
+        train_count = int(len(shuffled) * self.train_ratio)
         train_count = max(1, min(len(shuffled) - 1, train_count))
         if self.font_split == "train":
             selected = set(shuffled[:train_count])
@@ -181,16 +198,17 @@ class FontImageDataset(Dataset):
         if not filtered:
             raise RuntimeError(
                 f"Font split '{self.font_split}' is empty. "
-                f"fonts={len(entries)} seed={self.font_split_seed} train_ratio={self.font_train_ratio}"
+                f"fonts={len(entries)} seed={self.font_split_seed} train_ratio={self.train_ratio}"
             )
         return filtered
 
     def _decode_u8(self, image_bytes: bytes) -> np.ndarray:
         encoded = np.frombuffer(image_bytes, dtype=np.uint8)
-        decoded = cv2.imdecode(encoded, cv2.IMREAD_GRAYSCALE)
+        decoded = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
         if decoded is not None:
+            decoded = cv2.cvtColor(decoded, cv2.COLOR_BGR2RGB)
             return np.ascontiguousarray(decoded)
-        pil_img = Image.open(io.BytesIO(image_bytes)).convert("L")
+        pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         return np.asarray(pil_img, dtype=np.uint8)
 
     def _cache_get(self, key: str) -> Optional[np.ndarray]:
@@ -239,7 +257,10 @@ class FontImageDataset(Dataset):
         array = self._bytes_to_u8(bytes(image_bytes), cache_key=key)
         transform = self.style_transform if style else self.transform
         if transform is None:
-            return torch.from_numpy(array.astype(np.float32) / 127.5 - 1.0).unsqueeze(0)
+            x = torch.from_numpy(array.astype(np.float32) / 127.5 - 1.0)
+            if x.dim() == 2:
+                x = x.unsqueeze(-1).expand(-1, -1, 3)
+            return x.permute(2, 0, 1).contiguous()
         return transform(array)
 
     def _sample_style_indices(
@@ -298,7 +319,7 @@ class FontImageDataset(Dataset):
         self,
         font_name: str,
         style_indices: List[int],
-    ) -> Tuple[torch.Tensor, torch.Tensor, List[str]]:
+    ) -> Tuple[torch.Tensor, List[str]]:
         self._ensure_txns()
         if not style_indices:
             raise RuntimeError(f"Font '{font_name}' has no style indices to load.")
@@ -309,8 +330,7 @@ class FontImageDataset(Dataset):
             for style_char in style_chars
         ]
         style_img = torch.stack(style_imgs, dim=0)
-        style_ref_mask = torch.ones((len(style_imgs),), dtype=torch.float32)
-        return style_img, style_ref_mask, style_chars
+        return style_img, style_chars
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -342,7 +362,6 @@ class FontImageDataset(Dataset):
                 for style_char in style_chars
             ]
             sample["style_img"] = torch.stack(style_imgs, dim=0)
-            sample["style_ref_mask"] = torch.ones((len(style_imgs),), dtype=torch.float32)
             sample["style_ref_count_min"] = self.style_ref_count_min
             sample["style_ref_count_max"] = self.style_ref_count_max
             sample["style_chars"] = style_chars
@@ -360,7 +379,6 @@ class FontImageDataset(Dataset):
                 for style_char in positive_style_chars
             ]
             sample["style_img_pos"] = torch.stack(positive_style_imgs, dim=0)
-            sample["style_ref_mask_pos"] = torch.ones((len(positive_style_imgs),), dtype=torch.float32)
             sample["style_chars_pos"] = positive_style_chars
         return sample
 
@@ -452,7 +470,7 @@ class CartesianFontCharBatchSampler(Sampler[List[int]]):
 
     def __len__(self) -> int:
         font_groups = len(self._chunk_items(list(self.dataset.font_names), self.fonts_per_batch))
-        char_groups = len(self._chunk_items(list(range(len(self.dataset.char_list))), self.chars_per_batch))
+        char_groups = len(self._chunk_items(list(self.dataset.split_char_indices), self.chars_per_batch))
         return font_groups * char_groups
 
     def __iter__(self):
@@ -484,7 +502,7 @@ class CartesianFontCharBatchSampler(Sampler[List[int]]):
 
         rng = random.Random(self.seed + epoch)
         font_names = list(self.dataset.font_names)
-        char_indices = list(range(len(self.dataset.char_list)))
+        char_indices = list(self.dataset.split_char_indices)
         rng.shuffle(font_names)
         rng.shuffle(char_indices)
 

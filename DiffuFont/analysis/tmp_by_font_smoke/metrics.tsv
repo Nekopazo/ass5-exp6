@@ -1,9 +1,0 @@
-combo	train_label	infer_aggregation	checkpoint	split	font	font_pos	sample_pos_in_font	sample_index	target_char	style_chars	l1	mse	cosine
-trained_drop_minmax__infer_mean	trained_drop_minmax	mean	checkpoints/xpred_20260423_230719/ckpt_step_70000.pt	train	方正水柱简体	0	0	192275	诀	唱了笆观节击	0.2846006155014038	0.26924067735671997	0.8490104675292969
-trained_drop_minmax__infer_mean	trained_drop_minmax	mean	checkpoints/xpred_20260423_230719/ckpt_step_70000.pt	test	方正字汇-羊驼体 简	0	0	11942	弧	豆邮西刃节玉	0.41211116313934326	0.38915932178497314	0.7709073424339294
-trained_drop_minmax__infer_drop_minmax	trained_drop_minmax	drop_minmax	checkpoints/xpred_20260423_230719/ckpt_step_70000.pt	train	方正水柱简体	0	0	192275	诀	唱了笆观节击	0.28168851137161255	0.26435643434524536	0.8519801497459412
-trained_drop_minmax__infer_drop_minmax	trained_drop_minmax	drop_minmax	checkpoints/xpred_20260423_230719/ckpt_step_70000.pt	test	方正字汇-羊驼体 简	0	0	11942	弧	豆邮西刃节玉	0.41171491146087646	0.3867981433868408	0.772546648979187
-trained_mean__infer_mean	trained_mean	mean	checkpoints/xpred_20260424_182507/ckpt_step_70000.pt	train	方正水柱简体	0	0	192275	诀	唱了笆观节击	0.29204368591308594	0.28067296743392944	0.8420374393463135
-trained_mean__infer_mean	trained_mean	mean	checkpoints/xpred_20260424_182507/ckpt_step_70000.pt	test	方正字汇-羊驼体 简	0	0	11942	弧	豆邮西刃节玉	0.4071354269981384	0.38743311166763306	0.7720261812210083
-trained_mean__infer_drop_minmax	trained_mean	drop_minmax	checkpoints/xpred_20260424_182507/ckpt_step_70000.pt	train	方正水柱简体	0	0	192275	诀	唱了笆观节击	0.2886442244052887	0.27508652210235596	0.845445454120636
-trained_mean__infer_drop_minmax	trained_mean	drop_minmax	checkpoints/xpred_20260424_182507/ckpt_step_70000.pt	test	方正字汇-羊驼体 简	0	0	11942	弧	豆邮西刃节玉	0.4077805280685425	0.38830265402793884	0.7714365720748901

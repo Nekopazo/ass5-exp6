@@ -12,7 +12,7 @@ from typing import Dict
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 
 from dataset import CartesianFontCharBatchSampler, FontImageDataset, UniqueFontBatchSampler
 from models.model import XPredTrainer
@@ -34,6 +34,15 @@ def seed_worker(worker_id: int) -> None:
     worker_seed = torch.initial_seed() % (2**32)
     random.seed(worker_seed + int(worker_id))
     np.random.seed(worker_seed + int(worker_id))
+
+
+def configure_torch_cuda_performance() -> None:
+    if not torch.cuda.is_available():
+        return
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.set_float32_matmul_precision("high")
 
 
 def resolve_device(raw_device: str) -> torch.device:
@@ -118,9 +127,8 @@ class XPredBatchCollator:
         samples,
         *,
         shared_style_indices: list[int],
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[str], torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, list[str], torch.Tensor]:
         unique_style_imgs = []
-        unique_style_masks = []
         style_index = []
         style_fonts = []
         style_char_ids = []
@@ -131,18 +139,16 @@ class XPredBatchCollator:
             if slot is None:
                 slot = len(unique_style_imgs)
                 style_slot_by_font[font_name] = slot
-                style_img, style_ref_mask, _ = self.dataset.load_style_refs_by_indices(
+                style_img, _ = self.dataset.load_style_refs_by_indices(
                     font_name,
                     shared_style_indices,
                 )
                 unique_style_imgs.append(style_img)
-                unique_style_masks.append(style_ref_mask)
                 style_fonts.append(font_name)
                 style_char_ids.append(int(sample["char_id"]))
             style_index.append(slot)
         return (
             torch.stack(unique_style_imgs, dim=0),
-            torch.stack(unique_style_masks, dim=0),
             torch.tensor(style_index, dtype=torch.long),
             style_fonts,
             torch.tensor(style_char_ids, dtype=torch.long),
@@ -152,7 +158,7 @@ class XPredBatchCollator:
         excluded_by_font = self._build_excluded_style_indices(samples)
         shared_style_indices = self._sample_shared_style_indices(excluded_by_font)
         content, content_index = _pack_unique_content(samples)
-        style_img, style_ref_mask, style_index, style_font, style_char_id = self._pack_unique_style(
+        style_img, style_index, style_font, style_char_id = self._pack_unique_style(
             samples,
             shared_style_indices=shared_style_indices,
         )
@@ -165,7 +171,6 @@ class XPredBatchCollator:
             "content_index": content_index,
             "target": torch.stack([sample["target"] for sample in samples], dim=0),
             "style_img": style_img,
-            "style_ref_mask": style_ref_mask,
             "style_index": style_index,
             "style_font": style_font,
             "style_char_id": style_char_id,
@@ -194,17 +199,18 @@ class StyleEvalBatchCollator:
         ref_count = min(int(self.dataset.style_ref_count_max), len(ordered_candidates))
         if ref_count < 1:
             raise RuntimeError("Validation batch has no available style references.")
-        return random.sample(ordered_candidates, k=ref_count)
+        return ordered_candidates[:ref_count]
 
     def _pack_unique_style(
         self,
         samples,
         *,
         shared_style_indices: list[int],
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, list[str], torch.Tensor]:
         unique_style_imgs = []
-        unique_style_masks = []
         style_index = []
+        style_fonts = []
+        style_char_ids = []
         style_slot_by_font: dict[str, int] = {}
         for sample in samples:
             font_name = str(sample["font"])
@@ -212,24 +218,26 @@ class StyleEvalBatchCollator:
             if slot is None:
                 slot = len(unique_style_imgs)
                 style_slot_by_font[font_name] = slot
-                style_img, style_ref_mask, _ = self.dataset.load_style_refs_by_indices(
+                style_img, _ = self.dataset.load_style_refs_by_indices(
                     font_name,
                     shared_style_indices,
                 )
                 unique_style_imgs.append(style_img)
-                unique_style_masks.append(style_ref_mask)
+                style_fonts.append(font_name)
+                style_char_ids.append(int(sample["char_id"]))
             style_index.append(slot)
         return (
             torch.stack(unique_style_imgs, dim=0),
-            torch.stack(unique_style_masks, dim=0),
             torch.tensor(style_index, dtype=torch.long),
+            style_fonts,
+            torch.tensor(style_char_ids, dtype=torch.long),
         )
 
     def __call__(self, samples) -> Dict[str, torch.Tensor]:
         excluded_by_font = self._build_excluded_style_indices(samples)
         shared_style_indices = self._select_shared_style_indices(excluded_by_font)
         content, content_index = _pack_unique_content(samples)
-        style_img, style_ref_mask, style_index = self._pack_unique_style(
+        style_img, style_index, style_font, style_char_id = self._pack_unique_style(
             samples,
             shared_style_indices=shared_style_indices,
         )
@@ -242,9 +250,53 @@ class StyleEvalBatchCollator:
             "content_index": content_index,
             "target": torch.stack([sample["target"] for sample in samples], dim=0),
             "style_img": style_img,
-            "style_ref_mask": style_ref_mask,
             "style_index": style_index,
+            "style_font": style_font,
+            "style_char_id": style_char_id,
         }
+
+
+class FixedFontCharBatchSampler(Sampler[list[int]]):
+    def __init__(
+        self,
+        dataset: FontImageDataset,
+        *,
+        font_names: list[str],
+        char_indices: list[int],
+        fonts_per_batch: int,
+        chars_per_batch: int,
+    ) -> None:
+        self.dataset = dataset
+        self.font_names = [str(name) for name in font_names]
+        self.char_indices = [int(idx) for idx in char_indices]
+        self.fonts_per_batch = max(1, int(fonts_per_batch))
+        self.chars_per_batch = max(1, int(chars_per_batch))
+        if not self.font_names:
+            raise ValueError("FixedFontCharBatchSampler requires at least one font.")
+        if not self.char_indices:
+            raise ValueError("FixedFontCharBatchSampler requires at least one char.")
+
+    def __len__(self) -> int:
+        return len(self._chunk_items(self.font_names, self.fonts_per_batch)) * len(
+            self._chunk_items(self.char_indices, self.chars_per_batch)
+        )
+
+    def __iter__(self):
+        for font_group in self._chunk_items(self.font_names, self.fonts_per_batch):
+            for char_group in self._chunk_items(self.char_indices, self.chars_per_batch):
+                batch: list[int] = []
+                for font_name in font_group:
+                    lookup = self.dataset.sample_index_by_font_char[font_name]
+                    for char_index in char_group:
+                        sample_index = lookup.get(int(char_index))
+                        if sample_index is not None:
+                            batch.append(int(sample_index))
+                if batch:
+                    yield batch
+
+    @staticmethod
+    def _chunk_items(items, chunk_size: int):
+        return [items[start : start + chunk_size] for start in range(0, len(items), chunk_size)]
 
 
 def build_dataloader(
@@ -299,13 +351,18 @@ def build_style_eval_dataloader(
     seed: int,
     cartesian_fonts_per_batch: int,
     cartesian_chars_per_batch: int,
+    fixed_font_count: int = 16,
+    fixed_char_count: int = 16,
 ) -> DataLoader:
-    batch_sampler = CartesianFontCharBatchSampler(
+    _ = seed
+    fixed_font_names = list(dataset.font_names)[: max(1, int(fixed_font_count))]
+    fixed_char_indices = list(dataset.split_char_indices)[: max(1, int(fixed_char_count))]
+    batch_sampler = FixedFontCharBatchSampler(
         dataset,
+        font_names=fixed_font_names,
+        char_indices=fixed_char_indices,
         fonts_per_batch=int(cartesian_fonts_per_batch),
         chars_per_batch=int(cartesian_chars_per_batch),
-        seed=int(seed),
-        drop_last=False,
     )
     return DataLoader(
         dataset=dataset,
@@ -324,7 +381,6 @@ def slice_batch(batch: Dict[str, torch.Tensor], count: int) -> Dict[str, torch.T
             "content",
             "content_index",
             "style_img",
-            "style_ref_mask",
             "style_index",
             "style_font",
             "style_char_id",
@@ -339,7 +395,6 @@ def slice_batch(batch: Dict[str, torch.Tensor], count: int) -> Dict[str, torch.T
     output["content"] = batch["content"][content_positions]
     output["content_index"] = content_index
     output["style_img"] = batch["style_img"][style_positions]
-    output["style_ref_mask"] = batch["style_ref_mask"][style_positions]
     output["style_index"] = style_index
     output["style_font"] = [batch["style_font"][idx] for idx in style_positions.tolist()]
     output["style_char_id"] = batch["style_char_id"][style_positions]
@@ -354,7 +409,6 @@ def concat_batches(*batches: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]
             "content",
             "content_index",
             "style_img",
-            "style_ref_mask",
             "style_index",
             "style_font",
             "style_char_id",
@@ -378,7 +432,6 @@ def concat_batches(*batches: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]
 
     ref_count = min(int(batch["style_img"].size(1)) for batch in batches)
     merged["style_img"] = torch.cat([batch["style_img"][:, :ref_count] for batch in batches], dim=0)
-    merged["style_ref_mask"] = torch.cat([batch["style_ref_mask"][:, :ref_count] for batch in batches], dim=0)
     style_indices = []
     style_offset = 0
     for batch in batches:
@@ -390,46 +443,6 @@ def concat_batches(*batches: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]
     return merged
 
 
-def apply_fixed_style_refs(
-    batch: Dict[str, torch.Tensor],
-    train_dataset: FontImageDataset,
-    val_dataset: FontImageDataset | None,
-    *,
-    seen_count: int,
-    seed: int,
-    ref_count: int | None = None,
-) -> Dict[str, torch.Tensor]:
-    ref_count = int(batch["style_img"].size(1)) if ref_count is None else max(1, int(ref_count))
-    shared_candidates: set[int] | None = None
-    for idx, (font_name, char_id) in enumerate(zip(batch["style_font"], batch["style_char_id"].tolist(), strict=True)):
-        dataset = train_dataset if idx < seen_count else val_dataset
-        if dataset is None:
-            raise RuntimeError("val dataset is required for unseen sample style references")
-        candidates = set(dataset.list_style_candidate_indices(font_name, excluded_indices=[int(char_id)]))
-        shared_candidates = candidates if shared_candidates is None else shared_candidates & candidates
-    if shared_candidates is None or len(shared_candidates) < ref_count:
-        raise RuntimeError(
-            f"Sample batch needs {ref_count} shared fixed style refs, only found {0 if shared_candidates is None else len(shared_candidates)}."
-        )
-    rng = random.Random(int(seed))
-    shared_style_indices = rng.sample(sorted(int(idx) for idx in shared_candidates), k=ref_count)
-    fixed_style_imgs = []
-    fixed_style_masks = []
-    for idx, font_name in enumerate(batch["style_font"]):
-        dataset = train_dataset if idx < seen_count else val_dataset
-        if dataset is None:
-            raise RuntimeError("val dataset is required for unseen sample style references")
-        style_img, style_ref_mask, _ = dataset.load_style_refs_by_indices(
-            font_name,
-            shared_style_indices,
-        )
-        fixed_style_imgs.append(style_img)
-        fixed_style_masks.append(style_ref_mask)
-    batch["style_img"] = torch.stack(fixed_style_imgs, dim=0)
-    batch["style_ref_mask"] = torch.stack(fixed_style_masks, dim=0)
-    return batch
-
-
 def build_sample_batch(
     train_dataset: FontImageDataset,
     val_dataset: FontImageDataset | None,
@@ -437,60 +450,43 @@ def build_sample_batch(
     device: torch.device,
     seed: int,
 ) -> Dict[str, torch.Tensor]:
-    seen_count = min(4, len(train_dataset.font_names))
-    seen_loader = build_dataloader(
-        train_dataset,
-        batch_size=max(1, seen_count),
-        num_workers=0,
-        device=device,
-        seed=seed,
-        use_unique_font_batches=True,
-        shuffle=False,
-        sampling_mode="shuffle",
-        cartesian_fonts_per_batch=1,
-        cartesian_chars_per_batch=1,
-    )
-    seen_batch = slice_batch(next(iter(seen_loader)), seen_count)
-    if val_dataset is None or len(val_dataset.font_names) == 0:
-        return apply_fixed_style_refs(
-            seen_batch,
-            train_dataset,
-            None,
-            seen_count=seen_count,
-            seed=seed + 2000,
-            ref_count=int(train_dataset.style_ref_count_max),
-        )
+    _ = device
+    _ = seed
 
-    unseen_count = min(4, len(val_dataset.font_names))
-    unseen_loader = build_dataloader(
-        val_dataset,
-        batch_size=max(1, unseen_count),
-        num_workers=0,
-        device=device,
-        seed=seed + 1000,
-        use_unique_font_batches=True,
-        shuffle=False,
-        sampling_mode="shuffle",
-        cartesian_fonts_per_batch=1,
-        cartesian_chars_per_batch=1,
-    )
-    unseen_batch = slice_batch(next(iter(unseen_loader)), unseen_count)
-    sample_batch = concat_batches(seen_batch, unseen_batch)
-    return apply_fixed_style_refs(
-        sample_batch,
-        train_dataset,
-        val_dataset,
-        seen_count=seen_count,
-        seed=seed + 2000,
-        ref_count=min(int(train_dataset.style_ref_count_max), int(val_dataset.style_ref_count_max)),
-    )
+    def fixed_diagonal_batch(dataset: FontImageDataset, count: int) -> Dict[str, torch.Tensor]:
+        fixed_font_names = list(dataset.font_names)[: max(1, int(count))]
+        fixed_char_indices = list(dataset.split_char_indices)[: max(1, int(count))]
+        pair_count = min(len(fixed_font_names), len(fixed_char_indices), max(1, int(count)))
+        if pair_count <= 0:
+            raise RuntimeError("dataset has no fixed font/char pair for sampling")
+        samples = [
+            dataset[
+                dataset.sample_index_by_font_char[fixed_font_names[idx]][int(fixed_char_indices[idx])]
+            ]
+            for idx in range(pair_count)
+        ]
+        return StyleEvalBatchCollator(dataset)(samples)
+
+    seen_count = min(8, len(train_dataset.font_names), len(train_dataset.split_char_indices))
+    if seen_count <= 0:
+        raise RuntimeError("train dataset has no fixed font/char pair for sampling")
+    seen_batch = fixed_diagonal_batch(train_dataset, seen_count)
+    if val_dataset is None or len(val_dataset.font_names) == 0:
+        return seen_batch
+
+    unseen_count = min(8, len(val_dataset.font_names), len(val_dataset.split_char_indices))
+    if unseen_count <= 0:
+        return seen_batch
+    unseen_batch = fixed_diagonal_batch(val_dataset, unseen_count)
+    return concat_batches(seen_batch, unseen_batch)
 
 
 def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
     return SourcePartRefDiT(
-        in_channels=1,
+        in_channels=3,
         image_size=int(args.image_size),
         patch_size=int(args.patch_size),
+        patch_embed_bottleneck_dim=int(args.patch_embed_bottleneck_dim),
         encoder_hidden_dim=int(args.encoder_hidden_dim),
         dit_hidden_dim=int(args.dit_hidden_dim),
         dit_depth=int(args.dit_depth),
@@ -514,7 +510,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--font-split", type=str, required=True, choices=["train", "test", "all"])
     parser.add_argument("--font-split-seed", type=int, required=True)
-    parser.add_argument("--font-train-ratio", type=float, required=True)
+    parser.add_argument("--train-ratio", type=float, required=True)
     parser.add_argument("--max-fonts", type=int, required=True)
     parser.add_argument("--style-ref-count", type=int, required=True)
     parser.add_argument("--style-ref-count-min", type=int, required=True)
@@ -522,6 +518,7 @@ def main() -> None:
     parser.add_argument("--image-size", type=int, required=True)
 
     parser.add_argument("--patch-size", type=int, required=True)
+    parser.add_argument("--patch-embed-bottleneck-dim", type=int, default=0)
     parser.add_argument("--encoder-hidden-dim", type=int, required=True)
     parser.add_argument("--dit-hidden-dim", type=int, required=True)
     parser.add_argument("--dit-depth", type=int, required=True)
@@ -541,7 +538,6 @@ def main() -> None:
     parser.add_argument("--total-steps", type=int, required=True)
     parser.add_argument("--log-every-steps", type=int, required=True)
     parser.add_argument("--val-every-steps", type=int, required=True)
-    parser.add_argument("--val-max-batches", type=int, required=True)
     parser.add_argument("--save-every-steps", type=int, required=True)
     parser.add_argument("--sample-every-steps", type=int, required=True)
     parser.add_argument("--grad-clip-norm", type=float, required=True)
@@ -552,15 +548,25 @@ def main() -> None:
     parser.add_argument("--p-std", type=float, default=0.8)
     parser.add_argument("--t-eps", type=float, default=0.05)
     parser.add_argument("--noise-scale", type=float, default=1.0)
+    parser.add_argument("--prediction-type", type=str, default="x", choices=["x", "noise", "velocity"])
     parser.add_argument("--ema-decay", type=float, required=True)
     parser.add_argument("--ema-start-step", type=int, default=40000)
     args = parser.parse_args()
 
     set_global_seed(int(args.seed))
+    configure_torch_cuda_performance()
     enable_torch_sdpa_backends()
     device = resolve_device(args.device)
     print(f"[train] mode=dit_xpred device={device} seed={int(args.seed)}")
     print(f"[train] attention_backend={describe_torch_sdpa_backends()}")
+    if device.type == "cuda":
+        print(
+            "[train] cuda_performance="
+            f"cudnn_benchmark={int(torch.backends.cudnn.benchmark)} "
+            f"matmul_allow_tf32={int(torch.backends.cuda.matmul.allow_tf32)} "
+            f"cudnn_allow_tf32={int(torch.backends.cudnn.allow_tf32)} "
+            f"float32_matmul_precision={torch.get_float32_matmul_precision()}"
+        )
 
     font_split_seed = int(args.font_split_seed)
     log_every_steps = int(args.log_every_steps)
@@ -595,7 +601,7 @@ def main() -> None:
         random_seed=int(args.seed),
         font_split=str(args.font_split),
         font_split_seed=font_split_seed,
-        font_train_ratio=float(args.font_train_ratio),
+        train_ratio=float(args.train_ratio),
         transform=glyph_transform,
         style_transform=glyph_transform,
         load_style_refs=False,
@@ -612,7 +618,7 @@ def main() -> None:
             random_seed=int(args.seed),
             font_split="test",
             font_split_seed=font_split_seed,
-            font_train_ratio=float(args.font_train_ratio),
+            train_ratio=float(args.train_ratio),
             transform=glyph_transform,
             style_transform=glyph_transform,
             load_style_refs=True,
@@ -631,6 +637,7 @@ def main() -> None:
         cartesian_chars_per_batch=int(args.cartesian_chars_per_batch),
     )
     val_dataloader = None
+    trainer_val_max_batches = None
     if val_dataset is not None:
         val_dataloader = build_style_eval_dataloader(
             val_dataset,
@@ -639,6 +646,16 @@ def main() -> None:
             seed=int(args.seed) + 1,
             cartesian_fonts_per_batch=int(args.cartesian_fonts_per_batch),
             cartesian_chars_per_batch=int(args.cartesian_chars_per_batch),
+            fixed_font_count=16,
+            fixed_char_count=16,
+        )
+        trainer_val_max_batches = None
+        print(
+            "[val] fixed unseen eval grid "
+            f"fonts={min(16, len(val_dataset.font_names))} "
+            f"chars={min(16, len(val_dataset.split_char_indices))} "
+            f"samples={sum(len(batch) for batch in val_dataloader.batch_sampler)}",
+            flush=True,
         )
     if str(args.train_sampling) == "cartesian_font_char":
         print(
@@ -669,13 +686,14 @@ def main() -> None:
         p_std=float(args.p_std),
         t_eps=float(args.t_eps),
         noise_scale=float(args.noise_scale),
+        prediction_type=str(args.prediction_type),
         sample_steps=int(args.sample_steps),
         ema_decay=float(args.ema_decay),
         ema_start_step=int(args.ema_start_step),
         log_every_steps=log_every_steps,
         save_every_steps=resolved_save_every_steps,
         val_every_steps=val_every_steps,
-        val_max_batches=int(args.val_max_batches),
+        val_max_batches=trainer_val_max_batches,
         grad_clip_norm=float(args.grad_clip_norm),
         grad_clip_min_norm=None if args.grad_clip_min_norm is None else float(args.grad_clip_min_norm),
     )
@@ -701,8 +719,14 @@ def main() -> None:
     run_config["train_samples"] = int(len(dataset.samples))
     run_config["val_fonts"] = 0 if val_dataset is None else int(len(val_dataset.font_names))
     run_config["val_samples"] = 0 if val_dataset is None else int(len(val_dataset.samples))
+    run_config["train_chars"] = int(len(dataset.split_char_indices))
+    run_config["val_chars"] = 0 if val_dataset is None else int(len(val_dataset.split_char_indices))
+    run_config["fixed_val_fonts"] = 0 if val_dataset is None else min(16, int(len(val_dataset.font_names)))
+    run_config["fixed_val_chars"] = 0 if val_dataset is None else min(16, int(len(val_dataset.split_char_indices)))
+    run_config["fixed_val_samples"] = 0 if val_dataloader is None else sum(len(batch) for batch in val_dataloader.batch_sampler)
     run_config["computed_total_steps"] = int(total_steps)
     run_config["model_type"] = "dit_xpred"
+    run_config["prediction_type"] = str(args.prediction_type)
     run_config["loss_type"] = "jit_v_mse"
     run_config["lr_schedule"] = str(args.lr_schedule)
     run_config["lr_warmup_steps"] = int(args.lr_warmup_steps)

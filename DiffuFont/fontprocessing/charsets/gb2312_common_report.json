@@ -1,0 +1,2234 @@
+{
+  "gb2312_mapping_url": "https://www.unicode.org/Public/MAPPINGS/VENDORS/MICSFT/WINDOWS/CP936.TXT",
+  "gb2312_hanzi_count": 6763,
+  "common_count": 6763,
+  "font_count": 318,
+  "coverage": [
+    {
+      "font": "ContentFont",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/DataPreparation/Font/ContentFont.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "GF_ofl_mashanzheng_MaShanZheng-Regular",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/GF_ofl_mashanzheng_MaShanZheng-Regular.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "GF_ofl_notosanssc_NotoSansSC[wght]",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/GF_ofl_notosanssc_NotoSansSC[wght].ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "HarmonyOS_Sans_SC_Light",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/HarmonyOS_Sans_SC_Light.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "HarmonyOS_Sans_SC_Regular",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/HarmonyOS_Sans_SC_Regular.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "HarmonyOS_Sans_SC_Thin",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/HarmonyOS_Sans_SC_Thin.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "MiSans-ExtraLight",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/MiSans-ExtraLight.otf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "MiSans-Light",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/MiSans-Light.otf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "MiSans-Regular",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/MiSans-Regular.otf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "MiSans-Thin",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/MiSans-Thin.otf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "SIMFANG",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/SIMFANG.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "SIMHEI",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/SIMHEI.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "SIMLI",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/SIMLI.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "STFANGSO",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/STFANGSO.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "STKAITI",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/STKAITI.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "STLITI",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/STLITI.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "STSONG",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/STSONG.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "STXIHEI",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/STXIHEI.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "STXINGKA",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/STXINGKA.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "STXINWEI",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/STXINWEI.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "STZHONGS",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/STZHONGS.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "SourceHanSansCN-Bold#1",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/SourceHanSansCN-Bold#1.otf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "SourceHanSansCN-Heavy#1",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/SourceHanSansCN-Heavy#1.otf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "SourceHanSansCN-Light#1",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/SourceHanSansCN-Light#1.otf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "SourceHanSansCN-Medium#1",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/SourceHanSansCN-Medium#1.otf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "SourceHanSansCN-Regular#1",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/SourceHanSansCN-Regular#1.otf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "SourceHanSerifCN-Bold",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/SourceHanSerifCN-Bold.otf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "SourceHanSerifCN-Heavy",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/SourceHanSerifCN-Heavy.otf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "SourceHanSerifCN-Regular",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/SourceHanSerifCN-Regular.otf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "SourceHanSerifCN-SemiBold",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/SourceHanSerifCN-SemiBold.otf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "书体坊何绍基楷 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/书体坊何绍基楷 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "书体坊文征明楷体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/书体坊文征明楷体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "书体坊文征明行草 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/书体坊文征明行草 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "书体坊柳公权楷 简繁",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/书体坊柳公权楷 简繁.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "书体坊王羲之楷 简繁",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/书体坊王羲之楷 简繁.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "书体坊赵九江钢笔楷书",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/书体坊赵九江钢笔楷书.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "书体坊郑板桥体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/书体坊郑板桥体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "华康俪金黑W8_P",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/华康俪金黑W8_P.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "华康圆体W7(JULY)",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/华康圆体W7(JULY).TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "华康少女体 ",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/华康少女体 .TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "华康布丁体W12(P)",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/华康布丁体W12(P).TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "华康楷体W5-A",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/华康楷体W5-A.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "华康海报体简W12_P",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/华康海报体简W12_P.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "字酷堂鸿昌楷书 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/字酷堂鸿昌楷书 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正FW欢乐体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正FW欢乐体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正FW童趣POP体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正FW童趣POP体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正丁子同行楷 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正丁子同行楷 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正三宝体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正三宝体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正三宝体 简_Xian",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正三宝体 简_Xian.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正中倩简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正中倩简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正中等线简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正中等线简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正中雅宋",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正中雅宋.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正乙瑛碑隶书 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正乙瑛碑隶书 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正书宋简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正书宋简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正仿宋简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正仿宋简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正体坛粗黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正体坛粗黑简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正体坛超黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正体坛超黑简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正侠客体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正侠客体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正俊黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正俊黑简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正健力体 简 Heavy",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正健力体 简 Heavy.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正健力体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正健力体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正光辉特粗简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正光辉特粗简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正八大山人行楷 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正八大山人行楷 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正公文仿宋",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正公文仿宋.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正公文小标宋",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正公文小标宋.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正公文楷体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正公文楷体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正公文黑体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正公文黑体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正兰亭中黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正兰亭中黑简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正兰亭刊黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正兰亭刊黑简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正兰亭圆简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正兰亭圆简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正兰亭圆简体_纤",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正兰亭圆简体_纤.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正兰亭大黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正兰亭大黑简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正兰亭宋简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正兰亭宋简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正兰亭特黑扁简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正兰亭特黑扁简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正兰亭特黑长简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正兰亭特黑长简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正兰亭粗黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正兰亭粗黑简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正兰亭细黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正兰亭细黑简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正兰亭超细黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正兰亭超细黑简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正兰亭黑Pro 简 ExtraLight",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正兰亭黑Pro 简 ExtraLight.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正兰亭黑Pro 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正兰亭黑Pro 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正兰亭黑扁简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正兰亭黑扁简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正兰亭黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正兰亭黑简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正兰亭黑长简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正兰亭黑长简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正准俊黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正准俊黑简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正准圆简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正准圆简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正准雅宋简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正准雅宋简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正刘炳森隶书 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正刘炳森隶书 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正创黑 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正创黑 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正剑体简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正剑体简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正剪纸简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正剪纸简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正劲黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正劲黑简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正北魏楷书简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正北魏楷书简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正华隶简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正华隶简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正卓越体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正卓越体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正卓越体 简_Cu",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正卓越体 简_Cu.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正卓越体 简_Xian",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正卓越体 简_Xian.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正博雅宋",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正博雅宋.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正博雅方刊宋",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正博雅方刊宋.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正卡通简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正卡通简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正古仿简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正古仿简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正古隶简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正古隶简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正启功行楷 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正启功行楷 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正吴玉如行书 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正吴玉如行书 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正和悦体 简 Bold",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正和悦体 简 Bold.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正和悦体 简 Light",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正和悦体 简 Light.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正和悦体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正和悦体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正品尚细黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正品尚细黑简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正品尚黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正品尚黑简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正喵呜体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正喵呜体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正墨颜体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正墨颜体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正大标宋简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正大标宋简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正大魏体简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正大魏体简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正大黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正大黑简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正奇妙体 简繁 Heavy",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正奇妙体 简繁 Heavy.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正奇妙体 简繁",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正奇妙体 简繁.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正姚体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正姚体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字汇-初见体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字汇-初见体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字汇-叶凌 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字汇-叶凌 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字汇-小组长体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字汇-小组长体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字汇-开心笑笑君 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字汇-开心笑笑君 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字汇-快乐海涛体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字汇-快乐海涛体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字汇-方糖秘蜜体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字汇-方糖秘蜜体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字汇-求魏体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字汇-求魏体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字汇-爆米花体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字汇-爆米花体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字汇-童趣体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字汇-童趣体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字汇-笨黑体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字汇-笨黑体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字汇-羊驼体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字汇-羊驼体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字汇-艾玛棒棒体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字汇-艾玛棒棒体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字汇-赵永海魏碑 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字汇-赵永海魏碑 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字汇-金玉体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字汇-金玉体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字汇-阿力楷书体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字汇-阿力楷书体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字汇-雨木圆圆体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字汇-雨木圆圆体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字汇-音乐体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字汇-音乐体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字汇-风铃悠悠 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字汇-风铃悠悠 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字汇-鱼丸粗面体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字汇-鱼丸粗面体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字汇-龙龙秀楷体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字汇-龙龙秀楷体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字迹-吕建德字体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字迹-吕建德字体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字迹-张颢硬笔楷书",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字迹-张颢硬笔楷书.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字迹-惊鸿体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字迹-惊鸿体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字迹-方正佩安体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字迹-方正佩安体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字迹-曾正国楷体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字迹-曾正国楷体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字迹-童体毛笔字体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字迹-童体毛笔字体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字迹-童体硬笔字体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字迹-童体硬笔字体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正字迹-龙吟体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正字迹-龙吟体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正宋一简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正宋一简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正宋三简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正宋三简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正宋刻本秀楷简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正宋刻本秀楷简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正宋黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正宋黑简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正宝城体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正宝城体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正寂地绘本简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正寂地绘本简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正寒冰体 简 Bold",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正寒冰体 简 Bold.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正寒冰体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正寒冰体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正小标宋简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正小标宋简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正少儿简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正少儿简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正尚酷简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正尚酷简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正工业黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正工业黑简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正平和简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正平和简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正幼圆",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正幼圆.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正幼线简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正幼线简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正康体简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正康体简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正彩源体简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正彩源体简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正德赛黑简体 501L",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正德赛黑简体 501L.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正德赛黑简体 509R",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正德赛黑简体 509R.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正德赛黑简体 515H",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正德赛黑简体 515H.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正志安体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正志安体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正快盈体 简繁 ExtraBold",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正快盈体 简繁 ExtraBold.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正快盈体 简繁",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正快盈体 简繁.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正快速体 简 Bold",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正快速体 简 Bold.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正快速体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正快速体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正悬针篆变简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正悬针篆变简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正报宋简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正报宋简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正敬酷黑 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正敬酷黑 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正文征明小楷 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正文征明小楷 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正文征明行草 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正文征明行草 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正新报宋简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正新报宋简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正新综艺黑 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正新综艺黑 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正新舒体简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正新舒体简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正方俊黑 简 Bold",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正方俊黑 简 Bold.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正方俊黑 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正方俊黑 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正时尚体 简繁",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正时尚体 简繁.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正明尚简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正明尚简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正显仁简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正显仁简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正晶宋",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正晶宋.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正晶细黑",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正晶细黑.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正本墨物语 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正本墨物语 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正本墨绪圆体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正本墨绪圆体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正本墨钧宋 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正本墨钧宋 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正杨凝式行书 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正杨凝式行书 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正标语体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正标语体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正标雅宋简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正标雅宋简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正楷体简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正楷体简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正楼兰体 简 ExtraBold",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正楼兰体 简 ExtraBold.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正楼兰体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正楼兰体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正榜书楷简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正榜书楷简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正榜书行简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正榜书行简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正橡皮章体 简 Heavy",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正橡皮章体 简 Heavy.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正橡皮章体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正橡皮章体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正正准黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正正准黑简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正正纤黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正正纤黑简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正正黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正正黑简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正毡笔黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正毡笔黑简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正水云简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正水云简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正水云简体_中",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正水云简体_中.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正水云简体_准",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正水云简体_准.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正水云简体_大",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正水云简体_大.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正水云简体_纤",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正水云简体_纤.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正水柱简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正水柱简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正汉真广标简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正汉真广标简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正沈尹默行书 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正沈尹默行书 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正活龙体 简 Bold",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正活龙体 简 Bold.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正活龙体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正活龙体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正流行体简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正流行体简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正润扁宋简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正润扁宋简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正清刻本悦宋简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正清刻本悦宋简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正清楷简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正清楷简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正清纯体简体 Bold",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正清纯体简体 Bold.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正清纯体简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正清纯体简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正爱莎简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正爱莎简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正特雅宋简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正特雅宋简.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正玩伴体 简繁 ExtraBold",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正玩伴体 简繁 ExtraBold.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正玩伴体 简繁",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正玩伴体 简繁.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正琥珀简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正琥珀简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正瘦金书简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正瘦金书简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正白舟大髭113 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正白舟大髭113 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正白舟忍者体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正白舟忍者体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正白舟武骨体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正白舟武骨体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正白舟魂心体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正白舟魂心体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正盈利体简体 Medium",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正盈利体简体 Medium.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正盈利体简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正盈利体简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正盛世楷书简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正盛世楷书简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正盛世楷书简体_Cu",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正盛世楷书简体_Cu.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正盛世楷书简体_Da",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正盛世楷书简体_Da.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正盛世楷书简体_Xian",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正盛世楷书简体_Xian.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正盛世楷书简体_Zhong",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正盛世楷书简体_Zhong.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正盛世楷书简体_Zhun",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正盛世楷书简体_Zhun.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正硬笔楷书简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正硬笔楷书简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正硬笔行书简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正硬笔行书简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正祥隶简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正祥隶简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正秋刀鱼润黑 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正秋刀鱼润黑 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正稚艺简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正稚艺简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正粉丝天下简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正粉丝天下简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正粗倩简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正粗倩简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正粗圆简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正粗圆简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正粗宋简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正粗宋简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正粗楷简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正粗楷简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正粗活意简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正粗活意简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正粗金陵简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正粗金陵简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正粗雅宋简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正粗雅宋简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正粗黑宋简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正粗黑宋简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正纤俊黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正纤俊黑简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正细俊黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正细俊黑简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正细倩简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正细倩简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正细圆简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正细圆简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正细珊瑚简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正细珊瑚简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正细等线简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正细等线简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正细谭黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正细谭黑简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正细金陵简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正细金陵简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正细黑一简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正细黑一简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正经黑手写简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正经黑手写简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正经黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正经黑简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正综艺简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正综艺简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正罗曼斜体 简-EB",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正罗曼斜体 简-EB.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正罗曼斜体 简-R",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正罗曼斜体 简-R.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正美黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正美黑简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正聚珍新仿简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正聚珍新仿简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正胖头鱼简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正胖头鱼简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正胖娃简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正胖娃简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正舒体简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正舒体简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正艺黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正艺黑简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正苏新诗柳楷简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正苏新诗柳楷简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正苏轼行书 简繁",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正苏轼行书 简繁.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正董其昌行书 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正董其昌行书 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正藏体简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正藏体简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正行楷 简-EL",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正行楷 简-EL.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正行楷简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正行楷简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正行黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正行黑简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正褚遂良楷书 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正褚遂良楷书 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正西狭颂隶书 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正西狭颂隶书 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正豪体简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正豪体简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正赵孟頫楷书 简繁",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正赵孟頫楷书 简繁.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正超值体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正超值体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正超粗黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正超粗黑简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正趣黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正趣黑简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正达利体简体 Bold",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正达利体简体 Bold.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正达利体简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正达利体简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正邓黑隶简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正邓黑隶简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正郑文公碑楷书 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正郑文公碑楷书 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正铁筋隶书简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正铁筋隶书简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正锐正黑简体_纤",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正锐正黑简体_纤.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正隶书简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正隶书简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正隶二简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正隶二简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正隶变简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正隶变简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正雅士黑 简 Bold",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正雅士黑 简 Bold.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正雅士黑 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正雅士黑 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正雅珠体简体 Bold",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正雅珠体简体 Bold.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正雅珠体简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正雅珠体简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正静蕾简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正静蕾简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正非凡体简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正非凡体简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正韵动中黑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正韵动中黑简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正颜宋简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正颜宋简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正风入松体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正风入松体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正风雅楷宋简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正风雅楷宋简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正飘体 简 Bold",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正飘体 简 Bold.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正飘体 简 DemiBold",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正飘体 简 DemiBold.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正飘体 简 ExtraLight",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正飘体 简 ExtraLight.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正飘体 简 Light",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正飘体 简 Light.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正飘体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正飘体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正飘逸宋 简繁 Heavy",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正飘逸宋 简繁 Heavy.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正飘逸宋 简繁",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正飘逸宋 简繁.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正飞跃体 简 Bold",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正飞跃体 简 Bold.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正飞跃体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正飞跃体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正飞逸体 简 ExtraBold",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正飞逸体 简 ExtraBold.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正飞逸体 简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正飞逸体 简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正魏碑简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正魏碑简体.ttf",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正黄草简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正黄草简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正黑体简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正黑体简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "方正黑隶简体",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/方正黑隶简体.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    },
+    {
+      "font": "汉仪凌波体简",
+      "path": "/scratch/yangximing/code/ass5-exp6/DiffuFont/fonts/汉仪凌波体简.TTF",
+      "supported_gb2312": 6763,
+      "missing_gb2312": 0,
+      "missing_sample": ""
+    }
+  ]
+}

@@ -11,6 +11,7 @@ Output layout:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set
@@ -107,7 +108,7 @@ def draw_char(
     y_offset: int,
 ) -> Image.Image:
     font = ImageFont.truetype(str(font_path), size=char_size)
-    img = Image.new("L", (canvas_size, canvas_size), 255)
+    img = Image.new("RGB", (canvas_size, canvas_size), (255, 255, 255))
     draw = ImageDraw.Draw(img)
 
     # Center text by bbox and apply custom offsets.
@@ -116,7 +117,7 @@ def draw_char(
     text_h = bbox[3] - bbox[1]
     x = (canvas_size - text_w) // 2 - bbox[0] + x_offset
     y = (canvas_size - text_h) // 2 - bbox[1] + y_offset
-    draw.text((x, y), ch, fill=0, font=font)
+    draw.text((x, y), ch, fill=(0, 0, 0), font=font)
 
     return img
 
@@ -131,10 +132,6 @@ def filter_fonts(all_fonts: List[str], font_indices: List[int] | None) -> List[s
         selected.append(all_fonts[idx])
     return selected
 
-
-
-import concurrent.futures
-
 def generate_images(
     chars: Iterable[str],
     font_items: Iterable[str],
@@ -145,75 +142,95 @@ def generate_images(
     canvas_size: int,
     x_offset: int,
     y_offset: int,
+    num_workers: int,
+    strict_coverage: bool,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
+    chars = list(chars)
 
-    def process_font(font_item: str):
-        font_path = resolve_font_path(project_root, font_dir, font_item)
-        if not font_path.exists():
-            raise FileNotFoundError(f"font not found: {font_item} -> {font_path}")
-        if font_path.suffix not in IMG_EXTS:
-            raise ValueError(f"invalid font suffix for: {font_item} -> {font_path.suffix}")
+    jobs = [
+        (
+            list(chars),
+            str(font_item),
+            str(project_root),
+            str(font_dir),
+            str(out_dir),
+            int(char_size),
+            int(canvas_size),
+            int(x_offset),
+            int(y_offset),
+            bool(strict_coverage),
+        )
+        for font_item in font_items
+    ]
+    max_workers = max(1, int(num_workers))
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_process_font_job, job) for job in jobs]
+        for future in concurrent.futures.as_completed(futures):
+            font_name, saved, unsupported_count = future.result()
+            print(f"[generate] {font_name}: saved={saved} unsupported={unsupported_count}")
 
-        font_name = font_path.stem
-        font_out_dir = out_dir / font_name
-        font_out_dir.mkdir(parents=True, exist_ok=True)
 
-        saved = 0
-        unsupported_chars: List[str] = []
-        print(f"Processing font: {font_name}")
+def _process_font_job(job: tuple) -> tuple[str, int, int]:
+    (
+        chars,
+        font_item,
+        project_root_raw,
+        font_dir_raw,
+        out_dir_raw,
+        char_size,
+        canvas_size,
+        x_offset,
+        y_offset,
+        strict_coverage,
+    ) = job
+    project_root = Path(project_root_raw)
+    font_dir = Path(font_dir_raw)
+    out_dir = Path(out_dir_raw)
+    font_path = resolve_font_path(project_root, font_dir, font_item)
+    if not font_path.exists():
+        raise FileNotFoundError(f"font not found: {font_item} -> {font_path}")
+    if font_path.suffix not in IMG_EXTS:
+        raise ValueError(f"invalid font suffix for: {font_item} -> {font_path.suffix}")
 
-        def process_char(ch: str):
-            if len(ch) != 1:
-                raise ValueError(f"invalid char entry '{ch}' in charset (expected single character)")
-            if not char_supported(ch, font_path):
-                return (ch, None)
-            try:
-                img = draw_char(
-                    ch=ch,
-                    font_path=font_path,
-                    char_size=char_size,
-                    canvas_size=canvas_size,
-                    x_offset=x_offset,
-                    y_offset=y_offset,
-                )
-                save_path = font_out_dir / f"{font_name}@{ch}.png"
-                img.save(save_path, dpi=(300, 300))
-                return (ch, True)
-            except Exception as exc:
-                raise RuntimeError(
-                    f"failed to render char '{ch}' for font '{font_name}' ({font_path})"
-                ) from exc
+    font_name = font_path.stem
+    font_out_dir = out_dir / font_name
+    font_out_dir.mkdir(parents=True, exist_ok=True)
 
-        results = []
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = {executor.submit(process_char, ch): ch for ch in chars}
-            for future in concurrent.futures.as_completed(futures):
-                ch, result = future.result()
-                if result is None:
-                    unsupported_chars.append(ch)
-                elif result:
-                    saved += 1
-
-        if unsupported_chars:
-            sample = "".join(unsupported_chars[:20])
-            raise RuntimeError(
-                f"font '{font_name}' generation failed: "
-                f"{len(unsupported_chars)} unsupported chars in charset. sample='{sample}'"
+    saved = 0
+    unsupported_chars: List[str] = []
+    for ch in chars:
+        if len(ch) != 1:
+            raise ValueError(f"invalid char entry '{ch}' in charset (expected single character)")
+        if not char_supported(ch, font_path):
+            unsupported_chars.append(ch)
+            continue
+        try:
+            img = draw_char(
+                ch=ch,
+                font_path=font_path,
+                char_size=char_size,
+                canvas_size=canvas_size,
+                x_offset=x_offset,
+                y_offset=y_offset,
             )
-        if saved == 0:
-            raise RuntimeError(f"font '{font_name}' generation failed: no glyph images were saved")
-        print(f"  done: saved={saved}, unsupported=0")
+            save_path = font_out_dir / f"{font_name}@{ch}.png"
+            img.save(save_path, dpi=(300, 300))
+            saved += 1
+        except Exception as exc:
+            raise RuntimeError(
+                f"failed to render char '{ch}' for font '{font_name}' ({font_path})"
+            ) from exc
 
-    # 多线程处理每个字体
-    with concurrent.futures.ThreadPoolExecutor() as font_executor:
-        font_futures = [font_executor.submit(process_font, font_item) for font_item in font_items]
-        for future in concurrent.futures.as_completed(font_futures):
-            # 这里可以捕获异常并输出
-            try:
-                future.result()
-            except Exception as e:
-                print(f"Error: {e}")
+    if strict_coverage and unsupported_chars:
+        sample = "".join(unsupported_chars[:20])
+        raise RuntimeError(
+            f"font '{font_name}' generation failed: "
+            f"{len(unsupported_chars)} unsupported chars in charset. sample='{sample}'"
+        )
+    if saved == 0:
+        raise RuntimeError(f"font '{font_name}' generation failed: no glyph images were saved")
+    return font_name, saved, len(unsupported_chars)
 
 
 def main() -> None:
@@ -235,6 +252,8 @@ def main() -> None:
     parser.add_argument("--x-offset", type=int, default=0)
     parser.add_argument("--y-offset", type=int, default=0)
     parser.add_argument("--out-dir", type=Path, default=Path("DataPreparation/Generated"))
+    parser.add_argument("--num-workers", type=int, default=48)
+    parser.add_argument("--allow-unsupported", action="store_true")
     args = parser.parse_args()
 
     project_root = args.project_root.resolve()
@@ -257,6 +276,8 @@ def main() -> None:
         canvas_size=args.canvas_size,
         x_offset=args.x_offset,
         y_offset=args.y_offset,
+        num_workers=int(args.num_workers),
+        strict_coverage=not bool(args.allow_unsupported),
     )
 
 

@@ -17,7 +17,7 @@ DEVICE_ARG="cuda:1"
 SEED=42
 FONT_SPLIT="train"
 FONT_SPLIT_SEED=""
-FONT_TRAIN_RATIO="0.95"
+TRAIN_RATIO="0.95"
 
 EPOCHS=10000000
 TARGET_STEPS=200000
@@ -25,7 +25,6 @@ SAVE_EVERY=5000
 SAMPLE_EVERY=300
 LOG_EVERY=100
 VAL_EVERY=100
-VAL_MAX_BATCHES=16
 LR="1e-4"
 WEIGHT_DECAY="0.0"
 ADAM_BETA1="0.9"
@@ -45,6 +44,7 @@ MAX_FONTS=0
 IMAGE_SIZE=128
 
 PATCH_SIZE=8
+PATCH_EMBED_BOTTLENECK_DIM=0
 ENCODER_HIDDEN_DIM=256
 DIT_HIDDEN_DIM=256
 DIT_DEPTH=12
@@ -52,6 +52,7 @@ DIT_HEADS=8
 DIT_MLP_RATIO="4.0"
 
 SAMPLE_STEPS=20
+PREDICTION_TYPE="x"
 EMA_DECAY="0.9999"
 EMA_START_STEP="40000"
 TRAIN_SAMPLING="cartesian_font_char"
@@ -72,14 +73,13 @@ while [[ $# -gt 0 ]]; do
     --seed) SEED="${2:?}"; shift 2 ;;
     --font-split) FONT_SPLIT="${2:?}"; shift 2 ;;
     --font-split-seed) FONT_SPLIT_SEED="${2:?}"; shift 2 ;;
-    --font-train-ratio) FONT_TRAIN_RATIO="${2:?}"; shift 2 ;;
+    --train-ratio) TRAIN_RATIO="${2:?}"; shift 2 ;;
     --epochs) EPOCHS="${2:?}"; shift 2 ;;
     --target-steps) TARGET_STEPS="${2:?}"; shift 2 ;;
     --save-every-steps) SAVE_EVERY="${2:?}"; shift 2 ;;
     --sample-every-steps) SAMPLE_EVERY="${2:?}"; shift 2 ;;
     --log-every-steps) LOG_EVERY="${2:?}"; shift 2 ;;
     --val-every-steps) VAL_EVERY="${2:?}"; shift 2 ;;
-    --val-max-batches) VAL_MAX_BATCHES="${2:?}"; shift 2 ;;
     --lr) LR="${2:?}"; shift 2 ;;
     --weight-decay) WEIGHT_DECAY="${2:?}"; shift 2 ;;
     --adam-beta1) ADAM_BETA1="${2:?}"; shift 2 ;;
@@ -90,6 +90,7 @@ while [[ $# -gt 0 ]]; do
     --grad-clip-norm) GRAD_CLIP_NORM="${2:?}"; shift 2 ;;
     --grad-clip-min-norm) GRAD_CLIP_MIN_NORM="${2:?}"; shift 2 ;;
     --sample-steps) SAMPLE_STEPS="${2:?}"; shift 2 ;;
+    --prediction-type) PREDICTION_TYPE="${2:?}"; shift 2 ;;
     --ema-decay) EMA_DECAY="${2:?}"; shift 2 ;;
     --ema-start-step) EMA_START_STEP="${2:?}"; shift 2 ;;
     --style-ref-count) STYLE_REF_COUNT="${2:?}"; shift 2 ;;
@@ -100,14 +101,15 @@ while [[ $# -gt 0 ]]; do
     --max-fonts) MAX_FONTS="${2:?}"; shift 2 ;;
     --image-size) IMAGE_SIZE="${2:?}"; shift 2 ;;
     --patch-size) PATCH_SIZE="${2:?}"; shift 2 ;;
+    --patch-embed-bottleneck-dim) PATCH_EMBED_BOTTLENECK_DIM="${2:?}"; shift 2 ;;
     --encoder-hidden-dim) ENCODER_HIDDEN_DIM="${2:?}"; shift 2 ;;
     --dit-hidden-dim) DIT_HIDDEN_DIM="${2:?}"; shift 2 ;;
     --dit-depth) DIT_DEPTH="${2:?}"; shift 2 ;;
     --dit-heads) DIT_HEADS="${2:?}"; shift 2 ;;
     --dit-mlp-ratio) DIT_MLP_RATIO="${2:?}"; shift 2 ;;
-    --flow-lambda|--flow-sample-steps|--refiner-mode|--detailer-base-channels|--detailer-max-channels|--detailer-bottleneck-channels|--use-cnn-perceptor|--no-use-cnn-perceptor|--perceptor-checkpoint|--perceptual-loss-lambda|--pixel-loss-lambda|--aux-loss-t-logistic-steepness|--perceptual-loss-t-midpoint|--pixel-loss-t-midpoint|--lr-decay-start-step)
+    --flow-lambda|--flow-sample-steps|--refiner-mode|--detailer-base-channels|--detailer-max-channels|--detailer-bottleneck-channels|--pixel-loss-lambda|--aux-loss-t-logistic-steepness|--pixel-loss-t-midpoint|--lr-decay-start-step)
       echo "[run_diffusion_colab] removed argument: $1" >&2
-      echo "[run_diffusion_colab] the refactored model uses JiT-style x-pred + v-loss, warmup plus constant LR by default, and no longer accepts removed decoder or auxiliary-loss args" >&2
+      echo "[run_diffusion_colab] the current model no longer accepts decoder or auxiliary-loss args" >&2
       exit 2
       ;;
     --train-sampling) TRAIN_SAMPLING="${2:?}"; shift 2 ;;
@@ -148,14 +150,13 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --seed "${SEED}"
     --font-split "${FONT_SPLIT}"
     --font-split-seed "${FONT_SPLIT_SEED}"
-    --font-train-ratio "${FONT_TRAIN_RATIO}"
+    --train-ratio "${TRAIN_RATIO}"
     --epochs "${EPOCHS}"
     --target-steps "${TARGET_STEPS}"
     --save-every-steps "${SAVE_EVERY}"
     --sample-every-steps "${SAMPLE_EVERY}"
     --log-every-steps "${LOG_EVERY}"
     --val-every-steps "${VAL_EVERY}"
-    --val-max-batches "${VAL_MAX_BATCHES}"
     --lr "${LR}"
     --weight-decay "${WEIGHT_DECAY}"
     --adam-beta1 "${ADAM_BETA1}"
@@ -176,6 +177,7 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --max-fonts "${MAX_FONTS}"
     --image-size "${IMAGE_SIZE}"
     --patch-size "${PATCH_SIZE}"
+    --patch-embed-bottleneck-dim "${PATCH_EMBED_BOTTLENECK_DIM}"
     --encoder-hidden-dim "${ENCODER_HIDDEN_DIM}"
     --dit-hidden-dim "${DIT_HIDDEN_DIM}"
     --dit-depth "${DIT_DEPTH}"
@@ -350,7 +352,7 @@ cmd_common=(
   --seed "${SEED}"
   --font-split "${FONT_SPLIT}"
   --font-split-seed "${FONT_SPLIT_SEED}"
-  --font-train-ratio "${FONT_TRAIN_RATIO}"
+  --train-ratio "${TRAIN_RATIO}"
   --lr "${LR}"
   --weight-decay "${WEIGHT_DECAY}"
   --adam-beta1 "${ADAM_BETA1}"
@@ -368,6 +370,7 @@ cmd_common=(
   --max-fonts "${MAX_FONTS}"
   --image-size "${IMAGE_SIZE}"
   --patch-size "${PATCH_SIZE}"
+  --patch-embed-bottleneck-dim "${PATCH_EMBED_BOTTLENECK_DIM}"
   --encoder-hidden-dim "${ENCODER_HIDDEN_DIM}"
   --dit-hidden-dim "${DIT_HIDDEN_DIM}"
   --dit-depth "${DIT_DEPTH}"
@@ -377,13 +380,13 @@ cmd_common=(
   --cartesian-fonts-per-batch "${CARTESIAN_FONTS_PER_BATCH}"
   --cartesian-chars-per-batch "${CARTESIAN_CHARS_PER_BATCH}"
   --sample-steps "${SAMPLE_STEPS}"
+  --prediction-type "${PREDICTION_TYPE}"
   --ema-decay "${EMA_DECAY}"
   --ema-start-step "${EMA_START_STEP}"
   --epochs "${EPOCHS}"
   --total-steps "${TARGET_STEPS}"
   --log-every-steps "${LOG_EVERY}"
   --val-every-steps "${VAL_EVERY}"
-  --val-max-batches "${VAL_MAX_BATCHES}"
   --save-every-steps "${SAVE_EVERY}"
   --sample-every-steps "${SAMPLE_EVERY}"
 )
@@ -403,8 +406,8 @@ echo "[run_diffusion_colab] PYTORCH_ALLOC_CONF=${PYTORCH_ALLOC_CONF}"
 echo "[run_diffusion_colab] resume=${RESUME_CKPT:-<none>}"
 echo "[run_diffusion_colab] batch=${BATCH_SIZE} lr=${LR} weight_decay=${WEIGHT_DECAY} adam_betas=(${ADAM_BETA1},${ADAM_BETA2}) lr_schedule=${LR_SCHEDULE} lr_warmup_steps=${LR_WARMUP_STEPS} lr_min_scale=${LR_MIN_SCALE} grad_clip_norm=${GRAD_CLIP_NORM}"
 echo "[run_diffusion_colab] style_ref_count=${STYLE_REF_COUNT} style_ref_count_min=${STYLE_REF_COUNT_MIN} style_ref_count_max=${STYLE_REF_COUNT_MAX}"
-echo "[run_diffusion_colab] patch_size=${PATCH_SIZE} image_size=${IMAGE_SIZE} sample_steps=${SAMPLE_STEPS} ode_solver=heun_last_euler loss_type=jit_v_mse ema_decay=${EMA_DECAY} ema_start_step=${EMA_START_STEP}"
-echo "[run_diffusion_colab] dit_heads=${DIT_HEADS} style_fusion=concat_cross_attention main_path=conv_patch_embed+swiglu+rms+qk_norm content_style_fusion_heads=4"
+echo "[run_diffusion_colab] patch_size=${PATCH_SIZE} patch_embed_bottleneck_dim=${PATCH_EMBED_BOTTLENECK_DIM} image_size=${IMAGE_SIZE} sample_steps=${SAMPLE_STEPS} ode_solver=heun_last_euler prediction_type=${PREDICTION_TYPE} loss_type=jit_v_mse ema_decay=${EMA_DECAY} ema_start_step=${EMA_START_STEP}"
+echo "[run_diffusion_colab] dit_heads=${DIT_HEADS} style_fusion=concat_cross_attention main_path=direct_conv_patch_embed+swiglu+rms+qk_norm content_style_fusion_heads=4"
 echo "[run_diffusion_colab] output_path=final_adaln_patch_projection encoder_hidden_dim=${ENCODER_HIDDEN_DIM} dit_hidden_dim=${DIT_HIDDEN_DIM} dit_depth=${DIT_DEPTH}"
 echo "[run_diffusion_colab] content_injection_layers=1..${DIT_DEPTH}"
 echo "[run_diffusion_colab] train_sampling=${TRAIN_SAMPLING} cartesian_fonts_per_batch=${CARTESIAN_FONTS_PER_BATCH} cartesian_chars_per_batch=${CARTESIAN_CHARS_PER_BATCH}"
