@@ -439,12 +439,11 @@ class UniqueFontBatchSampler(Sampler[List[int]]):
 
 
 class CartesianFontCharBatchSampler(Sampler[List[int]]):
-    """Yields full cartesian-product batches from a continuous shuffled sample stream.
+    """Yields bounded cartesian-product batches from shuffled font and char groups.
 
-    Raw cartesian batches are produced from shuffled font groups and char groups
-    without any duplicate padding. If a raw batch is smaller than the target
-    batch size, the sampler carries the remaining slots forward and fills them
-    with samples from subsequent shuffled cartesian passes.
+    Every emitted batch keeps the unique font and char counts within
+    fonts_per_batch/chars_per_batch. Incomplete raw cartesian groups are yielded
+    as smaller batches instead of being padded.
     """
 
     def __init__(
@@ -463,8 +462,6 @@ class CartesianFontCharBatchSampler(Sampler[List[int]]):
         self.drop_last = bool(drop_last)
         self.sample_count = len(self.dataset.samples)
         self._stream_epoch = 0
-        self._stream_batch_pos = 0
-        self._carryover_samples: List[int] = []
         self._cached_stream_epoch = -1
         self._cached_stream_batches: List[List[int]] = []
 
@@ -474,26 +471,13 @@ class CartesianFontCharBatchSampler(Sampler[List[int]]):
         return font_groups * char_groups
 
     def __iter__(self):
-        target_batch_size = self.fonts_per_batch * self.chars_per_batch
-        output_batch_count = len(self)
-        for _ in range(output_batch_count):
-            while len(self._carryover_samples) < target_batch_size:
-                self._carryover_samples.extend(self._next_raw_batch())
-            batch = self._carryover_samples[:target_batch_size]
-            self._carryover_samples = self._carryover_samples[target_batch_size:]
-            yield batch
-
-    def _next_raw_batch(self) -> List[int]:
-        while True:
-            raw_batches = self._raw_batches_for_stream_epoch(self._stream_epoch)
-            if self._stream_batch_pos >= len(raw_batches):
-                self._stream_epoch += 1
-                self._stream_batch_pos = 0
+        raw_batches = self._raw_batches_for_stream_epoch(self._stream_epoch)
+        for raw_batch in raw_batches:
+            if not raw_batch:
                 continue
-            batch = raw_batches[self._stream_batch_pos]
-            self._stream_batch_pos += 1
-            if batch:
-                return batch
+            if len(raw_batch) == self.fonts_per_batch * self.chars_per_batch or not self.drop_last:
+                yield list(raw_batch)
+        self._stream_epoch += 1
 
     def _raw_batches_for_stream_epoch(self, epoch: int) -> List[List[int]]:
         epoch = int(epoch)
