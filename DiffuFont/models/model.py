@@ -228,6 +228,7 @@ class _BaseTrainer:
         adam_beta1: float = 0.9,
         adam_beta2: float = 0.95,
         track_best_on_val: bool = False,
+        lr_batch_scale_reference: Optional[int] = None,
     ) -> None:
         self.model = model.to(device)
         self.device = device
@@ -246,6 +247,7 @@ class _BaseTrainer:
         self.track_best_on_val = bool(track_best_on_val)
         self.global_step = 0
         self.current_epoch = 0
+        self.resume_from_next_epoch = False
         self.sample_every_steps: Optional[int] = None
         self.sample_batch: Optional[Dict[str, torch.Tensor]] = None
         self.sample_batch_builder: Optional[Callable[[], Dict[str, torch.Tensor]]] = None
@@ -277,6 +279,11 @@ class _BaseTrainer:
         if self.lr_schedule not in {"constant", "cosine"}:
             raise ValueError(f"lr_schedule must be 'constant' or 'cosine', got {lr_schedule!r}")
         self.lr_min_scale = float(min(max(0.0, float(lr_min_scale)), 1.0))
+        self.lr_batch_scale_reference = (
+            None
+            if lr_batch_scale_reference is None or int(lr_batch_scale_reference) <= 0
+            else int(lr_batch_scale_reference)
+        )
 
     def _lr_scale_for_step(self, step: int) -> float:
         if self.lr_schedule == "constant":
@@ -296,10 +303,21 @@ class _BaseTrainer:
             decay_start_step=self.lr_decay_start_step,
         )
 
-    def _set_learning_rate_for_step(self, step: int) -> None:
+    def _set_learning_rate_for_step(self, step: int, *, batch_lr_scale: float = 1.0) -> None:
         lr_scale = self._lr_scale_for_step(step)
+        lr_scale *= float(batch_lr_scale)
         for group, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
             group["lr"] = float(base_lr) * float(lr_scale)
+
+    def _batch_lr_scale(self, batch: Dict[str, torch.Tensor]) -> float:
+        if self.lr_batch_scale_reference is None:
+            return 1.0
+        target = batch.get("target")
+        if target is None:
+            return 1.0
+        current = int(target.size(0))
+        reference = max(1, int(self.lr_batch_scale_reference))
+        return min(1.0, max(0.0, float(current) / float(reference)))
 
     def _grad_clip_value_for_step(self, step: int) -> Optional[float]:
         if self.grad_clip_norm is None:
@@ -394,8 +412,10 @@ class _BaseTrainer:
             self.val_log_file.write_text("", encoding="utf-8")
 
         stop_training = False
-        for epoch in range(1, int(epochs) + 1):
+        start_epoch = max(1, int(self.current_epoch) + (1 if self.resume_from_next_epoch else 0))
+        for epoch in range(start_epoch, int(epochs) + 1):
             self.current_epoch = epoch
+            self.resume_from_next_epoch = False
             self.on_epoch_start()
             for batch in dataloader:
                 if self.global_step >= self.total_steps:
@@ -435,39 +455,13 @@ class _BaseTrainer:
                         "epoch": int(self.current_epoch),
                         **val_metrics,
                     }
-                    is_best = False
-                    best_metric_key = "loss"
-                    if self.track_best_on_val and best_metric_key in val_metrics:
-                        current_val_loss = float(val_metrics[best_metric_key])
-                        if self.best_val_loss is None or current_val_loss < self.best_val_loss:
-                            self.best_val_loss = current_val_loss
-                            is_best = True
-                            if self.checkpoint_dir is not None:
-                                best_path = self.checkpoint_dir / "best.pt"
-                                self.save(best_path)
-                                (self.checkpoint_dir / "best_val_metrics.json").write_text(
-                                    json.dumps(
-                                        {
-                                            "step": int(self.global_step),
-                                            "epoch": int(self.current_epoch),
-                                            "best_metric_key": best_metric_key,
-                                            **{k: float(v) for k, v in val_metrics.items()},
-                                        },
-                                        ensure_ascii=False,
-                                        indent=2,
-                                        sort_keys=True,
-                                    ),
-                                    encoding="utf-8",
-                                )
-                    val_row["is_best"] = int(is_best)
                     self._write_val_log(val_row)
                     val_metric_str = " ".join(
                         f"{key}={value:.4f}"
                         for key, value in val_row.items()
-                        if key not in {"step", "epoch", "is_best"}
+                        if key not in {"step", "epoch"}
                     )
-                    best_suffix = " is_best=1" if is_best else ""
-                    print(f"[val] step={self.global_step} epoch={self.current_epoch} {val_metric_str}{best_suffix}", flush=True)
+                    print(f"[val] step={self.global_step} epoch={self.current_epoch} {val_metric_str}", flush=True)
 
                 if (
                     self.sample_every_steps is not None
@@ -481,16 +475,13 @@ class _BaseTrainer:
                     if sample_batch is not None:
                         self.sample_and_save(sample_batch, self.sample_dir)
 
-                if (
-                    self.save_every_steps is not None
-                    and self.checkpoint_dir is not None
-                    and self.global_step % self.save_every_steps == 0
-                ):
-                    self.save(self.checkpoint_dir / f"ckpt_step_{self.global_step}.pt")
                 if self.global_step >= self.total_steps:
                     stop_training = True
                     break
             self.on_epoch_end()
+            if self.checkpoint_dir is not None:
+                self.save(self.checkpoint_dir / f"ckpt_epoch_{self.current_epoch}.pt", epoch_completed=True)
+                self.save(self.checkpoint_dir / "latest.pt", epoch_completed=True)
             if stop_training:
                 print(f"[fit] reached total_steps={self.total_steps}, stopping at epoch={epoch}")
                 return
@@ -498,7 +489,7 @@ class _BaseTrainer:
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
         raise NotImplementedError
 
-    def save(self, path: str | Path) -> None:
+    def save(self, path: str | Path, *, epoch_completed: bool = False) -> None:
         raise NotImplementedError
 
     def load(self, path: str | Path) -> None:
@@ -553,6 +544,7 @@ class XPredTrainer(_BaseTrainer):
         weight_decay: float = 0.0,
         adam_beta1: float = 0.9,
         adam_beta2: float = 0.95,
+        lr_batch_scale_reference: Optional[int] = None,
     ) -> None:
         super().__init__(
             model,
@@ -572,7 +564,8 @@ class XPredTrainer(_BaseTrainer):
             weight_decay=weight_decay,
             adam_beta1=adam_beta1,
             adam_beta2=adam_beta2,
-            track_best_on_val=True,
+            track_best_on_val=False,
+            lr_batch_scale_reference=lr_batch_scale_reference,
         )
         self.p_mean = float(p_mean)
         self.p_std = float(p_std)
@@ -698,7 +691,9 @@ class XPredTrainer(_BaseTrainer):
         content_index: torch.Tensor,
         style: torch.Tensor,
         style_index: torch.Tensor,
-    ) -> torch.Tensor:
+        *,
+        return_unique_content_tokens: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         unique_content_tokens = model.encode_content_tokens(content)
         content_tokens = self._expand_condition_batch(
             unique_content_tokens,
@@ -723,12 +718,15 @@ class XPredTrainer(_BaseTrainer):
             style_index,
             average_grad_by_reuse=True,
         )
-        return model.build_conditioning_tokens(
+        style_tokens = model.build_style_condition_tokens(
             content_tokens,
             content_query=content_query,
             style_key=expanded_style_key,
             style_value=expanded_style_value,
         )
+        if return_unique_content_tokens:
+            return content_tokens, style_tokens, unique_content_tokens
+        return content_tokens, style_tokens
 
     def _prepare_denoising_targets(
         self,
@@ -778,17 +776,27 @@ class XPredTrainer(_BaseTrainer):
         target_velocity: torch.Tensor,
         x1: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
-        conditioning_tokens = self._encode_conditions(
+        conditioning_outputs = self._encode_conditions(
             model,
             content,
             content_index,
             style,
             style_index,
+            return_unique_content_tokens=True,
+        )
+        content_tokens, style_tokens, unique_content_tokens = conditioning_outputs
+        backbone_unique_content_hidden_cache = model.precompute_backbone_unique_content_hidden_cache(
+            unique_content_tokens,
+            device=self.device,
+            dtype=content_tokens.dtype,
         )
         prediction = model.predict(
             xt,
             timesteps,
-            conditioning_tokens=conditioning_tokens,
+            content_tokens=content_tokens,
+            style_tokens=style_tokens,
+            backbone_unique_content_hidden_cache=backbone_unique_content_hidden_cache,
+            content_index=content_index,
         )
         pred_x, pred_velocity = self._prediction_to_x_and_velocity(
             prediction,
@@ -848,12 +856,15 @@ class XPredTrainer(_BaseTrainer):
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
         self.model.train()
         next_step = self.global_step + 1
-        self._set_learning_rate_for_step(next_step)
+        lr_batch_scale = self._batch_lr_scale(batch)
+        self._set_learning_rate_for_step(next_step, batch_lr_scale=lr_batch_scale)
         self.optimizer.zero_grad(set_to_none=True)
         metrics = self._compute_losses(
             batch,
             step=next_step,
         )
+        metrics["lr_batch_scale"] = float(lr_batch_scale)
+        metrics["target_batch_size"] = float(batch["target"].size(0))
         metrics["loss"].backward()
         metrics.update(self._apply_grad_clip(step=next_step))
         self.optimizer.step()
@@ -901,7 +912,7 @@ class XPredTrainer(_BaseTrainer):
         )
         step_count = self.sample_steps if num_inference_steps is None else max(1, int(num_inference_steps))
         with self._autocast_context():
-            conditioning_tokens = self._encode_conditions(
+            content_tokens, style_tokens = self._encode_conditions(
                 sample_model,
                 content,
                 content_index,
@@ -909,21 +920,24 @@ class XPredTrainer(_BaseTrainer):
                 style_index,
             )
             backbone_condition_hidden_cache = sample_model.precompute_backbone_condition_hidden_cache(
-                conditioning_tokens,
+                content_tokens,
+                style_tokens,
                 device=self.device,
-                dtype=conditioning_tokens.dtype,
+                dtype=content_tokens.dtype,
             )
             output_condition_hidden = sample_model.precompute_output_condition_hidden(
-                conditioning_tokens,
+                content_tokens,
+                style_tokens,
                 device=self.device,
-                dtype=conditioning_tokens.dtype,
+                dtype=content_tokens.dtype,
             )
 
             def predict_v(x_t: torch.Tensor, t_vec: torch.Tensor) -> torch.Tensor:
                 prediction = sample_model.predict(
                     x_t,
                     t_vec,
-                    conditioning_tokens=conditioning_tokens,
+                    content_tokens=content_tokens,
+                    style_tokens=style_tokens,
                     backbone_condition_hidden_cache=backbone_condition_hidden_cache,
                     output_condition_hidden=output_condition_hidden,
                 )
@@ -951,7 +965,7 @@ class XPredTrainer(_BaseTrainer):
 
         return sample.clamp(-1.0, 1.0).float()
 
-    def save(self, path: str | Path) -> None:
+    def save(self, path: str | Path, *, epoch_completed: bool = False) -> None:
         torch.save(
             {
                 "stage": "xpred",
@@ -981,6 +995,7 @@ class XPredTrainer(_BaseTrainer):
                 },
                 "step": int(self.global_step),
                 "epoch": int(self.current_epoch),
+                "epoch_completed": bool(epoch_completed),
             },
             Path(path),
         )
@@ -1052,6 +1067,7 @@ class XPredTrainer(_BaseTrainer):
         ema_state = checkpoint.get("ema_model_state")
         self.global_step = resume_step
         self.current_epoch = int(checkpoint.get("epoch", 0))
+        self.resume_from_next_epoch = True
         if self.ema_enabled and self.global_step >= self.ema_start_step:
             self._ensure_ema_model()
             if isinstance(ema_state, dict) and self.ema_model is not None:

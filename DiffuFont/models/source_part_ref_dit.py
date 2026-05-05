@@ -33,9 +33,12 @@ class ResDownBlock(nn.Module):
         self,
         in_channels: int,
         out_channels: int,
+        *,
+        use_shortcut: bool = True,
     ) -> None:
         self.in_channels = int(in_channels)
         self.out_channels = int(out_channels)
+        self.use_shortcut = bool(use_shortcut)
         super().__init__()
         self.main = nn.Sequential(
             nn.GroupNorm(_group_count(self.in_channels), self.in_channels),
@@ -46,13 +49,20 @@ class ResDownBlock(nn.Module):
             nn.Conv2d(self.out_channels, self.out_channels, kernel_size=3, padding=1, bias=False),
             nn.AvgPool2d(2),
         )
-        self.shortcut = nn.Sequential(
-            nn.AvgPool2d(2),
-            nn.Conv2d(self.in_channels, self.out_channels, kernel_size=1, bias=False),
+        self.shortcut = (
+            nn.Sequential(
+                nn.AvgPool2d(2),
+                nn.Conv2d(self.in_channels, self.out_channels, kernel_size=1, bias=False),
+            )
+            if self.use_shortcut
+            else None
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.main(x) + self.shortcut(x)
+        main = self.main(x)
+        if self.shortcut is None:
+            return main
+        return main + self.shortcut(x)
 
 
 class CustomResidualGlyphEncoder(nn.Module):
@@ -68,6 +78,7 @@ class CustomResidualGlyphEncoder(nn.Module):
         base_channels: int = 64,
         max_channels: int = 256,
         block_depth: int = 3,
+        use_shortcut: bool = True,
     ) -> None:
         super().__init__()
         if int(in_channels) != 3:
@@ -93,11 +104,12 @@ class CustomResidualGlyphEncoder(nn.Module):
         self.block_depth = 3
         self.downsample_depth = 3
         self.local_hidden_dim = self.hidden_dim
+        self.use_shortcut = bool(use_shortcut)
         self.blocks = nn.ModuleList(
             (
-                ResDownBlock(3, 64),
-                ResDownBlock(64, 128),
-                ResDownBlock(128, 256),
+                ResDownBlock(3, 64, use_shortcut=self.use_shortcut),
+                ResDownBlock(64, 128, use_shortcut=self.use_shortcut),
+                ResDownBlock(128, 256, use_shortcut=self.use_shortcut),
             )
         )
         self.tail = nn.Sequential(
@@ -145,8 +157,6 @@ class ContentStyleCrossAttention(nn.Module):
         if self.num_heads <= 0 or (self.embed_dim % self.num_heads) != 0:
             raise ValueError(f"invalid attention config embed_dim={embed_dim} num_heads={num_heads}")
 
-        self.query_norm = nn.LayerNorm(self.embed_dim, elementwise_affine=False, eps=1e-6)
-        self.token_norm = nn.LayerNorm(self.embed_dim, elementwise_affine=False, eps=1e-6)
         self.attn = SDPAAttention(self.embed_dim, self.num_heads)
 
     def _validate_style_inputs(self, style_tokens: torch.Tensor) -> None:
@@ -159,8 +169,7 @@ class ContentStyleCrossAttention(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         self._validate_style_inputs(style_tokens)
         batch_size, num_refs, tokens_per_ref, hidden_dim = style_tokens.shape
-        normed_tokens = self.token_norm(style_tokens)
-        concat_tokens = normed_tokens.reshape(batch_size, num_refs * tokens_per_ref, hidden_dim)
+        concat_tokens = style_tokens.reshape(batch_size, num_refs * tokens_per_ref, hidden_dim)
         key, value = self.attn.project_key_value(concat_tokens, concat_tokens)
         concat_len = int(key.size(2))
         return (
@@ -171,7 +180,7 @@ class ContentStyleCrossAttention(nn.Module):
     def project_content_query(self, content_tokens: torch.Tensor) -> torch.Tensor:
         if content_tokens.dim() != 3:
             raise ValueError(f"content_tokens must be 3D [B, T, D], got {tuple(content_tokens.shape)}")
-        return self.attn.project_query(self.query_norm(content_tokens))
+        return self.attn.project_query(content_tokens)
 
     def fuse_content_style_tokens_from_projected(
         self,
@@ -233,8 +242,7 @@ class ContentStyleCrossAttention(nn.Module):
             flat_style_value,
             need_weights=False,
         )
-        style_context = style_context.view(batch_size, query_len, self.embed_dim)
-        return torch.cat([content_tokens, style_context], dim=-1).contiguous()
+        return style_context.view(batch_size, query_len, self.embed_dim).contiguous()
 
 
 class SourcePartRefDiT(nn.Module):
@@ -250,6 +258,8 @@ class SourcePartRefDiT(nn.Module):
         encoder_hidden_dim: int = 256,
         content_encoder_block_depth: int = 3,
         style_encoder_block_depth: int = 3,
+        content_encoder_use_shortcut: bool = True,
+        style_encoder_use_shortcut: bool = True,
         dit_hidden_dim: int = 256,
         dit_depth: int = 12,
         dit_heads: int = 8,
@@ -274,6 +284,8 @@ class SourcePartRefDiT(nn.Module):
         self.encoder_hidden_dim = int(encoder_hidden_dim)
         self.content_encoder_block_depth = max(1, int(content_encoder_block_depth))
         self.style_encoder_block_depth = max(1, int(style_encoder_block_depth))
+        self.content_encoder_use_shortcut = bool(content_encoder_use_shortcut)
+        self.style_encoder_use_shortcut = bool(style_encoder_use_shortcut)
         self.dit_hidden_dim = int(dit_hidden_dim)
         self.dit_depth = int(dit_depth)
         self.dit_heads = int(dit_heads)
@@ -312,6 +324,7 @@ class SourcePartRefDiT(nn.Module):
             output_grid_size=self.patch_grid_size,
             hidden_dim=self.encoder_hidden_dim,
             block_depth=self.content_encoder_block_depth,
+            use_shortcut=self.content_encoder_use_shortcut,
         )
         self.style_encoder = StyleEncoder(
             in_channels=self.in_channels,
@@ -319,6 +332,7 @@ class SourcePartRefDiT(nn.Module):
             output_grid_size=self.patch_grid_size,
             hidden_dim=self.encoder_hidden_dim,
             block_depth=self.style_encoder_block_depth,
+            use_shortcut=self.style_encoder_use_shortcut,
         )
         self.style_token_hidden_dim = int(self.style_encoder.local_hidden_dim)
         self.style_token_proj = (
@@ -347,14 +361,6 @@ class SourcePartRefDiT(nn.Module):
         )
         self.output_norm = _build_norm(self.dit_hidden_dim, norm_variant=self.norm_variant)
         self.output_condition_half_dim = self.encoder_hidden_dim
-        self.output_content_condition_norm = _build_norm(
-            self.output_condition_half_dim,
-            norm_variant=self.norm_variant,
-        )
-        self.output_style_condition_norm = _build_norm(
-            self.output_condition_half_dim,
-            norm_variant=self.norm_variant,
-        )
         self.output_content_condition_to_hidden = nn.Linear(
             self.output_condition_half_dim,
             self.dit_hidden_dim,
@@ -414,6 +420,8 @@ class SourcePartRefDiT(nn.Module):
             "encoder_hidden_dim": int(self.encoder_hidden_dim),
             "content_encoder_block_depth": int(self.content_encoder_block_depth),
             "style_encoder_block_depth": int(self.style_encoder_block_depth),
+            "content_encoder_use_shortcut": bool(self.content_encoder_use_shortcut),
+            "style_encoder_use_shortcut": bool(self.style_encoder_use_shortcut),
             "dit_hidden_dim": int(self.dit_hidden_dim),
             "dit_depth": int(self.dit_depth),
             "dit_heads": int(self.dit_heads),
@@ -459,7 +467,7 @@ class SourcePartRefDiT(nn.Module):
     ) -> torch.Tensor:
         return self.content_style_attn.project_content_query(content_tokens)
 
-    def build_conditioning_tokens(
+    def build_style_condition_tokens(
         self,
         content_tokens: torch.Tensor,
         style_token_bank: Optional[torch.Tensor] = None,
@@ -483,46 +491,65 @@ class SourcePartRefDiT(nn.Module):
 
     def precompute_backbone_condition_hidden_cache(
         self,
-        conditioning_tokens: torch.Tensor,
+        content_tokens: torch.Tensor,
+        style_tokens: torch.Tensor,
         *,
         device: torch.device,
         dtype: torch.dtype,
     ) -> list[torch.Tensor | None]:
         return self.backbone.build_condition_hidden_cache(
-            conditioning_tokens,
-            batch_size=int(conditioning_tokens.size(0)),
-            token_count=int(conditioning_tokens.size(1)),
+            content_tokens,
+            style_tokens,
+            batch_size=int(content_tokens.size(0)),
+            token_count=int(content_tokens.size(1)),
+            device=device,
+            dtype=dtype,
+        )
+
+    def precompute_backbone_unique_content_hidden_cache(
+        self,
+        unique_content_tokens: torch.Tensor,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> list[torch.Tensor | None]:
+        return self.backbone.build_unique_content_hidden_cache(
+            unique_content_tokens,
+            token_count=self.num_patches,
             device=device,
             dtype=dtype,
         )
 
     def precompute_output_condition_hidden(
         self,
-        conditioning_tokens: torch.Tensor,
+        content_tokens: torch.Tensor,
+        style_tokens: torch.Tensor,
         *,
         device: torch.device,
         dtype: torch.dtype,
     ) -> torch.Tensor:
-        expected_condition_shape = (conditioning_tokens.size(0), self.num_patches, self.conditioning_dim)
-        if conditioning_tokens.shape != expected_condition_shape:
+        expected_part_shape = (content_tokens.size(0), self.num_patches, self.output_condition_half_dim)
+        if content_tokens.shape != expected_part_shape:
             raise ValueError(
-                "conditioning token shape mismatch for final head: "
-                f"expected {expected_condition_shape}, got {tuple(conditioning_tokens.shape)}"
+                "content token shape mismatch for final head: "
+                f"expected {expected_part_shape}, got {tuple(content_tokens.shape)}"
             )
-        conditioning_tokens = conditioning_tokens.to(device=device, dtype=dtype)
-        content_tokens, style_tokens = conditioning_tokens.split(self.output_condition_half_dim, dim=-1)
-        return self.output_content_condition_to_hidden(
-            self.output_content_condition_norm(content_tokens)
-        ) + self.output_style_condition_to_hidden(
-            self.output_style_condition_norm(style_tokens)
-        )
+        if style_tokens.shape != expected_part_shape:
+            raise ValueError(
+                "style token shape mismatch for final head: "
+                f"expected {expected_part_shape}, got {tuple(style_tokens.shape)}"
+            )
+        content_tokens = content_tokens.to(device=device, dtype=dtype)
+        style_tokens = style_tokens.to(device=device, dtype=dtype)
+        return self.output_content_condition_to_hidden(content_tokens) + self.output_style_condition_to_hidden(style_tokens)
 
     def decode_patch_tokens(
         self,
         patch_tokens: torch.Tensor,
         *,
         timesteps: torch.Tensor,
-        conditioning_tokens: torch.Tensor,
+        content_tokens: torch.Tensor,
+        style_tokens: torch.Tensor,
         output_condition_hidden: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if patch_tokens.dim() != 3:
@@ -532,11 +559,16 @@ class SourcePartRefDiT(nn.Module):
                 "patch token shape mismatch: "
                 f"expected (*, {self.num_patches}, {self.dit_hidden_dim}), got {tuple(patch_tokens.shape)}"
             )
-        expected_condition_shape = (patch_tokens.size(0), self.num_patches, self.conditioning_dim)
-        if conditioning_tokens.shape != expected_condition_shape:
+        expected_part_shape = (patch_tokens.size(0), self.num_patches, self.output_condition_half_dim)
+        if content_tokens.shape != expected_part_shape:
             raise ValueError(
-                "conditioning token shape mismatch for final head: "
-                f"expected {expected_condition_shape}, got {tuple(conditioning_tokens.shape)}"
+                "content token shape mismatch for final head: "
+                f"expected {expected_part_shape}, got {tuple(content_tokens.shape)}"
+            )
+        if style_tokens.shape != expected_part_shape:
+            raise ValueError(
+                "style token shape mismatch for final head: "
+                f"expected {expected_part_shape}, got {tuple(style_tokens.shape)}"
             )
 
         time_hidden = self.output_time_to_hidden(
@@ -546,14 +578,10 @@ class SourcePartRefDiT(nn.Module):
             )
         ).unsqueeze(1)
         if output_condition_hidden is None:
-            conditioning_tokens = conditioning_tokens.to(device=patch_tokens.device, dtype=patch_tokens.dtype)
-            content_tokens, style_tokens = conditioning_tokens.split(self.output_condition_half_dim, dim=-1)
-            content_hidden = self.output_content_condition_to_hidden(
-                self.output_content_condition_norm(content_tokens)
-            )
-            style_hidden = self.output_style_condition_to_hidden(
-                self.output_style_condition_norm(style_tokens)
-            )
+            content_tokens = content_tokens.to(device=patch_tokens.device, dtype=patch_tokens.dtype)
+            style_tokens = style_tokens.to(device=patch_tokens.device, dtype=patch_tokens.dtype)
+            content_hidden = self.output_content_condition_to_hidden(content_tokens)
+            style_hidden = self.output_style_condition_to_hidden(style_tokens)
             joint_hidden = time_hidden + content_hidden + style_hidden
         elif output_condition_hidden.shape != (patch_tokens.size(0), self.num_patches, self.dit_hidden_dim):
             raise ValueError(
@@ -584,20 +612,27 @@ class SourcePartRefDiT(nn.Module):
         x_t_image: torch.Tensor,
         timesteps: torch.Tensor,
         *,
-        conditioning_tokens: torch.Tensor,
+        content_tokens: torch.Tensor,
+        style_tokens: torch.Tensor,
         backbone_condition_hidden_cache: Optional[list[torch.Tensor | None]] = None,
+        backbone_unique_content_hidden_cache: Optional[list[torch.Tensor | None]] = None,
+        content_index: Optional[torch.Tensor] = None,
         output_condition_hidden: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         patch_tokens = self.backbone(
             x_t_image,
             timesteps,
-            conditioning_tokens=conditioning_tokens,
+            content_tokens=content_tokens,
+            style_tokens=style_tokens,
             condition_hidden_cache=backbone_condition_hidden_cache,
+            unique_content_hidden_cache=backbone_unique_content_hidden_cache,
+            content_index=content_index,
         )
         return self.decode_patch_tokens(
             patch_tokens,
             timesteps=timesteps,
-            conditioning_tokens=conditioning_tokens,
+            content_tokens=content_tokens,
+            style_tokens=style_tokens,
             output_condition_hidden=output_condition_hidden,
         )
 
@@ -611,12 +646,13 @@ class SourcePartRefDiT(nn.Module):
     ) -> torch.Tensor:
         content_tokens = self.encode_content_tokens(content_img)
         style_token_bank = self.encode_style_token_bank(style_img)
-        conditioning_tokens = self.build_conditioning_tokens(
+        style_tokens = self.build_style_condition_tokens(
             content_tokens,
             style_token_bank,
         )
         return self.predict(
             x_t_image,
             timesteps,
-            conditioning_tokens=conditioning_tokens,
+            content_tokens=content_tokens,
+            style_tokens=style_tokens,
         )

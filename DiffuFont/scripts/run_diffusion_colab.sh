@@ -25,7 +25,7 @@ SAVE_EVERY=5000
 SAMPLE_EVERY=300
 LOG_EVERY=100
 VAL_EVERY=100
-LR="1e-4"
+LR="2e-4"
 WEIGHT_DECAY="0.0"
 ADAM_BETA1="0.9"
 ADAM_BETA2="0.95"
@@ -45,9 +45,10 @@ IMAGE_SIZE=128
 
 PATCH_SIZE=8
 PATCH_EMBED_BOTTLENECK_DIM=0
+DISABLE_ENCODER_SHORTCUT=0
 ENCODER_HIDDEN_DIM=256
-DIT_HIDDEN_DIM=256
-DIT_DEPTH=12
+DIT_HIDDEN_DIM=512
+DIT_DEPTH=8
 DIT_HEADS=8
 DIT_MLP_RATIO="4.0"
 
@@ -56,8 +57,8 @@ PREDICTION_TYPE="x"
 EMA_DECAY="0.9999"
 EMA_START_STEP="40000"
 TRAIN_SAMPLING="cartesian_font_char"
-CARTESIAN_FONTS_PER_BATCH=64
-CARTESIAN_CHARS_PER_BATCH=6
+CARTESIAN_FONTS_PER_BATCH=16
+CARTESIAN_CHARS_PER_BATCH=24
 
 EXTRA_TRAIN_ARGS=()
 
@@ -102,6 +103,7 @@ while [[ $# -gt 0 ]]; do
     --image-size) IMAGE_SIZE="${2:?}"; shift 2 ;;
     --patch-size) PATCH_SIZE="${2:?}"; shift 2 ;;
     --patch-embed-bottleneck-dim) PATCH_EMBED_BOTTLENECK_DIM="${2:?}"; shift 2 ;;
+    --disable-encoder-shortcut) DISABLE_ENCODER_SHORTCUT=1; shift ;;
     --encoder-hidden-dim) ENCODER_HIDDEN_DIM="${2:?}"; shift 2 ;;
     --dit-hidden-dim) DIT_HIDDEN_DIM="${2:?}"; shift 2 ;;
     --dit-depth) DIT_DEPTH="${2:?}"; shift 2 ;;
@@ -187,6 +189,9 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --cartesian-fonts-per-batch "${CARTESIAN_FONTS_PER_BATCH}"
     --cartesian-chars-per-batch "${CARTESIAN_CHARS_PER_BATCH}"
   )
+  if [[ "${DISABLE_ENCODER_SHORTCUT}" == "1" ]]; then
+    daemon_args+=(--disable-encoder-shortcut)
+  fi
   if [[ -n "${RESUME_CKPT}" ]]; then
     daemon_args+=(--resume "${RESUME_CKPT}")
   fi
@@ -391,6 +396,9 @@ cmd_common=(
   --sample-every-steps "${SAMPLE_EVERY}"
 )
 
+if [[ "${DISABLE_ENCODER_SHORTCUT}" == "1" ]]; then
+  cmd_common+=(--disable-encoder-shortcut)
+fi
 if [[ -n "${RESUME_CKPT}" ]]; then
   cmd_common+=(--resume "${RESUME_CKPT}")
 fi
@@ -408,7 +416,7 @@ echo "[run_diffusion_colab] batch=${BATCH_SIZE} lr=${LR} weight_decay=${WEIGHT_D
 echo "[run_diffusion_colab] style_ref_count=${STYLE_REF_COUNT} style_ref_count_min=${STYLE_REF_COUNT_MIN} style_ref_count_max=${STYLE_REF_COUNT_MAX}"
 echo "[run_diffusion_colab] patch_size=${PATCH_SIZE} patch_embed_bottleneck_dim=${PATCH_EMBED_BOTTLENECK_DIM} image_size=${IMAGE_SIZE} sample_steps=${SAMPLE_STEPS} ode_solver=heun_last_euler prediction_type=${PREDICTION_TYPE} loss_type=jit_v_mse ema_decay=${EMA_DECAY} ema_start_step=${EMA_START_STEP}"
 echo "[run_diffusion_colab] dit_heads=${DIT_HEADS} style_fusion=concat_cross_attention main_path=direct_conv_patch_embed+swiglu+rms+qk_norm content_style_fusion_heads=4"
-echo "[run_diffusion_colab] output_path=final_adaln_patch_projection encoder_hidden_dim=${ENCODER_HIDDEN_DIM} dit_hidden_dim=${DIT_HIDDEN_DIM} dit_depth=${DIT_DEPTH}"
+echo "[run_diffusion_colab] output_path=final_adaln_patch_projection encoder_hidden_dim=${ENCODER_HIDDEN_DIM} encoder_shortcut_enabled=$([[ "${DISABLE_ENCODER_SHORTCUT}" == "1" ]] && echo 0 || echo 1) dit_hidden_dim=${DIT_HIDDEN_DIM} dit_depth=${DIT_DEPTH}"
 echo "[run_diffusion_colab] content_injection_layers=1..${DIT_DEPTH}"
 echo "[run_diffusion_colab] train_sampling=${TRAIN_SAMPLING} cartesian_fonts_per_batch=${CARTESIAN_FONTS_PER_BATCH} cartesian_chars_per_batch=${CARTESIAN_CHARS_PER_BATCH}"
 

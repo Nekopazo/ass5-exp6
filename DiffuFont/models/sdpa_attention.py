@@ -16,10 +16,14 @@ class _HeadRMSNorm(nn.Module):
         super().__init__()
         self.eps = float(eps)
         self.hidden_dim = int(hidden_dim)
+        self.weight = nn.Parameter(torch.ones(hidden_dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        rms = torch.mean(x.pow(2), dim=-1, keepdim=True).add(self.eps).sqrt()
-        return x / rms
+        input_dtype = x.dtype
+        hidden_states = x.to(torch.float32)
+        variance = hidden_states.pow(2).mean(dim=-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.eps)
+        return (hidden_states * self.weight).to(input_dtype)
 
 
 def enable_torch_sdpa_backends() -> None:

@@ -488,6 +488,8 @@ def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
         patch_size=int(args.patch_size),
         patch_embed_bottleneck_dim=int(args.patch_embed_bottleneck_dim),
         encoder_hidden_dim=int(args.encoder_hidden_dim),
+        content_encoder_use_shortcut=not bool(args.disable_encoder_shortcut),
+        style_encoder_use_shortcut=not bool(args.disable_encoder_shortcut),
         dit_hidden_dim=int(args.dit_hidden_dim),
         dit_depth=int(args.dit_depth),
         dit_heads=int(args.dit_heads),
@@ -519,6 +521,7 @@ def main() -> None:
 
     parser.add_argument("--patch-size", type=int, required=True)
     parser.add_argument("--patch-embed-bottleneck-dim", type=int, default=0)
+    parser.add_argument("--disable-encoder-shortcut", action="store_true")
     parser.add_argument("--encoder-hidden-dim", type=int, required=True)
     parser.add_argument("--dit-hidden-dim", type=int, required=True)
     parser.add_argument("--dit-depth", type=int, required=True)
@@ -658,12 +661,18 @@ def main() -> None:
             flush=True,
         )
     if str(args.train_sampling) == "cartesian_font_char":
+        cartesian_max_batch = int(args.cartesian_fonts_per_batch) * int(args.cartesian_chars_per_batch)
         print(
             "[train] using cartesian font-char sampler "
             f"fonts_per_batch={int(args.cartesian_fonts_per_batch)} "
             f"chars_per_batch={int(args.cartesian_chars_per_batch)} "
-            f"effective_batch={int(args.cartesian_fonts_per_batch) * int(args.cartesian_chars_per_batch)} "
+            f"effective_batch={cartesian_max_batch} "
             "carry_over_partial_batches=1 duplicate_padding=0"
+        )
+        print(
+            "[train] cartesian partial batches scale lr by "
+            f"current_batch/{cartesian_max_batch}",
+            flush=True,
         )
 
     resolved_epochs = max(1, int(args.epochs))
@@ -678,6 +687,11 @@ def main() -> None:
         weight_decay=float(args.weight_decay),
         adam_beta1=float(args.adam_beta1),
         adam_beta2=float(args.adam_beta2),
+        lr_batch_scale_reference=(
+            int(args.cartesian_fonts_per_batch) * int(args.cartesian_chars_per_batch)
+            if str(args.train_sampling) == "cartesian_font_char"
+            else None
+        ),
         total_steps=total_steps,
         lr_schedule=str(args.lr_schedule),
         lr_warmup_steps=int(args.lr_warmup_steps),
@@ -733,6 +747,11 @@ def main() -> None:
     run_config["lr_min_scale"] = float(args.lr_min_scale)
     run_config["weight_decay"] = float(args.weight_decay)
     run_config["adam_betas"] = [float(args.adam_beta1), float(args.adam_beta2)]
+    run_config["lr_batch_scale_reference"] = (
+        int(args.cartesian_fonts_per_batch) * int(args.cartesian_chars_per_batch)
+        if str(args.train_sampling) == "cartesian_font_char"
+        else None
+    )
     run_config["p_mean"] = float(args.p_mean)
     run_config["p_std"] = float(args.p_std)
     run_config["t_eps"] = float(args.t_eps)
@@ -742,6 +761,8 @@ def main() -> None:
     run_config["ode_solver"] = "heun_last_euler"
     run_config["content_injection_layers"] = list(range(1, int(args.dit_depth) + 1))
     run_config["content_style_fusion_heads"] = 4
+    run_config["content_encoder_use_shortcut"] = not bool(args.disable_encoder_shortcut)
+    run_config["style_encoder_use_shortcut"] = not bool(args.disable_encoder_shortcut)
     run_config["grad_clip_min_norm"] = None if args.grad_clip_min_norm is None else float(args.grad_clip_min_norm)
 
     (args.save_dir / "train_config.json").write_text(
