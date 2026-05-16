@@ -16,7 +16,7 @@ from .diffusion_transformer_backbone import (
     _build_zero_linear,
     modulate,
 )
-from .sdpa_attention import SDPAAttention
+from .sdpa_attention import SDPAAttention, VisionRotaryEmbeddingFast
 
 
 def _group_count(channels: int) -> int:
@@ -148,16 +148,29 @@ class StyleEncoder(CustomResidualGlyphEncoder):
 class ContentStyleCrossAttention(nn.Module):
     """External content<-style fusion utilities for concat cross-attention."""
 
-    def __init__(self, embed_dim: int, num_heads: int) -> None:
+    def __init__(self, embed_dim: int, num_heads: int, *, grid_size: int) -> None:
         super().__init__()
         self.embed_dim = int(embed_dim)
         self.num_heads = int(num_heads)
+        self.grid_size = int(grid_size)
         if self.embed_dim <= 0:
             raise ValueError(f"embed_dim must be positive, got {embed_dim}")
         if self.num_heads <= 0 or (self.embed_dim % self.num_heads) != 0:
             raise ValueError(f"invalid attention config embed_dim={embed_dim} num_heads={num_heads}")
+        if self.grid_size <= 0:
+            raise ValueError(f"grid_size must be positive, got {grid_size}")
+        head_dim = self.embed_dim // self.num_heads
+        if head_dim % 4 != 0:
+            raise ValueError(
+                "JiT-style 2D RoPE requires cross-attention head dim divisible by 4, "
+                f"got embed_dim={embed_dim} num_heads={num_heads}"
+            )
 
         self.attn = SDPAAttention(self.embed_dim, self.num_heads)
+        self.rope = VisionRotaryEmbeddingFast(
+            dim=head_dim // 2,
+            pt_seq_len=self.grid_size,
+        )
 
     def _validate_style_inputs(self, style_tokens: torch.Tensor) -> None:
         if style_tokens.dim() != 4:
@@ -171,6 +184,7 @@ class ContentStyleCrossAttention(nn.Module):
         batch_size, num_refs, tokens_per_ref, hidden_dim = style_tokens.shape
         concat_tokens = style_tokens.reshape(batch_size, num_refs * tokens_per_ref, hidden_dim)
         key, value = self.attn.project_key_value(concat_tokens, concat_tokens)
+        key = self.rope(key)
         concat_len = int(key.size(2))
         return (
             key.view(batch_size, 1, self.num_heads, concat_len, self.attn.head_dim),
@@ -180,7 +194,8 @@ class ContentStyleCrossAttention(nn.Module):
     def project_content_query(self, content_tokens: torch.Tensor) -> torch.Tensor:
         if content_tokens.dim() != 3:
             raise ValueError(f"content_tokens must be 3D [B, T, D], got {tuple(content_tokens.shape)}")
-        return self.attn.project_query(content_tokens)
+        query = self.attn.project_query(content_tokens)
+        return self.rope(query)
 
     def fuse_content_style_tokens_from_projected(
         self,
@@ -343,6 +358,7 @@ class SourcePartRefDiT(nn.Module):
         self.content_style_attn = ContentStyleCrossAttention(
             embed_dim=self.encoder_hidden_dim,
             num_heads=self.content_style_fusion_heads,
+            grid_size=self.patch_grid_size,
         )
         self.conditioning_dim = self.encoder_hidden_dim * 2
         self.backbone = DiffusionTransformerBackbone(

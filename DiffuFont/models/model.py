@@ -295,12 +295,11 @@ class _BaseTrainer:
             return 1.0
         if self.lr_schedule != "cosine":
             raise ValueError(f"unsupported lr_schedule: {self.lr_schedule!r}")
-        return _hold_then_linear_scale(
+        return _cosine_decay_scale(
             step=step,
             total_steps=self.total_steps,
             warmup_steps=self.lr_warmup_steps,
             min_scale=self.lr_min_scale,
-            decay_start_step=self.lr_decay_start_step,
         )
 
     def _set_learning_rate_for_step(self, step: int, *, batch_lr_scale: float = 1.0) -> None:

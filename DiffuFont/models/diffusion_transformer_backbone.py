@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .sdpa_attention import SDPAAttention
+from .sdpa_attention import SDPAAttention, VisionRotaryEmbeddingFast
 
 
 def _build_1d_sincos_pos_embed(embed_dim: int, positions: torch.Tensor) -> torch.Tensor:
@@ -186,10 +186,11 @@ class DiTBlock(nn.Module):
         ffn_shift: torch.Tensor,
         ffn_scale: torch.Tensor,
         ffn_gate: torch.Tensor,
+        feat_rope: nn.Module | None = None,
     ) -> torch.Tensor:
         x = patch_tokens
         q = modulate(self.norm_self(x), self_attn_shift, self_attn_scale)
-        self_out, _ = self.self_attn(q, q, q, need_weights=False)
+        self_out, _ = self.self_attn(q, q, q, query_rope=feat_rope, key_rope=feat_rope, need_weights=False)
         x = x + _broadcast_modulation(self_out, self_attn_gate) * self_out
         mlp_out = self.mlp(modulate(self.norm_mlp(x), ffn_shift, ffn_scale))
         x = x + _broadcast_modulation(mlp_out, ffn_gate) * mlp_out
@@ -247,6 +248,7 @@ class GlyphDiTBlock(nn.Module):
         style_tokens: torch.Tensor | None,
         condition_token_parts: tuple[torch.Tensor, torch.Tensor] | None = None,
         condition_hidden: torch.Tensor | None = None,
+        feat_rope: nn.Module | None = None,
     ) -> torch.Tensor:
         x = patch_tokens
         if time_cond.dim() != 2 or time_cond.shape != (x.size(0), self.hidden_dim):
@@ -313,6 +315,7 @@ class GlyphDiTBlock(nn.Module):
             ffn_shift=ffn_shift,
             ffn_scale=ffn_scale,
             ffn_gate=ffn_gate,
+            feat_rope=feat_rope,
         )
         return x
 
@@ -366,6 +369,12 @@ class DiffusionTransformerBackbone(nn.Module):
             )
         self.grid_size = self.image_size // self.patch_size
         self.num_tokens = self.grid_size * self.grid_size
+        head_dim = self.hidden_dim // self.num_heads
+        if self.hidden_dim % self.num_heads != 0 or head_dim % 4 != 0:
+            raise ValueError(
+                "JiT-style 2D RoPE requires hidden_dim divisible by num_heads and head dim divisible by 4, "
+                f"got hidden_dim={self.hidden_dim}, num_heads={self.num_heads}"
+            )
         self.content_injection_layers = self._normalize_layer_indices(
             content_injection_layers,
             default_layers=range(1, self.depth + 1),
@@ -404,6 +413,10 @@ class DiffusionTransformerBackbone(nn.Module):
             )
         pos_embed = build_2d_sincos_pos_embed(self.hidden_dim, self.grid_size, self.grid_size)
         self.register_buffer("pos_embed", pos_embed.unsqueeze(0), persistent=False)
+        self.feat_rope = VisionRotaryEmbeddingFast(
+            dim=head_dim // 2,
+            pt_seq_len=self.grid_size,
+        )
 
         self.time_mlp = nn.Sequential(
             nn.Linear(self.hidden_dim, self.hidden_dim),
@@ -675,6 +688,7 @@ class DiffusionTransformerBackbone(nn.Module):
                 style_tokens=None if condition_hidden is not None else style_tokens,
                 condition_token_parts=condition_token_parts if block.use_content_injection else None,
                 condition_hidden=condition_hidden,
+                feat_rope=self.feat_rope,
             )
 
         x = self.final_norm(x)

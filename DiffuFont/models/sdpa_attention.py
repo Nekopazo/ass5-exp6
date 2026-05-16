@@ -26,6 +26,91 @@ class _HeadRMSNorm(nn.Module):
         return (hidden_states * self.weight).to(input_dtype)
 
 
+def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+    x = x.unflatten(-1, (-1, 2))
+    x1, x2 = x.unbind(dim=-1)
+    return torch.stack((-x2, x1), dim=-1).flatten(-2)
+
+
+class VisionRotaryEmbeddingFast(nn.Module):
+    """JiT-style 2D RoPE for tensors shaped [B, H, T, Dh]."""
+
+    def __init__(
+        self,
+        dim: int,
+        *,
+        pt_seq_len: int,
+        ft_seq_len: int | None = None,
+        theta: float = 10_000.0,
+    ) -> None:
+        super().__init__()
+        self.dim = int(dim)
+        self.pt_seq_len = int(pt_seq_len)
+        self.ft_seq_len = self.pt_seq_len if ft_seq_len is None else int(ft_seq_len)
+        if self.dim <= 0:
+            raise ValueError(f"RoPE dim must be positive, got {dim}")
+        if self.pt_seq_len <= 0 or self.ft_seq_len <= 0:
+            raise ValueError(
+                f"RoPE sequence lengths must be positive, got pt={pt_seq_len} ft={ft_seq_len}"
+            )
+        freqs = 1.0 / (
+            float(theta)
+            ** (torch.arange(0, self.dim, 2, dtype=torch.float32)[: (self.dim // 2)] / float(self.dim))
+        )
+        positions = torch.arange(self.ft_seq_len, dtype=torch.float32) / float(self.ft_seq_len) * self.pt_seq_len
+        freqs_1d = torch.einsum("i,j->ij", positions, freqs).repeat_interleave(2, dim=-1)
+        freqs_h = freqs_1d[:, None, :].expand(self.ft_seq_len, self.ft_seq_len, self.dim)
+        freqs_w = freqs_1d[None, :, :].expand(self.ft_seq_len, self.ft_seq_len, self.dim)
+        freqs_2d = torch.cat((freqs_h, freqs_w), dim=-1).reshape(self.ft_seq_len * self.ft_seq_len, -1)
+        self.register_buffer("freqs_cos", freqs_2d.cos(), persistent=False)
+        self.register_buffer("freqs_sin", freqs_2d.sin(), persistent=False)
+
+    @property
+    def base_seq_len(self) -> int:
+        return int(self.freqs_cos.size(0))
+
+    @property
+    def rot_dim(self) -> int:
+        return int(self.freqs_cos.size(-1))
+
+    def _position_buffers(
+        self,
+        token_count: int,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        token_count = int(token_count)
+        if token_count == self.base_seq_len:
+            cos = self.freqs_cos
+            sin = self.freqs_sin
+        elif token_count > 0 and token_count % self.base_seq_len == 0:
+            repeat_count = token_count // self.base_seq_len
+            cos = self.freqs_cos.repeat(repeat_count, 1)
+            sin = self.freqs_sin.repeat(repeat_count, 1)
+        else:
+            raise ValueError(
+                "RoPE token count must match the 2D grid or a whole-number repetition of it: "
+                f"got {token_count}, base={self.base_seq_len}"
+            )
+        return cos.to(device=device, dtype=dtype), sin.to(device=device, dtype=dtype)
+
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
+        if t.dim() != 4:
+            raise ValueError(f"RoPE input must be 4D [B, H, T, D], got {tuple(t.shape)}")
+        if self.rot_dim > t.size(-1):
+            raise ValueError(f"RoPE rot_dim {self.rot_dim} exceeds head dim {t.size(-1)}")
+        cos, sin = self._position_buffers(t.size(-2), device=t.device, dtype=t.dtype)
+        cos = cos.view(1, 1, cos.size(0), cos.size(1))
+        sin = sin.view(1, 1, sin.size(0), sin.size(1))
+        rot = t[..., : self.rot_dim]
+        right = t[..., self.rot_dim :]
+        rot = (rot * cos) + (_rotate_half(rot) * sin)
+        if right.numel() == 0:
+            return rot
+        return torch.cat((rot, right), dim=-1)
+
+
 def enable_torch_sdpa_backends() -> None:
     """Force flash-only SDPA backend selection."""
     cuda_backends = getattr(torch.backends, "cuda", None)
@@ -114,6 +199,8 @@ class SDPAAttention(nn.Module):
         value: torch.Tensor,
         *,
         key_valid_mask: Optional[torch.Tensor] = None,
+        query_rope: Optional[nn.Module] = None,
+        key_rope: Optional[nn.Module] = None,
         need_weights: bool = False,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         if query.dim() != 4 or key.dim() != 4 or value.dim() != 4:
@@ -138,6 +225,10 @@ class SDPAAttention(nn.Module):
                 "projected q/k/v head_dim mismatch: "
                 f"expected {self.head_dim}, got {query.size(3)}, {key.size(3)}, {value.size(3)}"
             )
+        if query_rope is not None:
+            query = query_rope(query)
+        if key_rope is not None:
+            key = key_rope(key)
         attn_mask = None
         if key_valid_mask is not None:
             expected_mask_shape = (key.size(0), key.size(2))
@@ -176,6 +267,8 @@ class SDPAAttention(nn.Module):
         value: torch.Tensor,
         *,
         key_padding_mask: Optional[torch.Tensor] = None,
+        query_rope: Optional[nn.Module] = None,
+        key_rope: Optional[nn.Module] = None,
         need_weights: bool = False,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         bsz, q_len, _ = query.shape
@@ -192,7 +285,15 @@ class SDPAAttention(nn.Module):
         key_valid_mask = None
         if key_padding_mask is not None:
             key_valid_mask = ~key_padding_mask.to(device=key.device, dtype=torch.bool)
-        return self.attend_projected(q, k, v, key_valid_mask=key_valid_mask, need_weights=need_weights)
+        return self.attend_projected(
+            q,
+            k,
+            v,
+            key_valid_mask=key_valid_mask,
+            query_rope=query_rope,
+            key_rope=key_rope,
+            need_weights=need_weights,
+        )
 
 
 enable_torch_sdpa_backends()

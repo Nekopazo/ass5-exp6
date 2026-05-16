@@ -676,8 +676,6 @@ def main() -> None:
         )
 
     resolved_epochs = max(1, int(args.epochs))
-    if len(dataloader) > 0:
-        resolved_epochs = max(resolved_epochs, math.ceil(total_steps / len(dataloader)))
 
     model = build_model(args)
     trainer = XPredTrainer(
