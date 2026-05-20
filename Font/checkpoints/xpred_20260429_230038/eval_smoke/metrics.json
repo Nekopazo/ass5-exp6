@@ -1,0 +1,62 @@
+{
+  "device": "cuda:1",
+  "eval_chars_per_batch": 1,
+  "eval_fonts_per_batch": 1,
+  "fixed_char_count": 1,
+  "font_split_seed": 42,
+  "inference_steps": 1,
+  "results": [
+    {
+      "batches": 301,
+      "elapsed_sec": 40.471100091934204,
+      "fid": 157.07369995117188,
+      "l1": 0.15942137803086145,
+      "lpips": 0.4062650484153599,
+      "samples": 301,
+      "split": "train",
+      "ssim": 0.5593676030437812,
+      "step": 100000
+    },
+    {
+      "batches": 16,
+      "elapsed_sec": 9.012730360031128,
+      "fid": 183.16506958007812,
+      "l1": 0.16358655566970506,
+      "lpips": 0.42364055290818214,
+      "samples": 16,
+      "split": "val",
+      "ssim": 0.544777674600482,
+      "step": 100000
+    }
+  ],
+  "run_dir": "/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/xpred_20260429_230038",
+  "splits": {
+    "train": {
+      "batches": 301,
+      "fixed_char_indices": [
+        0
+      ],
+      "fixed_chars": 1,
+      "fixed_chars_text": [
+        "啊"
+      ],
+      "fonts": 301,
+      "samples": 301,
+      "split_chars": 6424
+    },
+    "val": {
+      "batches": 16,
+      "fixed_char_indices": [
+        32
+      ],
+      "fixed_chars": 1,
+      "fixed_chars_text": [
+        "傲"
+      ],
+      "fonts": 16,
+      "samples": 16,
+      "split_chars": 339
+    }
+  },
+  "train_ratio": 0.95
+}

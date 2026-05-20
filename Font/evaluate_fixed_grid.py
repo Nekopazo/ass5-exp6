@@ -195,6 +195,7 @@ def evaluate_split(
     device: torch.device,
     seed: int,
     log_every: int,
+    metric_image_size: int = 0,
 ) -> dict[str, float | int | str]:
     fid = FrechetInceptionDistance(feature=2048, normalize=True).to(device)
     ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
@@ -219,6 +220,10 @@ def evaluate_split(
         )
         pred01 = to_unit(generated)
         target01 = to_unit(target)
+        if int(metric_image_size) > 0:
+            size = int(metric_image_size)
+            pred01 = F.interpolate(pred01, size=(size, size), mode="bilinear", align_corners=False)
+            target01 = F.interpolate(target01, size=(size, size), mode="bilinear", align_corners=False)
         batch_size = int(target01.size(0))
 
         fid.update(target01, real=True)
@@ -267,6 +272,7 @@ def main() -> None:
     parser.add_argument("--eval-chars-per-batch", type=int, default=6)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--inference-steps", type=int, default=20)
+    parser.add_argument("--metric-image-size", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=20)
     args = parser.parse_args()
 

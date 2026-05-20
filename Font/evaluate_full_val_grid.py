@@ -82,17 +82,21 @@ def main() -> None:
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--checkpoint", type=str, default="latest.pt")
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--data-root", type=Path, default=None)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--eval-fonts-per-batch", type=int, default=8)
     parser.add_argument("--eval-chars-per-batch", type=int, default=48)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--inference-steps", type=int, default=20)
     parser.add_argument("--style-ref-count", type=int, default=8)
+    parser.add_argument("--metric-image-size", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=5)
     args = parser.parse_args()
 
     run_dir = args.run_dir.resolve()
     config = json.loads((run_dir / "train_config.json").read_text(encoding="utf-8"))
+    if args.data_root is not None:
+        config["data_root"] = str(args.data_root.resolve())
     output_dir = (
         args.output_dir
         or (run_dir / f"eval_full_val_{checkpoint_label(resolve_checkpoint(run_dir, args.checkpoint))}")
@@ -137,6 +141,7 @@ def main() -> None:
         device=device,
         seed=int(config["seed"]),
         log_every=int(args.log_every),
+        metric_image_size=int(args.metric_image_size),
     )
     row["checkpoint"] = str(checkpoint_path)
     row["checkpoint_label"] = checkpoint_label(checkpoint_path)
@@ -147,6 +152,7 @@ def main() -> None:
         "device": str(device),
         "inference_steps": int(args.inference_steps),
         "style_ref_count": int(args.style_ref_count),
+        "metric_image_size": int(args.metric_image_size),
         "eval_fonts_per_batch": int(args.eval_fonts_per_batch),
         "eval_chars_per_batch": int(args.eval_chars_per_batch),
         "train_ratio": float(config["train_ratio"]),

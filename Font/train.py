@@ -177,6 +177,54 @@ class XPredBatchCollator:
         }
 
 
+class ShuffleBatchCollator:
+    """Plain shuffled batches with no cross-sample reuse.
+
+    Each batch samples one shared ref_count in [style_ref_count_min, style_ref_count_max].
+    Every sample then independently draws that many style refs from its own font.
+    Content and style conditions are carried one-to-one with the target samples.
+    """
+
+    def __init__(self, dataset: FontImageDataset) -> None:
+        self.dataset = dataset
+
+    def _sample_batch_ref_count(self) -> int:
+        min_refs = max(1, int(self.dataset.style_ref_count_min))
+        max_refs = max(min_refs, int(self.dataset.style_ref_count_max))
+        if min_refs == max_refs:
+            return min_refs
+        return random.randint(min_refs, max_refs)
+
+    def __call__(self, samples) -> Dict[str, torch.Tensor]:
+        ref_count = self._sample_batch_ref_count()
+        style_imgs = []
+        style_chars = []
+        for sample in samples:
+            font_name = str(sample["font"])
+            char_id = int(sample["char_id"])
+            style_indices = self.dataset._sample_style_indices(font_name, char_id, ref_count)
+            style_img, sampled_style_chars = self.dataset.load_style_refs_by_indices(font_name, style_indices)
+            style_imgs.append(style_img)
+            style_chars.append(sampled_style_chars)
+
+        batch_size = len(samples)
+        return {
+            "font": [sample["font"] for sample in samples],
+            "font_id": torch.tensor([sample["font_id"] for sample in samples], dtype=torch.long),
+            "char": [sample["char"] for sample in samples],
+            "char_id": torch.tensor([sample["char_id"] for sample in samples], dtype=torch.long),
+            "content": torch.stack([sample["content"] for sample in samples], dim=0),
+            "content_index": torch.arange(batch_size, dtype=torch.long),
+            "target": torch.stack([sample["target"] for sample in samples], dim=0),
+            "style_img": torch.stack(style_imgs, dim=0),
+            "style_index": torch.arange(batch_size, dtype=torch.long),
+            "style_font": [str(sample["font"]) for sample in samples],
+            "style_char_id": torch.tensor([sample["char_id"] for sample in samples], dtype=torch.long),
+            "style_chars": style_chars,
+            "style_ref_count": torch.tensor(ref_count, dtype=torch.long),
+        }
+
+
 class StyleEvalBatchCollator:
     def __init__(self, dataset: FontImageDataset) -> None:
         self.dataset = dataset
@@ -312,11 +360,14 @@ def build_dataloader(
     cartesian_fonts_per_batch: int,
     cartesian_chars_per_batch: int,
 ) -> DataLoader:
+    collate_fn = XPredBatchCollator(dataset)
+    if str(sampling_mode) == "shuffle":
+        collate_fn = ShuffleBatchCollator(dataset)
     dataloader_kwargs = {
         "dataset": dataset,
         "num_workers": int(num_workers),
         "pin_memory": (device.type == "cuda"),
-        "collate_fn": XPredBatchCollator(dataset),
+        "collate_fn": collate_fn,
         "worker_init_fn": seed_worker if int(num_workers) > 0 else None,
     }
     if use_unique_font_batches:
