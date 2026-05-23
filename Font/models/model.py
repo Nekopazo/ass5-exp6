@@ -9,7 +9,7 @@ import json
 import math
 from pathlib import Path
 import time
-from typing import Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import torch
 import torch.nn.functional as F
@@ -88,6 +88,25 @@ def _apply_adam_betas_to_optimizer(
 ) -> None:
     for group in optimizer.param_groups:
         group["betas"] = (float(beta1), float(beta2))
+
+
+def _module_stats_group_name(param_name: str) -> str:
+    parts = str(param_name).split(".")
+    if len(parts) >= 3 and parts[0] in {"content_encoder", "style_encoder"} and parts[1] == "blocks":
+        return ".".join(parts[:3])
+    if len(parts) >= 2 and parts[0] in {"content_encoder", "style_encoder"} and parts[1] == "tail":
+        return ".".join(parts[:2])
+    if len(parts) >= 3 and parts[0] == "backbone" and parts[1] == "blocks":
+        return ".".join(parts[:3])
+    if len(parts) >= 2 and parts[0] == "backbone":
+        return ".".join(parts[:2])
+    if len(parts) >= 2 and parts[0] == "content_style_attn":
+        return ".".join(parts[:2])
+    if parts[0].startswith("output_"):
+        return parts[0]
+    if len(parts) >= 2:
+        return ".".join(parts[:2])
+    return parts[0]
 
 
 class _ReuseCountMeanGrad(torch.autograd.Function):
@@ -217,8 +236,9 @@ class _BaseTrainer:
         lr_warmup_steps: int = 0,
         lr_decay_start_step: Optional[int] = None,
         lr_schedule: str = "constant",
-        lr_min_scale: float = 0.1,
+        lr_min_scale: float = 0.0,
         log_every_steps: int,
+        module_stats_every_steps: int = 500,
         save_every_steps: Optional[int],
         val_every_steps: Optional[int] = None,
         val_max_batches: Optional[int] = 16,
@@ -234,6 +254,9 @@ class _BaseTrainer:
         self.device = device
         self.total_steps = max(1, int(total_steps))
         self.log_every_steps = max(1, int(log_every_steps))
+        self.module_stats_every_steps = (
+            None if int(module_stats_every_steps) <= 0 else max(1, int(module_stats_every_steps))
+        )
         self.save_every_steps = None if save_every_steps is None else max(1, int(save_every_steps))
         self.val_every_steps = self.log_every_steps if val_every_steps is None else max(1, int(val_every_steps))
         self.val_max_batches = None if val_max_batches is None else max(1, int(val_max_batches))
@@ -255,7 +278,9 @@ class _BaseTrainer:
         self.checkpoint_dir: Optional[Path] = None
         self.step_log_file: Optional[Path] = None
         self.val_log_file: Optional[Path] = None
+        self.module_stats_log_file: Optional[Path] = None
         self.best_val_loss: Optional[float] = None
+        self._pending_module_stats_row: Optional[Dict[str, Any]] = None
 
         self.weight_decay = max(0.0, float(weight_decay))
         self.adam_beta1 = float(adam_beta1)
@@ -359,6 +384,12 @@ class _BaseTrainer:
         with self.val_log_file.open("a", encoding="utf-8") as fp:
             fp.write(json.dumps(row, ensure_ascii=False) + "\n")
 
+    def _write_module_stats_log(self, row: Dict[str, Any]) -> None:
+        if self.module_stats_log_file is None:
+            return
+        with self.module_stats_log_file.open("a", encoding="utf-8") as fp:
+            fp.write(json.dumps(row, ensure_ascii=False) + "\n")
+
     def _optimizer_lr_metrics(self) -> Dict[str, float]:
         return {
             f"lr_group_{idx}": float(group["lr"])
@@ -373,6 +404,132 @@ class _BaseTrainer:
             "cuda_max_mem_allocated_gb": float(torch.cuda.max_memory_allocated(self.device) / (1024**3)),
             "cuda_mem_allocated_gb": float(torch.cuda.memory_allocated(self.device) / (1024**3)),
             "cuda_mem_reserved_gb": float(torch.cuda.memory_reserved(self.device) / (1024**3)),
+        }
+
+    def _collect_module_gradient_statistics(self) -> Dict[str, Dict[str, float]]:
+        grouped: Dict[str, Dict[str, float]] = {}
+        for name, param in self.model.named_parameters():
+            if not param.requires_grad:
+                continue
+            group_name = _module_stats_group_name(name)
+            stats = grouped.setdefault(
+                group_name,
+                {
+                    "param_numel": 0.0,
+                    "param_sq_sum": 0.0,
+                    "grad_numel": 0.0,
+                    "grad_sq_sum": 0.0,
+                    "grad_abs_sum": 0.0,
+                    "grad_abs_max": 0.0,
+                },
+            )
+            param_detached = param.detach()
+            stats["param_numel"] += float(param_detached.numel())
+            stats["param_sq_sum"] += float(param_detached.float().pow(2).sum().item())
+            if param.grad is None:
+                continue
+            grad = param.grad.detach().float()
+            grad_abs = grad.abs()
+            stats["grad_numel"] += float(grad.numel())
+            stats["grad_sq_sum"] += float(grad.pow(2).sum().item())
+            stats["grad_abs_sum"] += float(grad_abs.sum().item())
+            stats["grad_abs_max"] = max(stats["grad_abs_max"], float(grad_abs.max().item()))
+
+        finalized: Dict[str, Dict[str, float]] = {}
+        for group_name, stats in grouped.items():
+            param_numel = max(1.0, stats["param_numel"])
+            grad_numel = max(1.0, stats["grad_numel"])
+            param_norm = math.sqrt(max(0.0, stats["param_sq_sum"]))
+            grad_norm = math.sqrt(max(0.0, stats["grad_sq_sum"]))
+            finalized[group_name] = {
+                "param_numel": float(stats["param_numel"]),
+                "param_norm": float(param_norm),
+                "param_rms": float(math.sqrt(max(0.0, stats["param_sq_sum"]) / param_numel)),
+                "grad_numel": float(stats["grad_numel"]),
+                "grad_norm": float(grad_norm),
+                "grad_rms": float(math.sqrt(max(0.0, stats["grad_sq_sum"]) / grad_numel)),
+                "grad_abs_mean": float(stats["grad_abs_sum"] / grad_numel) if stats["grad_numel"] > 0 else 0.0,
+                "grad_abs_max": float(stats["grad_abs_max"]),
+                "grad_to_param_ratio": float(grad_norm / max(param_norm, 1e-12)),
+            }
+        return finalized
+
+    def _collect_module_adam_statistics(self) -> Dict[str, Dict[str, float]]:
+        grouped: Dict[str, Dict[str, float]] = {}
+        optimizer_eps = float(self.optimizer.param_groups[0].get("eps", 1e-8)) if self.optimizer.param_groups else 1e-8
+        for name, param in self.model.named_parameters():
+            if not param.requires_grad:
+                continue
+            state = self.optimizer.state.get(param)
+            if not state:
+                continue
+            exp_avg = state.get("exp_avg")
+            exp_avg_sq = state.get("exp_avg_sq")
+            if exp_avg is None and exp_avg_sq is None:
+                continue
+            group_name = _module_stats_group_name(name)
+            stats = grouped.setdefault(
+                group_name,
+                {
+                    "adam_numel": 0.0,
+                    "exp_avg_sq_sum": 0.0,
+                    "exp_avg_abs_sum": 0.0,
+                    "exp_avg_abs_max": 0.0,
+                    "update_sq_sum": 0.0,
+                    "state_step_max": 0.0,
+                },
+            )
+            state_step = state.get("step")
+            if state_step is not None:
+                if torch.is_tensor(state_step):
+                    stats["state_step_max"] = max(stats["state_step_max"], float(state_step.detach().item()))
+                else:
+                    stats["state_step_max"] = max(stats["state_step_max"], float(state_step))
+            if exp_avg is None or exp_avg_sq is None:
+                continue
+            exp_avg_f = exp_avg.detach().float()
+            exp_avg_sq_f = exp_avg_sq.detach().float()
+            denom = exp_avg_sq_f.sqrt().add_(optimizer_eps)
+            update_est = exp_avg_f / denom
+            exp_avg_abs = exp_avg_f.abs()
+            stats["adam_numel"] += float(exp_avg_f.numel())
+            stats["exp_avg_sq_sum"] += float(exp_avg_sq_f.sum().item())
+            stats["exp_avg_abs_sum"] += float(exp_avg_abs.sum().item())
+            stats["exp_avg_abs_max"] = max(stats["exp_avg_abs_max"], float(exp_avg_abs.max().item()))
+            stats["update_sq_sum"] += float(update_est.pow(2).sum().item())
+
+        finalized: Dict[str, Dict[str, float]] = {}
+        for group_name, stats in grouped.items():
+            adam_numel = max(1.0, stats["adam_numel"])
+            finalized[group_name] = {
+                "adam_numel": float(stats["adam_numel"]),
+                "adam_exp_avg_abs_mean": float(stats["exp_avg_abs_sum"] / adam_numel) if stats["adam_numel"] > 0 else 0.0,
+                "adam_exp_avg_abs_max": float(stats["exp_avg_abs_max"]),
+                "adam_exp_avg_sq_rms": float(math.sqrt(max(0.0, stats["exp_avg_sq_sum"]) / adam_numel)),
+                "adam_update_rms": float(math.sqrt(max(0.0, stats["update_sq_sum"]) / adam_numel)),
+                "adam_state_step": float(stats["state_step_max"]),
+            }
+        return finalized
+
+    def _cache_module_stats_row(
+        self,
+        *,
+        step: int,
+        epoch: int,
+        gradient_stats: Dict[str, Dict[str, float]],
+        adam_stats: Dict[str, Dict[str, float]],
+    ) -> None:
+        module_names = sorted(set(gradient_stats) | set(adam_stats))
+        modules: Dict[str, Dict[str, float]] = {}
+        for module_name in module_names:
+            merged: Dict[str, float] = {}
+            merged.update(gradient_stats.get(module_name, {}))
+            merged.update(adam_stats.get(module_name, {}))
+            modules[module_name] = merged
+        self._pending_module_stats_row = {
+            "step": int(step),
+            "epoch": int(epoch),
+            "modules": modules,
         }
 
     def evaluate(self, dataloader) -> Dict[str, float]:
@@ -406,9 +563,14 @@ class _BaseTrainer:
         self.checkpoint_dir = save_root
         self.step_log_file = save_root / "train_step_metrics.jsonl"
         self.val_log_file = save_root / "val_step_metrics.jsonl"
+        self.module_stats_log_file = (
+            None if self.module_stats_every_steps is None else save_root / "train_module_stats.jsonl"
+        )
         if self.global_step == 0:
             self.step_log_file.write_text("", encoding="utf-8")
             self.val_log_file.write_text("", encoding="utf-8")
+            if self.module_stats_log_file is not None:
+                self.module_stats_log_file.write_text("", encoding="utf-8")
 
         stop_training = False
         start_epoch = max(1, int(self.current_epoch) + (1 if self.resume_from_next_epoch else 0))
@@ -443,6 +605,9 @@ class _BaseTrainer:
                         if key not in {"step", "epoch"}
                     )
                     print(f"[step] step={self.global_step} epoch={self.current_epoch} {metric_str}", flush=True)
+                    if self._pending_module_stats_row is not None:
+                        self._write_module_stats_log(self._pending_module_stats_row)
+                        self._pending_module_stats_row = None
 
                 if val_dataloader is not None and self.global_step % self.val_every_steps == 0:
                     val_metrics = self.evaluate(val_dataloader)
@@ -525,7 +690,7 @@ class XPredTrainer(_BaseTrainer):
         lr_warmup_steps: int = 0,
         lr_decay_start_step: Optional[int] = None,
         lr_schedule: str = "constant",
-        lr_min_scale: float = 0.1,
+        lr_min_scale: float = 0.0,
         p_mean: float = -0.8,
         p_std: float = 0.8,
         t_eps: float = 5e-2,
@@ -535,6 +700,7 @@ class XPredTrainer(_BaseTrainer):
         ema_decay: float = 0.9999,
         ema_start_step: Optional[int] = None,
         log_every_steps: int = 100,
+        module_stats_every_steps: int = 500,
         save_every_steps: Optional[int] = None,
         val_every_steps: Optional[int] = None,
         val_max_batches: Optional[int] = 16,
@@ -555,6 +721,7 @@ class XPredTrainer(_BaseTrainer):
             lr_schedule=lr_schedule,
             lr_min_scale=lr_min_scale,
             log_every_steps=log_every_steps,
+            module_stats_every_steps=module_stats_every_steps,
             save_every_steps=save_every_steps,
             val_every_steps=val_every_steps,
             val_max_batches=val_max_batches,
@@ -855,6 +1022,9 @@ class XPredTrainer(_BaseTrainer):
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
         self.model.train()
         next_step = self.global_step + 1
+        collect_module_stats = (
+            self.module_stats_every_steps is not None and (next_step % self.module_stats_every_steps) == 0
+        )
         lr_batch_scale = self._batch_lr_scale(batch)
         self._set_learning_rate_for_step(next_step, batch_lr_scale=lr_batch_scale)
         self.optimizer.zero_grad(set_to_none=True)
@@ -866,7 +1036,17 @@ class XPredTrainer(_BaseTrainer):
         metrics["target_batch_size"] = float(batch["target"].size(0))
         metrics["loss"].backward()
         metrics.update(self._apply_grad_clip(step=next_step))
+        if collect_module_stats:
+            gradient_stats = self._collect_module_gradient_statistics()
         self.optimizer.step()
+        if collect_module_stats:
+            adam_stats = self._collect_module_adam_statistics()
+            self._cache_module_stats_row(
+                step=next_step,
+                epoch=self.current_epoch,
+                gradient_stats=gradient_stats,
+                adam_stats=adam_stats,
+            )
         self._update_ema(step=next_step)
         return _metrics_to_floats(metrics)
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/scratch/yangximing/code/ass5-exp6/DiffuFont"
+ROOT="/scratch/yangximing/code/ass5-exp6/Font"
+DATA_ROOT="/scratch/yangximing/code/ass5-exp6/Font/data_official_256"
 PYTHON_BIN="/scratch/yangximing/miniconda3/envs/sg3/bin/python"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 LOG_MAX_LINES=1500
@@ -13,17 +14,18 @@ PID_FILE=""
 SAVE_DIR="checkpoints/xpred_$(date '+%Y%m%d_%H%M%S')"
 
 RESUME_CKPT=""
-DEVICE_ARG="cuda:1"
+DEVICE_ARG="cuda:0"
 SEED=42
 FONT_SPLIT="train"
 FONT_SPLIT_SEED=""
 TRAIN_RATIO="0.95"
 
 EPOCHS=2000
-TARGET_STEPS=100000
+TARGET_STEPS=200000
 SAVE_EVERY=5000
 SAMPLE_EVERY=300
 LOG_EVERY=100
+MODULE_STATS_EVERY=500
 VAL_EVERY=100
 LR="2e-4"
 WEIGHT_DECAY="0.01"
@@ -36,16 +38,15 @@ GRAD_CLIP_NORM="1.0"
 GRAD_CLIP_MIN_NORM="0.5"
 
 STYLE_REF_COUNT=0
-STYLE_REF_COUNT_MIN=4
-STYLE_REF_COUNT_MAX=8
+STYLE_REF_COUNT_MIN=1
+STYLE_REF_COUNT_MAX=3
 BATCH_SIZE=128
 NUM_WORKERS=2
 MAX_FONTS=0
-IMAGE_SIZE=128
+IMAGE_SIZE=256
 
-PATCH_SIZE=8
+PATCH_SIZE=16
 PATCH_EMBED_BOTTLENECK_DIM=0
-DISABLE_ENCODER_SHORTCUT=1
 ENCODER_HIDDEN_DIM=256
 DIT_HIDDEN_DIM=512
 DIT_DEPTH=8
@@ -53,7 +54,7 @@ DIT_HEADS=8
 DIT_MLP_RATIO="4.0"
 
 SAMPLE_STEPS=20
-PREDICTION_TYPE="velocity"
+PREDICTION_TYPE="x"
 EMA_DECAY="0.9999"
 EMA_START_STEP="40000"
 TRAIN_SAMPLING="shuffle"
@@ -80,6 +81,7 @@ while [[ $# -gt 0 ]]; do
     --save-every-steps) SAVE_EVERY="${2:?}"; shift 2 ;;
     --sample-every-steps) SAMPLE_EVERY="${2:?}"; shift 2 ;;
     --log-every-steps) LOG_EVERY="${2:?}"; shift 2 ;;
+    --module-stats-every-steps) MODULE_STATS_EVERY="${2:?}"; shift 2 ;;
     --val-every-steps) VAL_EVERY="${2:?}"; shift 2 ;;
     --lr) LR="${2:?}"; shift 2 ;;
     --weight-decay) WEIGHT_DECAY="${2:?}"; shift 2 ;;
@@ -103,7 +105,6 @@ while [[ $# -gt 0 ]]; do
     --image-size) IMAGE_SIZE="${2:?}"; shift 2 ;;
     --patch-size) PATCH_SIZE="${2:?}"; shift 2 ;;
     --patch-embed-bottleneck-dim) PATCH_EMBED_BOTTLENECK_DIM="${2:?}"; shift 2 ;;
-    --disable-encoder-shortcut) DISABLE_ENCODER_SHORTCUT=1; shift ;;
     --encoder-hidden-dim) ENCODER_HIDDEN_DIM="${2:?}"; shift 2 ;;
     --dit-hidden-dim) DIT_HIDDEN_DIM="${2:?}"; shift 2 ;;
     --dit-depth) DIT_DEPTH="${2:?}"; shift 2 ;;
@@ -158,6 +159,7 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --save-every-steps "${SAVE_EVERY}"
     --sample-every-steps "${SAMPLE_EVERY}"
     --log-every-steps "${LOG_EVERY}"
+    --module-stats-every-steps "${MODULE_STATS_EVERY}"
     --val-every-steps "${VAL_EVERY}"
     --lr "${LR}"
     --weight-decay "${WEIGHT_DECAY}"
@@ -189,9 +191,6 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --cartesian-fonts-per-batch "${CARTESIAN_FONTS_PER_BATCH}"
     --cartesian-chars-per-batch "${CARTESIAN_CHARS_PER_BATCH}"
   )
-  if [[ "${DISABLE_ENCODER_SHORTCUT}" == "1" ]]; then
-    daemon_args+=(--disable-encoder-shortcut)
-  fi
   if [[ -n "${RESUME_CKPT}" ]]; then
     daemon_args+=(--resume "${RESUME_CKPT}")
   fi
@@ -352,7 +351,7 @@ is_oom_failure() {
 
 cmd_common=(
   "${PYTHON_BIN}" -u train.py
-  --data-root "${ROOT}"
+  --data-root "${DATA_ROOT}"
   --save-dir "${SAVE_DIR}"
   --seed "${SEED}"
   --font-split "${FONT_SPLIT}"
@@ -391,14 +390,12 @@ cmd_common=(
   --epochs "${EPOCHS}"
   --total-steps "${TARGET_STEPS}"
   --log-every-steps "${LOG_EVERY}"
+  --module-stats-every-steps "${MODULE_STATS_EVERY}"
   --val-every-steps "${VAL_EVERY}"
   --save-every-steps "${SAVE_EVERY}"
   --sample-every-steps "${SAMPLE_EVERY}"
 )
 
-if [[ "${DISABLE_ENCODER_SHORTCUT}" == "1" ]]; then
-  cmd_common+=(--disable-encoder-shortcut)
-fi
 if [[ -n "${RESUME_CKPT}" ]]; then
   cmd_common+=(--resume "${RESUME_CKPT}")
 fi
@@ -412,11 +409,11 @@ echo "[run_diffusion_colab] log_file=${LOG_FILE}"
 echo "[run_diffusion_colab] requested_device=${DEVICE_ARG} seed=${SEED}"
 echo "[run_diffusion_colab] PYTORCH_ALLOC_CONF=${PYTORCH_ALLOC_CONF}"
 echo "[run_diffusion_colab] resume=${RESUME_CKPT:-<none>}"
-echo "[run_diffusion_colab] batch=${BATCH_SIZE} lr=${LR} weight_decay=${WEIGHT_DECAY} adam_betas=(${ADAM_BETA1},${ADAM_BETA2}) lr_schedule=${LR_SCHEDULE} lr_warmup_steps=${LR_WARMUP_STEPS} lr_min_scale=${LR_MIN_SCALE} grad_clip_norm=${GRAD_CLIP_NORM}"
+echo "[run_diffusion_colab] batch=${BATCH_SIZE} lr=${LR} weight_decay=${WEIGHT_DECAY} adam_betas=(${ADAM_BETA1},${ADAM_BETA2}) lr_schedule=${LR_SCHEDULE} lr_warmup_steps=${LR_WARMUP_STEPS} lr_min_scale=${LR_MIN_SCALE} grad_clip_norm=${GRAD_CLIP_NORM} module_stats_every_steps=${MODULE_STATS_EVERY}"
 echo "[run_diffusion_colab] style_ref_count=${STYLE_REF_COUNT} style_ref_count_min=${STYLE_REF_COUNT_MIN} style_ref_count_max=${STYLE_REF_COUNT_MAX}"
 echo "[run_diffusion_colab] patch_size=${PATCH_SIZE} patch_embed_bottleneck_dim=${PATCH_EMBED_BOTTLENECK_DIM} image_size=${IMAGE_SIZE} sample_steps=${SAMPLE_STEPS} ode_solver=heun_last_euler prediction_type=${PREDICTION_TYPE} loss_type=jit_v_mse ema_decay=${EMA_DECAY} ema_start_step=${EMA_START_STEP}"
 echo "[run_diffusion_colab] dit_heads=${DIT_HEADS} style_fusion=concat_cross_attention main_path=direct_conv_patch_embed+swiglu+rms+qk_norm content_style_fusion_heads=4"
-echo "[run_diffusion_colab] output_path=final_adaln_patch_projection encoder_hidden_dim=${ENCODER_HIDDEN_DIM} encoder_shortcut_enabled=$([[ "${DISABLE_ENCODER_SHORTCUT}" == "1" ]] && echo 0 || echo 1) dit_hidden_dim=${DIT_HIDDEN_DIM} dit_depth=${DIT_DEPTH}"
+echo "[run_diffusion_colab] output_path=final_adaln_patch_projection encoder_hidden_dim=${ENCODER_HIDDEN_DIM} dit_hidden_dim=${DIT_HIDDEN_DIM} dit_depth=${DIT_DEPTH}"
 echo "[run_diffusion_colab] content_injection_layers=1..${DIT_DEPTH}"
 echo "[run_diffusion_colab] train_sampling=${TRAIN_SAMPLING} cartesian_fonts_per_batch=${CARTESIAN_FONTS_PER_BATCH} cartesian_chars_per_batch=${CARTESIAN_CHARS_PER_BATCH}"
 

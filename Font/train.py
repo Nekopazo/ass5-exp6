@@ -539,14 +539,12 @@ def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
         patch_size=int(args.patch_size),
         patch_embed_bottleneck_dim=int(args.patch_embed_bottleneck_dim),
         encoder_hidden_dim=int(args.encoder_hidden_dim),
-        content_encoder_use_shortcut=not bool(args.disable_encoder_shortcut),
-        style_encoder_use_shortcut=not bool(args.disable_encoder_shortcut),
         dit_hidden_dim=int(args.dit_hidden_dim),
         dit_depth=int(args.dit_depth),
         dit_heads=int(args.dit_heads),
         dit_mlp_ratio=float(args.dit_mlp_ratio),
         content_injection_layers=None,
-        content_style_fusion_heads=4,
+        content_style_fusion_heads=8,
     )
 
 
@@ -572,7 +570,6 @@ def main() -> None:
 
     parser.add_argument("--patch-size", type=int, required=True)
     parser.add_argument("--patch-embed-bottleneck-dim", type=int, default=0)
-    parser.add_argument("--disable-encoder-shortcut", action="store_true")
     parser.add_argument("--encoder-hidden-dim", type=int, required=True)
     parser.add_argument("--dit-hidden-dim", type=int, required=True)
     parser.add_argument("--dit-depth", type=int, required=True)
@@ -588,9 +585,10 @@ def main() -> None:
     parser.add_argument("--adam-beta2", type=float, default=0.95)
     parser.add_argument("--lr-schedule", type=str, default="constant", choices=["constant", "cosine"])
     parser.add_argument("--lr-warmup-steps", type=int, default=0)
-    parser.add_argument("--lr-min-scale", type=float, default=0.1)
+    parser.add_argument("--lr-min-scale", type=float, default=0.0)
     parser.add_argument("--total-steps", type=int, required=True)
     parser.add_argument("--log-every-steps", type=int, required=True)
+    parser.add_argument("--module-stats-every-steps", type=int, default=500)
     parser.add_argument("--val-every-steps", type=int, required=True)
     parser.add_argument("--save-every-steps", type=int, required=True)
     parser.add_argument("--sample-every-steps", type=int, required=True)
@@ -625,6 +623,7 @@ def main() -> None:
     font_split_seed = int(args.font_split_seed)
     log_every_steps = int(args.log_every_steps)
     val_every_steps = int(args.val_every_steps)
+    module_stats_every_steps = int(args.module_stats_every_steps)
     save_every_steps = int(args.save_every_steps)
     sample_every_steps = int(args.sample_every_steps)
     resolved_save_every_steps = None if save_every_steps == 0 else save_every_steps
@@ -632,6 +631,8 @@ def main() -> None:
     total_steps = int(args.total_steps)
     if log_every_steps <= 0 or val_every_steps <= 0:
         raise ValueError("log_every_steps and val_every_steps must be > 0.")
+    if module_stats_every_steps < 0:
+        raise ValueError("module_stats_every_steps must be >= 0.")
     if save_every_steps < 0 or sample_every_steps < 0:
         raise ValueError("save_every_steps and sample_every_steps must be >= 0.")
     if total_steps <= 0:
@@ -754,6 +755,7 @@ def main() -> None:
         ema_decay=float(args.ema_decay),
         ema_start_step=int(args.ema_start_step),
         log_every_steps=log_every_steps,
+        module_stats_every_steps=module_stats_every_steps,
         save_every_steps=resolved_save_every_steps,
         val_every_steps=val_every_steps,
         val_max_batches=trainer_val_max_batches,
@@ -774,6 +776,7 @@ def main() -> None:
     run_config["resolved_device"] = str(device)
     run_config["resolved_font_split_seed"] = int(font_split_seed)
     run_config["resolved_log_every_steps"] = int(log_every_steps)
+    run_config["resolved_module_stats_every_steps"] = int(module_stats_every_steps)
     run_config["resolved_val_every_steps"] = int(val_every_steps)
     run_config["resolved_save_every_steps"] = None if resolved_save_every_steps is None else int(resolved_save_every_steps)
     run_config["resolved_sample_every_steps"] = None if resolved_sample_every_steps is None else int(resolved_sample_every_steps)
@@ -810,8 +813,6 @@ def main() -> None:
     run_config["ode_solver"] = "heun_last_euler"
     run_config["content_injection_layers"] = list(range(1, int(args.dit_depth) + 1))
     run_config["content_style_fusion_heads"] = 4
-    run_config["content_encoder_use_shortcut"] = not bool(args.disable_encoder_shortcut)
-    run_config["style_encoder_use_shortcut"] = not bool(args.disable_encoder_shortcut)
     run_config["grad_clip_min_norm"] = None if args.grad_clip_min_norm is None else float(args.grad_clip_min_norm)
 
     (args.save_dir / "train_config.json").write_text(

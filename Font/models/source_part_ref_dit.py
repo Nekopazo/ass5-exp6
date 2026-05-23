@@ -26,109 +26,159 @@ def _group_count(channels: int) -> int:
     return 1
 
 
-class ResDownBlock(nn.Module):
-    """Residual downsampling block for glyph token encoders."""
+def _build_encoder_norm(channels: int, *, norm_type: str) -> nn.Module:
+    if str(norm_type) != "group":
+        raise ValueError(f"Unsupported encoder norm_type: {norm_type!r}")
+    return nn.GroupNorm(_group_count(channels), channels)
+
+
+class ConvBlock(nn.Module):
+    """Convolutional encoder block with optional spatial downsampling."""
 
     def __init__(
         self,
         in_channels: int,
         out_channels: int,
         *,
-        use_shortcut: bool = True,
+        norm_type: str,
+        downsample: bool,
     ) -> None:
+        super().__init__()
         self.in_channels = int(in_channels)
         self.out_channels = int(out_channels)
-        self.use_shortcut = bool(use_shortcut)
-        super().__init__()
         self.main = nn.Sequential(
-            nn.GroupNorm(_group_count(self.in_channels), self.in_channels),
+            _build_encoder_norm(self.in_channels, norm_type=norm_type),
             nn.SiLU(),
-            nn.Conv2d(self.in_channels, self.out_channels, kernel_size=3, padding=1, bias=False),
-            nn.GroupNorm(_group_count(self.out_channels), self.out_channels),
+            nn.Conv2d(
+                self.in_channels,
+                self.out_channels,
+                kernel_size=3,
+                stride=2 if downsample else 1,
+                padding=1,
+                bias=False,
+            ),
+            _build_encoder_norm(self.out_channels, norm_type=norm_type),
             nn.SiLU(),
             nn.Conv2d(self.out_channels, self.out_channels, kernel_size=3, padding=1, bias=False),
-            nn.AvgPool2d(2),
-        )
-        self.shortcut = (
-            nn.Sequential(
-                nn.AvgPool2d(2),
-                nn.Conv2d(self.in_channels, self.out_channels, kernel_size=1, bias=False),
-            )
-            if self.use_shortcut
-            else None
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        main = self.main(x)
-        if self.shortcut is None:
-            return main
-        return main + self.shortcut(x)
+        return self.main(x)
+
+
+class ResBlock(nn.Module):
+    """Residual block with optional spatial downsampling on the skip path."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        *,
+        norm_type: str,
+        downsample: bool = False,
+    ) -> None:
+        super().__init__()
+        self.in_channels = int(in_channels)
+        self.out_channels = int(out_channels)
+        self.downsample = bool(downsample)
+        stride = 2 if self.downsample else 1
+        self.conv1 = nn.Conv2d(
+            self.in_channels,
+            self.out_channels,
+            kernel_size=3,
+            stride=stride,
+            padding=1,
+            bias=False,
+        )
+        self.conv2 = nn.Conv2d(self.out_channels, self.out_channels, kernel_size=3, padding=1, bias=False)
+        self.norm1 = _build_encoder_norm(self.in_channels, norm_type=norm_type)
+        self.norm2 = _build_encoder_norm(self.out_channels, norm_type=norm_type)
+        if self.downsample or self.in_channels != self.out_channels:
+            self.skip = nn.Conv2d(
+                self.in_channels,
+                self.out_channels,
+                kernel_size=1,
+                stride=stride,
+                bias=False,
+            )
+        else:
+            self.skip = nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = self.skip(x)
+        h = self.conv1(F.silu(self.norm1(x)))
+        h = self.conv2(F.silu(self.norm2(h)))
+        return h + residual
 
 
 class CustomResidualGlyphEncoder(nn.Module):
-    """Fixed RGB glyph encoder producing a 16x16 map of 256-dim tokens."""
+    """Fixed RGB glyph encoder producing a 16x16 map of 256-dim tokens from 256x256 input."""
 
     def __init__(
         self,
         *,
         in_channels: int = 3,
-        image_size: int = 128,
+        image_size: int = 256,
         output_grid_size: int = 16,
         hidden_dim: int = 256,
-        base_channels: int = 64,
+        base_channels: int = 16,
         max_channels: int = 256,
-        block_depth: int = 3,
-        use_shortcut: bool = True,
+        block_depth: int = 4,
+        norm_type: str = "group",
     ) -> None:
         super().__init__()
         if int(in_channels) != 3:
             raise ValueError(f"CustomResidualGlyphEncoder requires RGB input, got {in_channels}")
-        if int(image_size) != 128:
-            raise ValueError(f"CustomResidualGlyphEncoder is fixed to image_size=128, got {image_size}")
+        if int(image_size) != 256:
+            raise ValueError(f"CustomResidualGlyphEncoder is fixed to image_size=256, got {image_size}")
         if int(output_grid_size) != 16:
             raise ValueError(f"CustomResidualGlyphEncoder is fixed to output_grid_size=16, got {output_grid_size}")
         if int(hidden_dim) != 256:
             raise ValueError(f"CustomResidualGlyphEncoder is fixed to hidden_dim=256, got {hidden_dim}")
-        if int(base_channels) != 64 or int(max_channels) != 256:
+        if int(base_channels) != 16 or int(max_channels) != 256:
             raise ValueError(
-                "CustomResidualGlyphEncoder is fixed to base_channels=64 and max_channels=256, "
+                "CustomResidualGlyphEncoder is fixed to base_channels=16 and max_channels=256, "
                 f"got {base_channels} and {max_channels}"
             )
-        if int(block_depth) != 3:
-            raise ValueError(f"CustomResidualGlyphEncoder is fixed to 3 ResDownBlocks, got {block_depth}")
+        if int(block_depth) != 4:
+            raise ValueError(f"CustomResidualGlyphEncoder is fixed to 4 downsampling stages, got {block_depth}")
+        self.in_channels = int(in_channels)
         self.image_size = int(image_size)
         self.output_grid_size = int(output_grid_size)
         self.hidden_dim = int(hidden_dim)
         self.base_channels = int(base_channels)
         self.max_channels = int(max_channels)
-        self.block_depth = 3
-        self.downsample_depth = 3
+        self.block_depth = 4
+        self.downsample_depth = 4
         self.local_hidden_dim = self.hidden_dim
-        self.use_shortcut = bool(use_shortcut)
+        self.norm_type = str(norm_type)
+        self.stem = nn.Sequential(
+            nn.Conv2d(self.in_channels, self.base_channels, kernel_size=3, padding=1, bias=False),
+            _build_encoder_norm(self.base_channels, norm_type=self.norm_type),
+            nn.SiLU(),
+        )
         self.blocks = nn.ModuleList(
             (
-                ResDownBlock(3, 64, use_shortcut=self.use_shortcut),
-                ResDownBlock(64, 128, use_shortcut=self.use_shortcut),
-                ResDownBlock(128, 256, use_shortcut=self.use_shortcut),
+                ConvBlock(16, 32, norm_type=self.norm_type, downsample=True),
+                ConvBlock(32, 64, norm_type=self.norm_type, downsample=True),
+                ConvBlock(64, 128, norm_type=self.norm_type, downsample=True),
+                ResBlock(128, 128, norm_type=self.norm_type, downsample=False),
+                ResBlock(128, 128, norm_type=self.norm_type, downsample=False),
+                ResBlock(128, 256, norm_type=self.norm_type, downsample=True),
+                ResBlock(256, 256, norm_type=self.norm_type, downsample=False),
             )
         )
-        self.tail = nn.Sequential(
-            nn.GroupNorm(_group_count(self.hidden_dim), self.hidden_dim),
-            nn.SiLU(),
-            nn.Conv2d(self.hidden_dim, self.hidden_dim, kernel_size=1),
-        )
-
     def forward_features(self, x: torch.Tensor) -> list[torch.Tensor]:
         if x.dim() != 4:
             raise ValueError(f"expected BCHW tensor, got {tuple(x.shape)}")
-        if x.shape[1:] != (3, 128, 128):
-            raise ValueError(f"expected RGB 128x128 glyph tensor, got {tuple(x.shape)}")
+        if x.shape[1:] != (3, 256, 256):
+            raise ValueError(f"expected RGB 256x256 glyph tensor, got {tuple(x.shape)}")
         features: list[torch.Tensor] = []
+        x = self.stem(x)
+        features.append(x)
         for block in self.blocks:
             x = block(x)
             features.append(x)
-        x = self.tail(x)
-        features.append(x)
         return features
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -137,12 +187,29 @@ class CustomResidualGlyphEncoder(nn.Module):
 
 class ContentEncoder(CustomResidualGlyphEncoder):
     """Content glyph encoder with the shared architecture and separate weights."""
-    pass
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(norm_type="group", **kwargs)
+        self.blocks = nn.ModuleList(
+            (
+                ConvBlock(16, 32, norm_type=self.norm_type, downsample=True),
+                ConvBlock(32, 64, norm_type=self.norm_type, downsample=True),
+                ResBlock(64, 64, norm_type=self.norm_type, downsample=False),
+                ResBlock(64, 64, norm_type=self.norm_type, downsample=False),
+                ResBlock(64, 128, norm_type=self.norm_type, downsample=True),
+                ResBlock(128, 128, norm_type=self.norm_type, downsample=False),
+                ResBlock(128, 128, norm_type=self.norm_type, downsample=False),
+                ResBlock(128, 256, norm_type=self.norm_type, downsample=True),
+                ResBlock(256, 256, norm_type=self.norm_type, downsample=False),
+            )
+        )
 
 
 class StyleEncoder(CustomResidualGlyphEncoder):
     """Style glyph encoder with the shared architecture and separate weights."""
-    pass
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(norm_type="group", **kwargs)
 
 
 class ContentStyleCrossAttention(nn.Module):
@@ -267,14 +334,12 @@ class SourcePartRefDiT(nn.Module):
         self,
         *,
         in_channels: int = 3,
-        image_size: int = 128,
-        patch_size: int = 8,
+        image_size: int = 256,
+        patch_size: int = 16,
         patch_embed_bottleneck_dim: int = 0,
         encoder_hidden_dim: int = 256,
-        content_encoder_block_depth: int = 3,
-        style_encoder_block_depth: int = 3,
-        content_encoder_use_shortcut: bool = True,
-        style_encoder_use_shortcut: bool = True,
+        content_encoder_block_depth: int = 4,
+        style_encoder_block_depth: int = 4,
         dit_hidden_dim: int = 256,
         dit_depth: int = 12,
         dit_heads: int = 8,
@@ -283,7 +348,7 @@ class SourcePartRefDiT(nn.Module):
         norm_variant: str = "rms",
         content_injection_layers: Sequence[int] | None = None,
         conditioning_injection_mode: str = "all",
-        content_style_fusion_heads: int = 4,
+        content_style_fusion_heads: int = 8,
     ) -> None:
         super().__init__()
         if int(in_channels) != 3:
@@ -299,8 +364,6 @@ class SourcePartRefDiT(nn.Module):
         self.encoder_hidden_dim = int(encoder_hidden_dim)
         self.content_encoder_block_depth = max(1, int(content_encoder_block_depth))
         self.style_encoder_block_depth = max(1, int(style_encoder_block_depth))
-        self.content_encoder_use_shortcut = bool(content_encoder_use_shortcut)
-        self.style_encoder_use_shortcut = bool(style_encoder_use_shortcut)
         self.dit_hidden_dim = int(dit_hidden_dim)
         self.dit_depth = int(dit_depth)
         self.dit_heads = int(dit_heads)
@@ -339,7 +402,6 @@ class SourcePartRefDiT(nn.Module):
             output_grid_size=self.patch_grid_size,
             hidden_dim=self.encoder_hidden_dim,
             block_depth=self.content_encoder_block_depth,
-            use_shortcut=self.content_encoder_use_shortcut,
         )
         self.style_encoder = StyleEncoder(
             in_channels=self.in_channels,
@@ -347,7 +409,6 @@ class SourcePartRefDiT(nn.Module):
             output_grid_size=self.patch_grid_size,
             hidden_dim=self.encoder_hidden_dim,
             block_depth=self.style_encoder_block_depth,
-            use_shortcut=self.style_encoder_use_shortcut,
         )
         self.style_token_hidden_dim = int(self.style_encoder.local_hidden_dim)
         self.style_token_proj = (
@@ -436,8 +497,6 @@ class SourcePartRefDiT(nn.Module):
             "encoder_hidden_dim": int(self.encoder_hidden_dim),
             "content_encoder_block_depth": int(self.content_encoder_block_depth),
             "style_encoder_block_depth": int(self.style_encoder_block_depth),
-            "content_encoder_use_shortcut": bool(self.content_encoder_use_shortcut),
-            "style_encoder_use_shortcut": bool(self.style_encoder_use_shortcut),
             "dit_hidden_dim": int(self.dit_hidden_dim),
             "dit_depth": int(self.dit_depth),
             "dit_heads": int(self.dit_heads),
