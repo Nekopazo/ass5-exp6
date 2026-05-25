@@ -812,7 +812,7 @@ def main() -> None:
     run_config["norm_variant"] = "rms"
     run_config["ode_solver"] = "heun_last_euler"
     run_config["content_injection_layers"] = list(range(1, int(args.dit_depth) + 1))
-    run_config["content_style_fusion_heads"] = 4
+    run_config["content_style_fusion_heads"] = 8
     run_config["grad_clip_min_norm"] = None if args.grad_clip_min_norm is None else float(args.grad_clip_min_norm)
 
     (args.save_dir / "train_config.json").write_text(

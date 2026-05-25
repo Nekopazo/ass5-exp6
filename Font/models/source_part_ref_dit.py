@@ -12,6 +12,7 @@ import torch.nn.functional as F
 
 from .diffusion_transformer_backbone import (
     DiffusionTransformerBackbone,
+    FeedForward,
     _build_norm,
     _build_zero_linear,
     modulate,
@@ -111,8 +112,38 @@ class ResBlock(nn.Module):
         return h + residual
 
 
+class TransformerEncoderBlock(nn.Module):
+    """Pre-norm transformer block matching the DiT backbone's attention/MLP style."""
+
+    def __init__(
+        self,
+        *,
+        hidden_dim: int,
+        num_heads: int,
+        mlp_ratio: float,
+        norm_variant: str = "rms",
+    ) -> None:
+        super().__init__()
+        self.norm_attn = _build_norm(hidden_dim, norm_variant=norm_variant)
+        self.norm_mlp = _build_norm(hidden_dim, norm_variant=norm_variant)
+        self.attn = SDPAAttention(hidden_dim, num_heads)
+        self.mlp = FeedForward(hidden_dim, mlp_ratio, activation="swiglu")
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        rope: VisionRotaryEmbeddingFast,
+    ) -> torch.Tensor:
+        attn_in = self.norm_attn(x)
+        attn_out, _ = self.attn(attn_in, attn_in, attn_in, query_rope=rope, key_rope=rope, need_weights=False)
+        x = x + attn_out
+        x = x + self.mlp(self.norm_mlp(x))
+        return x
+
+
 class CustomResidualGlyphEncoder(nn.Module):
-    """Fixed RGB glyph encoder producing a 16x16 map of 256-dim tokens from 256x256 input."""
+    """Fixed RGB glyph transformer encoder producing a 16x16 map of 256-dim tokens."""
 
     def __init__(
         self,
@@ -121,10 +152,9 @@ class CustomResidualGlyphEncoder(nn.Module):
         image_size: int = 256,
         output_grid_size: int = 16,
         hidden_dim: int = 256,
-        base_channels: int = 16,
-        max_channels: int = 256,
         block_depth: int = 4,
         norm_type: str = "group",
+        num_heads: int = 4,
     ) -> None:
         super().__init__()
         if int(in_channels) != 3:
@@ -133,53 +163,67 @@ class CustomResidualGlyphEncoder(nn.Module):
             raise ValueError(f"CustomResidualGlyphEncoder is fixed to image_size=256, got {image_size}")
         if int(output_grid_size) != 16:
             raise ValueError(f"CustomResidualGlyphEncoder is fixed to output_grid_size=16, got {output_grid_size}")
-        if int(hidden_dim) != 256:
-            raise ValueError(f"CustomResidualGlyphEncoder is fixed to hidden_dim=256, got {hidden_dim}")
-        if int(base_channels) != 16 or int(max_channels) != 256:
-            raise ValueError(
-                "CustomResidualGlyphEncoder is fixed to base_channels=16 and max_channels=256, "
-                f"got {base_channels} and {max_channels}"
-            )
-        if int(block_depth) != 4:
-            raise ValueError(f"CustomResidualGlyphEncoder is fixed to 4 downsampling stages, got {block_depth}")
+        if int(hidden_dim) <= 0:
+            raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
+        if int(block_depth) <= 0:
+            raise ValueError(f"block_depth must be positive, got {block_depth}")
         self.in_channels = int(in_channels)
         self.image_size = int(image_size)
         self.output_grid_size = int(output_grid_size)
         self.hidden_dim = int(hidden_dim)
-        self.base_channels = int(base_channels)
-        self.max_channels = int(max_channels)
-        self.block_depth = 4
+        self.block_depth = int(block_depth)
         self.downsample_depth = 4
         self.local_hidden_dim = self.hidden_dim
         self.norm_type = str(norm_type)
-        self.stem = nn.Sequential(
-            nn.Conv2d(self.in_channels, self.base_channels, kernel_size=3, padding=1, bias=False),
-            _build_encoder_norm(self.base_channels, norm_type=self.norm_type),
-            nn.SiLU(),
+        self.num_heads = int(num_heads)
+        self.patch_size = self.image_size // self.output_grid_size
+        if self.patch_size * self.output_grid_size != self.image_size:
+            raise ValueError(
+                "CustomResidualGlyphEncoder requires image_size divisible by output_grid_size, "
+                f"got image_size={self.image_size}, output_grid_size={self.output_grid_size}"
+            )
+        self.num_tokens = self.output_grid_size * self.output_grid_size
+        patch_dim = self.in_channels * self.patch_size * self.patch_size
+        self.patch_embed = nn.Linear(patch_dim, self.hidden_dim)
+        head_dim = self.hidden_dim // self.num_heads
+        if self.hidden_dim % self.num_heads != 0 or head_dim % 4 != 0:
+            raise ValueError(
+                "Encoder requires hidden_dim divisible by num_heads and head dim divisible by 4 for RoPE, "
+                f"got hidden_dim={self.hidden_dim}, num_heads={self.num_heads}"
+            )
+        self.encoder_rope = VisionRotaryEmbeddingFast(
+            dim=head_dim // 2,
+            pt_seq_len=self.output_grid_size,
         )
         self.blocks = nn.ModuleList(
-            (
-                ConvBlock(16, 32, norm_type=self.norm_type, downsample=True),
-                ConvBlock(32, 64, norm_type=self.norm_type, downsample=True),
-                ConvBlock(64, 128, norm_type=self.norm_type, downsample=True),
-                ResBlock(128, 128, norm_type=self.norm_type, downsample=False),
-                ResBlock(128, 128, norm_type=self.norm_type, downsample=False),
-                ResBlock(128, 256, norm_type=self.norm_type, downsample=True),
-                ResBlock(256, 256, norm_type=self.norm_type, downsample=False),
+            TransformerEncoderBlock(
+                hidden_dim=self.hidden_dim,
+                num_heads=self.num_heads,
+                mlp_ratio=4.0,
+                norm_variant="rms",
             )
+            for _ in range(self.block_depth)
         )
+        self.final_norm = _build_norm(self.hidden_dim, norm_variant="rms")
+
+    def _patchify(self, x: torch.Tensor) -> torch.Tensor:
+        patch_tokens = F.unfold(
+            x,
+            kernel_size=self.patch_size,
+            stride=self.patch_size,
+        ).transpose(1, 2)
+        return patch_tokens.contiguous()
+
     def forward_features(self, x: torch.Tensor) -> list[torch.Tensor]:
         if x.dim() != 4:
             raise ValueError(f"expected BCHW tensor, got {tuple(x.shape)}")
         if x.shape[1:] != (3, 256, 256):
             raise ValueError(f"expected RGB 256x256 glyph tensor, got {tuple(x.shape)}")
-        features: list[torch.Tensor] = []
-        x = self.stem(x)
-        features.append(x)
+        patch_tokens = self.patch_embed(self._patchify(x))
         for block in self.blocks:
-            x = block(x)
-            features.append(x)
-        return features
+            patch_tokens = block(patch_tokens, rope=self.encoder_rope)
+        patch_tokens = self.final_norm(patch_tokens)
+        return [patch_tokens]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.forward_features(x)[-1]
@@ -189,26 +233,25 @@ class ContentEncoder(CustomResidualGlyphEncoder):
     """Content glyph encoder with the shared architecture and separate weights."""
 
     def __init__(self, **kwargs) -> None:
+        if "hidden_dim" not in kwargs:
+            kwargs["hidden_dim"] = 512
+        if "block_depth" not in kwargs:
+            kwargs["block_depth"] = 4
+        if "num_heads" not in kwargs:
+            kwargs["num_heads"] = 8
         super().__init__(norm_type="group", **kwargs)
-        self.blocks = nn.ModuleList(
-            (
-                ConvBlock(16, 32, norm_type=self.norm_type, downsample=True),
-                ConvBlock(32, 64, norm_type=self.norm_type, downsample=True),
-                ResBlock(64, 64, norm_type=self.norm_type, downsample=False),
-                ResBlock(64, 64, norm_type=self.norm_type, downsample=False),
-                ResBlock(64, 128, norm_type=self.norm_type, downsample=True),
-                ResBlock(128, 128, norm_type=self.norm_type, downsample=False),
-                ResBlock(128, 128, norm_type=self.norm_type, downsample=False),
-                ResBlock(128, 256, norm_type=self.norm_type, downsample=True),
-                ResBlock(256, 256, norm_type=self.norm_type, downsample=False),
-            )
-        )
 
 
 class StyleEncoder(CustomResidualGlyphEncoder):
     """Style glyph encoder with the shared architecture and separate weights."""
 
     def __init__(self, **kwargs) -> None:
+        if "hidden_dim" not in kwargs:
+            kwargs["hidden_dim"] = 512
+        if "block_depth" not in kwargs:
+            kwargs["block_depth"] = 4
+        if "num_heads" not in kwargs:
+            kwargs["num_heads"] = 8
         super().__init__(norm_type="group", **kwargs)
 
 
@@ -232,12 +275,31 @@ class ContentStyleCrossAttention(nn.Module):
                 "JiT-style 2D RoPE requires cross-attention head dim divisible by 4, "
                 f"got embed_dim={embed_dim} num_heads={num_heads}"
             )
-
         self.attn = SDPAAttention(self.embed_dim, self.num_heads)
+        self.fusion_norm = _build_norm(self.embed_dim, norm_variant="rms")
+        self.fusion_mlp = FeedForward(self.embed_dim, 4.0, activation="swiglu")
+        self.self_attn_norm = _build_norm(self.embed_dim, norm_variant="rms")
+        self.self_attn = SDPAAttention(self.embed_dim, self.num_heads)
+        self.self_mlp_norm = _build_norm(self.embed_dim, norm_variant="rms")
+        self.self_mlp = FeedForward(self.embed_dim, 4.0, activation="swiglu")
         self.rope = VisionRotaryEmbeddingFast(
             dim=head_dim // 2,
             pt_seq_len=self.grid_size,
         )
+
+    def _post_fusion(self, fused_tokens: torch.Tensor) -> torch.Tensor:
+        fused_tokens = fused_tokens + self.fusion_mlp(self.fusion_norm(fused_tokens))
+        self_attn_in = self.self_attn_norm(fused_tokens)
+        self_attn_out, _ = self.self_attn(
+            self_attn_in,
+            self_attn_in,
+            self_attn_in,
+            query_rope=self.rope,
+            key_rope=self.rope,
+            need_weights=False,
+        )
+        fused_tokens = fused_tokens + self_attn_out
+        return fused_tokens + self.self_mlp(self.self_mlp_norm(fused_tokens))
 
     def _validate_style_inputs(self, style_tokens: torch.Tensor) -> None:
         if style_tokens.dim() != 4:
@@ -324,7 +386,8 @@ class ContentStyleCrossAttention(nn.Module):
             flat_style_value,
             need_weights=False,
         )
-        return style_context.view(batch_size, query_len, self.embed_dim).contiguous()
+        fused_tokens = style_context.view(batch_size, query_len, self.embed_dim).contiguous()
+        return self._post_fusion(fused_tokens)
 
 
 class SourcePartRefDiT(nn.Module):
@@ -337,7 +400,7 @@ class SourcePartRefDiT(nn.Module):
         image_size: int = 256,
         patch_size: int = 16,
         patch_embed_bottleneck_dim: int = 0,
-        encoder_hidden_dim: int = 256,
+        encoder_hidden_dim: int = 512,
         content_encoder_block_depth: int = 4,
         style_encoder_block_depth: int = 4,
         dit_hidden_dim: int = 256,
@@ -402,6 +465,7 @@ class SourcePartRefDiT(nn.Module):
             output_grid_size=self.patch_grid_size,
             hidden_dim=self.encoder_hidden_dim,
             block_depth=self.content_encoder_block_depth,
+            num_heads=self.content_style_fusion_heads,
         )
         self.style_encoder = StyleEncoder(
             in_channels=self.in_channels,
@@ -409,6 +473,7 @@ class SourcePartRefDiT(nn.Module):
             output_grid_size=self.patch_grid_size,
             hidden_dim=self.encoder_hidden_dim,
             block_depth=self.style_encoder_block_depth,
+            num_heads=self.content_style_fusion_heads,
         )
         self.style_token_hidden_dim = int(self.style_encoder.local_hidden_dim)
         self.style_token_proj = (
@@ -506,8 +571,7 @@ class SourcePartRefDiT(nn.Module):
         }
 
     def encode_content_tokens(self, content_img: torch.Tensor) -> torch.Tensor:
-        content_features = self.content_encoder(content_img)
-        return content_features.flatten(2).transpose(1, 2).contiguous()
+        return self.content_encoder(content_img)
 
     def _encode_style_features(self, style_img: torch.Tensor) -> torch.Tensor:
         if style_img.dim() == 4:
@@ -520,8 +584,7 @@ class SourcePartRefDiT(nn.Module):
             raise RuntimeError("style_img must contain at least one reference per sample")
 
         flat_style = style_img.view(batch * refs, channels, height, width)
-        style_features = self.style_encoder.forward_features(flat_style)[-1]
-        style_tokens = style_features.flatten(2).transpose(1, 2).contiguous()
+        style_tokens = self.style_encoder(flat_style)
         tokens_per_ref = int(style_tokens.size(1))
         style_tokens = style_tokens.view(batch, refs, tokens_per_ref, self.style_token_hidden_dim)
         return style_tokens
