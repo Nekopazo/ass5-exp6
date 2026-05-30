@@ -61,4 +61,3 @@ build_one() {
 
 build_one 64 60
 build_one 96 90
-build_one 256 240

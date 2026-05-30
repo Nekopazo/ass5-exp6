@@ -7,7 +7,6 @@ from collections import OrderedDict
 from pathlib import Path
 import io
 import json
-import math
 import os
 import random
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -27,7 +26,6 @@ class FontImageDataset(Dataset):
         self,
         project_root: Union[str, Path] = ".",
         *,
-        max_fonts: int = 0,
         style_ref_count: Optional[int] = None,
         style_ref_count_min: int = 8,
         style_ref_count_max: int = 8,
@@ -44,7 +42,6 @@ class FontImageDataset(Dataset):
         lmdb_decode_cache_size: int = 20_000,
     ) -> None:
         self.root = Path(project_root).resolve()
-        self.max_fonts = max(0, int(max_fonts))
         if style_ref_count is not None:
             fixed_ref_count = max(1, int(style_ref_count))
             self.style_ref_count_min = fixed_ref_count
@@ -94,8 +91,6 @@ class FontImageDataset(Dataset):
         lmdb_fonts = self._scan_lmdb_font_names(self._t_txn)
         entries = self._build_multi_font_entries(self._c_txn, self._t_txn, lmdb_fonts)
         entries = self._apply_font_split(entries)
-        if self.max_fonts > 0 and len(entries) > self.max_fonts:
-            entries = sorted(entries, key=lambda item: len(item[1]), reverse=True)[: self.max_fonts]
 
         self.font_names = [name for name, _ in entries]
         self.font_id_by_name = {name: idx for idx, name in enumerate(self.font_names)}
@@ -402,123 +397,6 @@ class FontImageDataset(Dataset):
 
     def __del__(self) -> None:
         self.close()
-
-
-class UniqueFontBatchSampler(Sampler[List[int]]):
-    """Yields batches with at most one sample per font."""
-
-    def __init__(self, dataset: FontImageDataset, batch_size: int, *, seed: int = 42, drop_last: bool = False) -> None:
-        self.dataset = dataset
-        self.batch_size = max(1, int(batch_size))
-        self.seed = int(seed)
-        self.drop_last = bool(drop_last)
-        self._epoch = 0
-
-    def __len__(self) -> int:
-        font_count = len(self.dataset.font_names)
-        if self.drop_last:
-            return font_count // self.batch_size
-        return int(math.ceil(font_count / self.batch_size))
-
-    def __iter__(self):
-        rng = random.Random(self.seed + self._epoch)
-        font_names = list(self.dataset.font_names)
-        rng.shuffle(font_names)
-
-        batch: List[int] = []
-        for font_name in font_names:
-            sample_indices = self.dataset.sample_indices_by_font[font_name]
-            batch.append(sample_indices[rng.randrange(len(sample_indices))])
-            if len(batch) == self.batch_size:
-                yield batch
-                batch = []
-
-        if batch and not self.drop_last:
-            yield batch
-        self._epoch += 1
-
-
-class CartesianFontCharBatchSampler(Sampler[List[int]]):
-    """Yields bounded cartesian-product batches from shuffled font and char groups.
-
-    Every emitted batch keeps the unique font and char counts within
-    fonts_per_batch/chars_per_batch. Incomplete raw cartesian groups are yielded
-    as smaller batches instead of being padded.
-    """
-
-    def __init__(
-        self,
-        dataset: FontImageDataset,
-        *,
-        fonts_per_batch: int = 8,
-        chars_per_batch: int = 8,
-        seed: int = 42,
-        drop_last: bool = False,
-    ) -> None:
-        self.dataset = dataset
-        self.fonts_per_batch = max(1, int(fonts_per_batch))
-        self.chars_per_batch = max(1, int(chars_per_batch))
-        self.seed = int(seed)
-        self.drop_last = bool(drop_last)
-        self.sample_count = len(self.dataset.samples)
-        self._stream_epoch = 0
-        self._cached_stream_epoch = -1
-        self._cached_stream_batches: List[List[int]] = []
-
-    def __len__(self) -> int:
-        font_groups = len(self._chunk_items(list(self.dataset.font_names), self.fonts_per_batch))
-        char_groups = len(self._chunk_items(list(self.dataset.split_char_indices), self.chars_per_batch))
-        return font_groups * char_groups
-
-    def __iter__(self):
-        raw_batches = self._raw_batches_for_stream_epoch(self._stream_epoch)
-        for raw_batch in raw_batches:
-            if not raw_batch:
-                continue
-            if len(raw_batch) == self.fonts_per_batch * self.chars_per_batch or not self.drop_last:
-                yield list(raw_batch)
-        self._stream_epoch += 1
-
-    def _raw_batches_for_stream_epoch(self, epoch: int) -> List[List[int]]:
-        epoch = int(epoch)
-        if epoch == self._cached_stream_epoch:
-            return self._cached_stream_batches
-
-        rng = random.Random(self.seed + epoch)
-        font_names = list(self.dataset.font_names)
-        char_indices = list(self.dataset.split_char_indices)
-        rng.shuffle(font_names)
-        rng.shuffle(char_indices)
-
-        font_groups = self._chunk_items(font_names, self.fonts_per_batch)
-        char_groups = self._chunk_items(char_indices, self.chars_per_batch)
-        raw_batches: List[List[int]] = []
-        for font_group in font_groups:
-            for char_group in char_groups:
-                batch: List[int] = []
-                for font_name in font_group:
-                    lookup = self.dataset.sample_index_by_font_char[font_name]
-                    for char_index in char_group:
-                        sample_index = lookup.get(int(char_index))
-                        if sample_index is not None:
-                            batch.append(int(sample_index))
-                raw_batches.append(batch)
-
-        self._cached_stream_epoch = epoch
-        self._cached_stream_batches = raw_batches
-        return raw_batches
-
-    def _chunk_items(self, items: List[Any], chunk_size: int) -> List[List[Any]]:
-        chunks: List[List[Any]] = []
-        if not items:
-            return chunks
-        for start in range(0, len(items), chunk_size):
-            chunk = items[start : start + chunk_size]
-            if len(chunk) < chunk_size and self.drop_last:
-                continue
-            chunks.append(chunk)
-        return chunks
-
 
 if __name__ == "__main__":
     dataset = FontImageDataset(project_root=Path("."))

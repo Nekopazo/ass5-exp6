@@ -143,13 +143,13 @@ class TransformerEncoderBlock(nn.Module):
 
 
 class CustomResidualGlyphEncoder(nn.Module):
-    """Fixed RGB glyph transformer encoder producing a 16x16 map of 256-dim tokens."""
+    """Fixed RGB glyph transformer encoder producing a configurable token grid."""
 
     def __init__(
         self,
         *,
         in_channels: int = 3,
-        image_size: int = 256,
+        image_size: int = 128,
         output_grid_size: int = 16,
         hidden_dim: int = 256,
         block_depth: int = 4,
@@ -159,10 +159,10 @@ class CustomResidualGlyphEncoder(nn.Module):
         super().__init__()
         if int(in_channels) != 3:
             raise ValueError(f"CustomResidualGlyphEncoder requires RGB input, got {in_channels}")
-        if int(image_size) != 256:
-            raise ValueError(f"CustomResidualGlyphEncoder is fixed to image_size=256, got {image_size}")
-        if int(output_grid_size) != 16:
-            raise ValueError(f"CustomResidualGlyphEncoder is fixed to output_grid_size=16, got {output_grid_size}")
+        if int(image_size) <= 0:
+            raise ValueError(f"image_size must be positive, got {image_size}")
+        if int(output_grid_size) <= 0:
+            raise ValueError(f"output_grid_size must be positive, got {output_grid_size}")
         if int(hidden_dim) <= 0:
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
         if int(block_depth) <= 0:
@@ -181,10 +181,10 @@ class CustomResidualGlyphEncoder(nn.Module):
             raise ValueError(
                 "CustomResidualGlyphEncoder requires image_size divisible by output_grid_size, "
                 f"got image_size={self.image_size}, output_grid_size={self.output_grid_size}"
-            )
+        )
         self.num_tokens = self.output_grid_size * self.output_grid_size
         patch_dim = self.in_channels * self.patch_size * self.patch_size
-        self.patch_embed = nn.Linear(patch_dim, self.hidden_dim)
+        self.patch_embed_proj1 = nn.Linear(patch_dim, self.hidden_dim, bias=True)
         head_dim = self.hidden_dim // self.num_heads
         if self.hidden_dim % self.num_heads != 0 or head_dim % 4 != 0:
             raise ValueError(
@@ -214,11 +214,15 @@ class CustomResidualGlyphEncoder(nn.Module):
         ).transpose(1, 2)
         return patch_tokens.contiguous()
 
+    def patch_embed(self, patch_tokens: torch.Tensor) -> torch.Tensor:
+        return self.patch_embed_proj1(patch_tokens)
+
     def forward_features(self, x: torch.Tensor) -> list[torch.Tensor]:
         if x.dim() != 4:
             raise ValueError(f"expected BCHW tensor, got {tuple(x.shape)}")
-        if x.shape[1:] != (3, 256, 256):
-            raise ValueError(f"expected RGB 256x256 glyph tensor, got {tuple(x.shape)}")
+        expected_shape = (3, self.image_size, self.image_size)
+        if x.shape[1:] != expected_shape:
+            raise ValueError(f"expected RGB {self.image_size}x{self.image_size} glyph tensor, got {tuple(x.shape)}")
         patch_tokens = self.patch_embed(self._patchify(x))
         for block in self.blocks:
             patch_tokens = block(patch_tokens, rope=self.encoder_rope)
@@ -276,30 +280,10 @@ class ContentStyleCrossAttention(nn.Module):
                 f"got embed_dim={embed_dim} num_heads={num_heads}"
             )
         self.attn = SDPAAttention(self.embed_dim, self.num_heads)
-        self.fusion_norm = _build_norm(self.embed_dim, norm_variant="rms")
-        self.fusion_mlp = FeedForward(self.embed_dim, 4.0, activation="swiglu")
-        self.self_attn_norm = _build_norm(self.embed_dim, norm_variant="rms")
-        self.self_attn = SDPAAttention(self.embed_dim, self.num_heads)
-        self.self_mlp_norm = _build_norm(self.embed_dim, norm_variant="rms")
-        self.self_mlp = FeedForward(self.embed_dim, 4.0, activation="swiglu")
         self.rope = VisionRotaryEmbeddingFast(
             dim=head_dim // 2,
             pt_seq_len=self.grid_size,
         )
-
-    def _post_fusion(self, fused_tokens: torch.Tensor) -> torch.Tensor:
-        fused_tokens = fused_tokens + self.fusion_mlp(self.fusion_norm(fused_tokens))
-        self_attn_in = self.self_attn_norm(fused_tokens)
-        self_attn_out, _ = self.self_attn(
-            self_attn_in,
-            self_attn_in,
-            self_attn_in,
-            query_rope=self.rope,
-            key_rope=self.rope,
-            need_weights=False,
-        )
-        fused_tokens = fused_tokens + self_attn_out
-        return fused_tokens + self.self_mlp(self.self_mlp_norm(fused_tokens))
 
     def _validate_style_inputs(self, style_tokens: torch.Tensor) -> None:
         if style_tokens.dim() != 4:
@@ -386,8 +370,7 @@ class ContentStyleCrossAttention(nn.Module):
             flat_style_value,
             need_weights=False,
         )
-        fused_tokens = style_context.view(batch_size, query_len, self.embed_dim).contiguous()
-        return self._post_fusion(fused_tokens)
+        return style_context.view(batch_size, query_len, self.embed_dim).contiguous()
 
 
 class SourcePartRefDiT(nn.Module):
@@ -397,21 +380,23 @@ class SourcePartRefDiT(nn.Module):
         self,
         *,
         in_channels: int = 3,
-        image_size: int = 256,
-        patch_size: int = 16,
-        patch_embed_bottleneck_dim: int = 0,
-        encoder_hidden_dim: int = 512,
+        image_size: int = 128,
+        patch_size: int = 8,
+        encoder_hidden_dim: int = 384,
+        style_encoder_hidden_dim: int = 384,
         content_encoder_block_depth: int = 4,
         style_encoder_block_depth: int = 4,
-        dit_hidden_dim: int = 256,
-        dit_depth: int = 12,
+        content_encoder_heads: int = 6,
+        style_encoder_heads: int = 6,
+        dit_hidden_dim: int = 512,
+        dit_depth: int = 8,
         dit_heads: int = 8,
         dit_mlp_ratio: float = 4.0,
         ffn_activation: str = "swiglu",
         norm_variant: str = "rms",
         content_injection_layers: Sequence[int] | None = None,
         conditioning_injection_mode: str = "all",
-        content_style_fusion_heads: int = 8,
+        content_style_fusion_heads: int = 6,
     ) -> None:
         super().__init__()
         if int(in_channels) != 3:
@@ -421,12 +406,14 @@ class SourcePartRefDiT(nn.Module):
         self.in_channels = int(in_channels)
         self.image_size = int(image_size)
         self.patch_size = int(patch_size)
-        self.patch_embed_bottleneck_dim = int(patch_embed_bottleneck_dim)
         self.patch_grid_size = self.image_size // self.patch_size
         self.num_patches = self.patch_grid_size * self.patch_grid_size
         self.encoder_hidden_dim = int(encoder_hidden_dim)
+        self.style_encoder_hidden_dim = int(style_encoder_hidden_dim)
         self.content_encoder_block_depth = max(1, int(content_encoder_block_depth))
         self.style_encoder_block_depth = max(1, int(style_encoder_block_depth))
+        self.content_encoder_heads = int(content_encoder_heads)
+        self.style_encoder_heads = int(style_encoder_heads)
         self.dit_hidden_dim = int(dit_hidden_dim)
         self.dit_depth = int(dit_depth)
         self.dit_heads = int(dit_heads)
@@ -465,15 +452,15 @@ class SourcePartRefDiT(nn.Module):
             output_grid_size=self.patch_grid_size,
             hidden_dim=self.encoder_hidden_dim,
             block_depth=self.content_encoder_block_depth,
-            num_heads=self.content_style_fusion_heads,
+            num_heads=self.content_encoder_heads,
         )
         self.style_encoder = StyleEncoder(
             in_channels=self.in_channels,
             image_size=self.image_size,
             output_grid_size=self.patch_grid_size,
-            hidden_dim=self.encoder_hidden_dim,
+            hidden_dim=self.style_encoder_hidden_dim,
             block_depth=self.style_encoder_block_depth,
-            num_heads=self.content_style_fusion_heads,
+            num_heads=self.style_encoder_heads,
         )
         self.style_token_hidden_dim = int(self.style_encoder.local_hidden_dim)
         self.style_token_proj = (
@@ -482,8 +469,8 @@ class SourcePartRefDiT(nn.Module):
             else nn.Linear(self.style_token_hidden_dim, self.encoder_hidden_dim)
         )
         self.content_style_attn = ContentStyleCrossAttention(
-            embed_dim=self.encoder_hidden_dim,
-            num_heads=self.content_style_fusion_heads,
+            self.encoder_hidden_dim,
+            self.content_style_fusion_heads,
             grid_size=self.patch_grid_size,
         )
         self.conditioning_dim = self.encoder_hidden_dim * 2
@@ -491,7 +478,6 @@ class SourcePartRefDiT(nn.Module):
             in_channels=self.in_channels,
             image_size=self.image_size,
             patch_size=self.patch_size,
-            patch_embed_bottleneck_dim=self.patch_embed_bottleneck_dim,
             hidden_dim=self.dit_hidden_dim,
             conditioning_dim=self.conditioning_dim,
             depth=self.dit_depth,
@@ -531,11 +517,6 @@ class SourcePartRefDiT(nn.Module):
         nn.init.xavier_uniform_(patch_proj1.view(patch_proj1.shape[0], -1))
         if self.backbone.patch_embed_proj1.bias is not None:
             nn.init.constant_(self.backbone.patch_embed_proj1.bias, 0)
-        if self.backbone.use_patch_embed_bottleneck:
-            patch_proj2 = self.backbone.patch_embed_proj2.weight.data
-            nn.init.xavier_uniform_(patch_proj2.view(patch_proj2.shape[0], -1))
-            if self.backbone.patch_embed_proj2.bias is not None:
-                nn.init.constant_(self.backbone.patch_embed_proj2.bias, 0)
 
         nn.init.normal_(self.backbone.time_mlp[0].weight, std=0.02)
         nn.init.normal_(self.backbone.time_mlp[2].weight, std=0.02)
@@ -558,10 +539,12 @@ class SourcePartRefDiT(nn.Module):
             "in_channels": int(self.in_channels),
             "image_size": int(self.image_size),
             "patch_size": int(self.patch_size),
-            "patch_embed_bottleneck_dim": int(self.patch_embed_bottleneck_dim),
             "encoder_hidden_dim": int(self.encoder_hidden_dim),
+            "style_encoder_hidden_dim": int(self.style_encoder_hidden_dim),
             "content_encoder_block_depth": int(self.content_encoder_block_depth),
             "style_encoder_block_depth": int(self.style_encoder_block_depth),
+            "content_encoder_heads": int(self.content_encoder_heads),
+            "style_encoder_heads": int(self.style_encoder_heads),
             "dit_hidden_dim": int(self.dit_hidden_dim),
             "dit_depth": int(self.dit_depth),
             "dit_heads": int(self.dit_heads),
@@ -591,40 +574,36 @@ class SourcePartRefDiT(nn.Module):
 
     def encode_style_token_bank(self, style_img: torch.Tensor) -> torch.Tensor:
         style_tokens = self._encode_style_features(style_img)
-        return self.style_token_proj(style_tokens).contiguous()
-
-    def precompute_style_bank_kv(
-        self,
-        style_tokens: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.content_style_attn.project_style_bank_kv(style_tokens)
-
-    def precompute_content_query(
-        self,
-        content_tokens: torch.Tensor,
-    ) -> torch.Tensor:
-        return self.content_style_attn.project_content_query(content_tokens)
+        style_tokens = self.style_token_proj(style_tokens)
+        return style_tokens.contiguous()
 
     def build_style_condition_tokens(
         self,
         content_tokens: torch.Tensor,
-        style_token_bank: Optional[torch.Tensor] = None,
-        *,
-        content_query: Optional[torch.Tensor] = None,
-        style_key: Optional[torch.Tensor] = None,
-        style_value: Optional[torch.Tensor] = None,
+        style_token_bank: torch.Tensor,
     ) -> torch.Tensor:
-        if content_query is None:
-            content_query = self.precompute_content_query(content_tokens)
-        if style_key is None or style_value is None:
-            if style_token_bank is None:
-                raise ValueError("style_token_bank is required when precomputed style_key/style_value are not provided")
-            style_key, style_value = self.precompute_style_bank_kv(style_token_bank)
-        return self.content_style_attn.fuse_content_style_tokens_from_preprojected_query(
+        expected_content_shape = (int(content_tokens.size(0)), self.num_patches, self.output_condition_half_dim)
+        if content_tokens.shape != expected_content_shape:
+            raise ValueError(
+                f"content_tokens shape mismatch: expected {expected_content_shape}, got {tuple(content_tokens.shape)}"
+            )
+        if style_token_bank.dim() != 4:
+            raise ValueError(
+                f"style_token_bank must be 4D [B, R, T, D], got {tuple(style_token_bank.shape)}"
+            )
+        expected_style_shape = (
+            int(content_tokens.size(0)),
+            int(style_token_bank.size(1)),
+            self.num_patches,
+            self.output_condition_half_dim,
+        )
+        if style_token_bank.shape != expected_style_shape:
+            raise ValueError(
+                f"style_token_bank shape mismatch: expected {expected_style_shape}, got {tuple(style_token_bank.shape)}"
+            )
+        return self.content_style_attn.fuse_content_style_tokens_from_projected(
             content_tokens,
-            content_query,
-            style_key,
-            style_value,
+            *self.content_style_attn.project_style_bank_kv(style_token_bank),
         )
 
     def precompute_backbone_condition_hidden_cache(
@@ -672,14 +651,16 @@ class SourcePartRefDiT(nn.Module):
                 "content token shape mismatch for final head: "
                 f"expected {expected_part_shape}, got {tuple(content_tokens.shape)}"
             )
-        if style_tokens.shape != expected_part_shape:
+        expected_style_shape = (content_tokens.size(0), self.num_patches, self.output_condition_half_dim)
+        if style_tokens.shape != expected_style_shape:
             raise ValueError(
-                "style token shape mismatch for final head: "
-                f"expected {expected_part_shape}, got {tuple(style_tokens.shape)}"
+                "style condition shape mismatch for final head: "
+                f"expected {expected_style_shape}, got {tuple(style_tokens.shape)}"
             )
         content_tokens = content_tokens.to(device=device, dtype=dtype)
         style_tokens = style_tokens.to(device=device, dtype=dtype)
-        return self.output_content_condition_to_hidden(content_tokens) + self.output_style_condition_to_hidden(style_tokens)
+        style_hidden = self.output_style_condition_to_hidden(style_tokens)
+        return self.output_content_condition_to_hidden(content_tokens) + style_hidden
 
     def decode_patch_tokens(
         self,
@@ -703,10 +684,11 @@ class SourcePartRefDiT(nn.Module):
                 "content token shape mismatch for final head: "
                 f"expected {expected_part_shape}, got {tuple(content_tokens.shape)}"
             )
-        if style_tokens.shape != expected_part_shape:
+        expected_style_shape = (patch_tokens.size(0), self.num_patches, self.output_condition_half_dim)
+        if style_tokens.shape != expected_style_shape:
             raise ValueError(
-                "style token shape mismatch for final head: "
-                f"expected {expected_part_shape}, got {tuple(style_tokens.shape)}"
+                "style condition shape mismatch for final head: "
+                f"expected {expected_style_shape}, got {tuple(style_tokens.shape)}"
             )
 
         time_hidden = self.output_time_to_hidden(
@@ -784,10 +766,7 @@ class SourcePartRefDiT(nn.Module):
     ) -> torch.Tensor:
         content_tokens = self.encode_content_tokens(content_img)
         style_token_bank = self.encode_style_token_bank(style_img)
-        style_tokens = self.build_style_condition_tokens(
-            content_tokens,
-            style_token_bank,
-        )
+        style_tokens = self.build_style_condition_tokens(content_tokens, style_token_bank)
         return self.predict(
             x_t_image,
             timesteps,

@@ -20,7 +20,6 @@ from evaluate_fixed_grid import (
 )
 from models.sdpa_attention import enable_torch_sdpa_backends
 from train import (
-    FixedFontCharBatchSampler,
     StyleEvalBatchCollator,
     configure_torch_cuda_performance,
 )
@@ -53,13 +52,26 @@ def build_full_val_loader(
     chars_per_batch: int,
 ):
     char_indices = list(dataset.split_char_indices)
-    sampler = FixedFontCharBatchSampler(
-        dataset,
-        font_names=list(dataset.font_names),
-        char_indices=char_indices,
-        fonts_per_batch=int(fonts_per_batch),
-        chars_per_batch=int(chars_per_batch),
-    )
+    font_groups = [
+        list(dataset.font_names)[start : start + max(1, int(fonts_per_batch))]
+        for start in range(0, len(dataset.font_names), max(1, int(fonts_per_batch)))
+    ]
+    char_groups = [
+        char_indices[start : start + max(1, int(chars_per_batch))]
+        for start in range(0, len(char_indices), max(1, int(chars_per_batch)))
+    ]
+    sampler: list[list[int]] = []
+    for font_group in font_groups:
+        for char_group in char_groups:
+            batch: list[int] = []
+            for font_name in font_group:
+                lookup = dataset.sample_index_by_font_char[font_name]
+                for char_index in char_group:
+                    sample_index = lookup.get(int(char_index))
+                    if sample_index is not None:
+                        batch.append(int(sample_index))
+            if batch:
+                sampler.append(batch)
     return torch.utils.data.DataLoader(
         dataset=dataset,
         batch_sampler=sampler,

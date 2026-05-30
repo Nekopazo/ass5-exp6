@@ -23,11 +23,24 @@ from models.sdpa_attention import enable_torch_sdpa_backends
 from models.source_part_ref_dit import SourcePartRefDiT
 from style_augment import build_base_glyph_transform
 from train import (
-    FixedFontCharBatchSampler,
     StyleEvalBatchCollator,
-    _pack_unique_content,
     configure_torch_cuda_performance,
 )
+
+
+def _pack_unique_content(samples) -> tuple[torch.Tensor, torch.Tensor]:
+    unique_contents = []
+    content_index = []
+    content_slot_by_char_id: dict[int, int] = {}
+    for sample in samples:
+        char_id = int(sample["char_id"])
+        slot = content_slot_by_char_id.get(char_id)
+        if slot is None:
+            slot = len(unique_contents)
+            content_slot_by_char_id[char_id] = slot
+            unique_contents.append(sample["content"])
+        content_index.append(slot)
+    return torch.stack(unique_contents, dim=0), torch.tensor(content_index, dtype=torch.long)
 
 
 def set_seed(seed: int) -> None:
@@ -56,6 +69,10 @@ def load_eval_trainer(checkpoint_path: Path, device: torch.device) -> XPredTrain
         raise RuntimeError(f"Checkpoint is not an x-pred checkpoint: {checkpoint_path}")
     trainer_config = checkpoint.get("trainer_config", {})
     model = SourcePartRefDiT(**checkpoint["model_config"])
+    if int(model.image_size) != 128:
+        raise RuntimeError(
+            f"Only 128-resolution checkpoints are supported, got image_size={model.image_size}"
+        )
     trainer = XPredTrainer(
         model,
         device,
@@ -79,12 +96,10 @@ def load_eval_trainer(checkpoint_path: Path, device: torch.device) -> XPredTrain
 
 
 def build_dataset(config: dict[str, Any], split: str, *, eval_style_ref_count: int) -> FontImageDataset:
-    image_size = int(config["image_size"])
-    glyph_transform = build_base_glyph_transform(image_size=image_size)
+    glyph_transform = build_base_glyph_transform(image_size=128)
     style_ref_count = max(1, int(eval_style_ref_count))
     return FontImageDataset(
         project_root=Path(config["data_root"]),
-        max_fonts=int(config.get("max_fonts", 0)),
         style_ref_count=style_ref_count,
         style_ref_count_min=int(config["style_ref_count_min"]),
         style_ref_count_max=int(config["style_ref_count_max"]),
@@ -164,13 +179,26 @@ def build_eval_loader(
     fixed_char_count = min(len(target_candidates), fixed_char_count)
     rng = random.Random(int(fixed_char_seed))
     char_indices = rng.sample(target_candidates, fixed_char_count)
-    batch_sampler = FixedFontCharBatchSampler(
-        dataset,
-        font_names=list(dataset.font_names),
-        char_indices=char_indices,
-        fonts_per_batch=int(fonts_per_batch),
-        chars_per_batch=int(chars_per_batch),
-    )
+    font_groups = [
+        list(dataset.font_names)[start : start + max(1, int(fonts_per_batch))]
+        for start in range(0, len(dataset.font_names), max(1, int(fonts_per_batch)))
+    ]
+    char_groups = [
+        char_indices[start : start + max(1, int(chars_per_batch))]
+        for start in range(0, len(char_indices), max(1, int(chars_per_batch)))
+    ]
+    batch_sampler: list[list[int]] = []
+    for font_group in font_groups:
+        for char_group in char_groups:
+            batch: list[int] = []
+            for font_name in font_group:
+                lookup = dataset.sample_index_by_font_char[font_name]
+                for char_index in char_group:
+                    sample_index = lookup.get(int(char_index))
+                    if sample_index is not None:
+                        batch.append(int(sample_index))
+            if batch:
+                batch_sampler.append(batch)
     return torch.utils.data.DataLoader(
         dataset=dataset,
         batch_sampler=batch_sampler,
@@ -211,11 +239,18 @@ def evaluate_split(
     for batch_idx, batch in enumerate(loader, start=1):
         set_seed(int(seed) + int(step) * 10_000 + (0 if split_name == "train" else 1_000) + batch_idx)
         target = batch["target"].to(device, non_blocking=True)
+        batch_size = int(target.size(0))
+        content_index = batch.get("content_index")
+        if content_index is None:
+            content_index = torch.arange(batch_size, dtype=torch.long)
+        style_index = batch.get("style_index")
+        if style_index is None:
+            style_index = torch.arange(batch_size, dtype=torch.long)
         generated = trainer.sample(
             batch["content"],
-            content_index=batch["content_index"],
+            content_index=content_index,
             style_img=batch["style_img"],
-            style_index=batch["style_index"],
+            style_index=style_index,
             num_inference_steps=int(inference_steps),
         )
         pred01 = to_unit(generated)

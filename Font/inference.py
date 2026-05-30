@@ -25,6 +25,10 @@ def load_trainer(checkpoint_path: Path, device: torch.device) -> XPredTrainer:
         raise RuntimeError("Checkpoint is missing 'model_config'.")
     trainer_config = checkpoint.get("trainer_config", {})
     model = SourcePartRefDiT(**checkpoint["model_config"])
+    if int(model.image_size) != 128:
+        raise RuntimeError(
+            f"Only 128-resolution checkpoints are supported, got image_size={model.image_size}"
+        )
     trainer = XPredTrainer(
         model,
         device,
@@ -169,7 +173,6 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path("outputs/inference_grid.png"))
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--max-fonts", type=int, default=0)
     parser.add_argument("--style-ref-count", type=int, default=0)
     parser.add_argument("--style-ref-count-min", type=int, default=8)
     parser.add_argument("--style-ref-count-max", type=int, default=8)
@@ -192,11 +195,10 @@ def main() -> None:
         device = torch.device(args.device)
 
     trainer = load_trainer(args.checkpoint, device)
-    glyph_transform = build_base_glyph_transform(image_size=int(trainer.model.image_size))
+    glyph_transform = build_base_glyph_transform(image_size=128)
     style_ref_count = None if int(args.style_ref_count) <= 0 else int(args.style_ref_count)
     dataset = FontImageDataset(
         project_root=args.data_root,
-        max_fonts=int(args.max_fonts),
         style_ref_count=style_ref_count,
         style_ref_count_min=int(args.style_ref_count_min),
         style_ref_count_max=int(args.style_ref_count_max),

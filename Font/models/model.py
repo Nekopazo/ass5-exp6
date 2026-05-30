@@ -109,23 +109,6 @@ def _module_stats_group_name(param_name: str) -> str:
     return parts[0]
 
 
-class _ReuseCountMeanGrad(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, expanded: torch.Tensor, condition_index: torch.Tensor) -> torch.Tensor:
-        index = condition_index.to(device=expanded.device, dtype=torch.long)
-        counts = torch.bincount(index, minlength=int(expanded.size(0))).to(device=expanded.device)
-        ctx.save_for_backward(index, counts)
-        return expanded
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, None]:
-        index, counts = ctx.saved_tensors
-        scale = counts.index_select(0, index).clamp_min_(1).to(dtype=grad_output.dtype)
-        while scale.ndim < grad_output.ndim:
-            scale = scale.unsqueeze(-1)
-        return grad_output / scale, None
-
-
 def _hold_then_linear_scale(
     *,
     step: int,
@@ -243,12 +226,10 @@ class _BaseTrainer:
         val_every_steps: Optional[int] = None,
         val_max_batches: Optional[int] = 16,
         grad_clip_norm: Optional[float] = 1.0,
-        grad_clip_min_norm: Optional[float] = None,
         weight_decay: float = 0.0,
         adam_beta1: float = 0.9,
         adam_beta2: float = 0.95,
         track_best_on_val: bool = False,
-        lr_batch_scale_reference: Optional[int] = None,
     ) -> None:
         self.model = model.to(device)
         self.device = device
@@ -261,12 +242,6 @@ class _BaseTrainer:
         self.val_every_steps = self.log_every_steps if val_every_steps is None else max(1, int(val_every_steps))
         self.val_max_batches = None if val_max_batches is None else max(1, int(val_max_batches))
         self.grad_clip_norm = None if grad_clip_norm is None or float(grad_clip_norm) <= 0.0 else float(grad_clip_norm)
-        if self.grad_clip_norm is None:
-            self.grad_clip_min_norm = None
-        elif grad_clip_min_norm is None:
-            self.grad_clip_min_norm = self.grad_clip_norm
-        else:
-            self.grad_clip_min_norm = max(0.0, min(float(grad_clip_min_norm), self.grad_clip_norm))
         self.track_best_on_val = bool(track_best_on_val)
         self.global_step = 0
         self.current_epoch = 0
@@ -304,11 +279,6 @@ class _BaseTrainer:
         if self.lr_schedule not in {"constant", "cosine"}:
             raise ValueError(f"lr_schedule must be 'constant' or 'cosine', got {lr_schedule!r}")
         self.lr_min_scale = float(min(max(0.0, float(lr_min_scale)), 1.0))
-        self.lr_batch_scale_reference = (
-            None
-            if lr_batch_scale_reference is None or int(lr_batch_scale_reference) <= 0
-            else int(lr_batch_scale_reference)
-        )
 
     def _lr_scale_for_step(self, step: int) -> float:
         if self.lr_schedule == "constant":
@@ -327,21 +297,10 @@ class _BaseTrainer:
             min_scale=self.lr_min_scale,
         )
 
-    def _set_learning_rate_for_step(self, step: int, *, batch_lr_scale: float = 1.0) -> None:
+    def _set_learning_rate_for_step(self, step: int) -> None:
         lr_scale = self._lr_scale_for_step(step)
-        lr_scale *= float(batch_lr_scale)
         for group, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
             group["lr"] = float(base_lr) * float(lr_scale)
-
-    def _batch_lr_scale(self, batch: Dict[str, torch.Tensor]) -> float:
-        if self.lr_batch_scale_reference is None:
-            return 1.0
-        target = batch.get("target")
-        if target is None:
-            return 1.0
-        current = int(target.size(0))
-        reference = max(1, int(self.lr_batch_scale_reference))
-        return min(1.0, max(0.0, float(current) / float(reference)))
 
     def _grad_clip_value_for_step(self, step: int) -> Optional[float]:
         if self.grad_clip_norm is None:
@@ -350,7 +309,7 @@ class _BaseTrainer:
             step=step,
             total_steps=self.total_steps,
             start_value=self.grad_clip_norm,
-            end_value=self.grad_clip_min_norm if self.grad_clip_min_norm is not None else self.grad_clip_norm,
+            end_value=self.grad_clip_norm,
             hold_start_step=self.lr_decay_start_step,
         )
 
@@ -705,11 +664,9 @@ class XPredTrainer(_BaseTrainer):
         val_every_steps: Optional[int] = None,
         val_max_batches: Optional[int] = 16,
         grad_clip_norm: Optional[float] = 1.0,
-        grad_clip_min_norm: Optional[float] = None,
         weight_decay: float = 0.0,
         adam_beta1: float = 0.9,
         adam_beta2: float = 0.95,
-        lr_batch_scale_reference: Optional[int] = None,
     ) -> None:
         super().__init__(
             model,
@@ -726,12 +683,10 @@ class XPredTrainer(_BaseTrainer):
             val_every_steps=val_every_steps,
             val_max_batches=val_max_batches,
             grad_clip_norm=grad_clip_norm,
-            grad_clip_min_norm=grad_clip_min_norm,
             weight_decay=weight_decay,
             adam_beta1=adam_beta1,
             adam_beta2=adam_beta2,
             track_best_on_val=False,
-            lr_batch_scale_reference=lr_batch_scale_reference,
         )
         self.p_mean = float(p_mean)
         self.p_std = float(p_std)
@@ -781,7 +736,7 @@ class XPredTrainer(_BaseTrainer):
             step=step,
             total_steps=self.total_steps,
             start_value=self.grad_clip_norm,
-            end_value=self.grad_clip_min_norm if self.grad_clip_min_norm is not None else self.grad_clip_norm,
+            end_value=self.grad_clip_norm,
         )
 
     def _ensure_ema_model(self) -> None:
@@ -842,13 +797,8 @@ class XPredTrainer(_BaseTrainer):
         self,
         condition: torch.Tensor,
         condition_index: torch.Tensor,
-        *,
-        average_grad_by_reuse: bool = False,
     ) -> torch.Tensor:
-        expanded = condition.index_select(0, condition_index.to(device=condition.device, dtype=torch.long))
-        if average_grad_by_reuse and expanded.requires_grad:
-            expanded = _ReuseCountMeanGrad.apply(expanded, condition_index)
-        return expanded
+        return condition.index_select(0, condition_index.to(device=condition.device, dtype=torch.long))
 
     def _encode_conditions(
         self,
@@ -857,41 +807,23 @@ class XPredTrainer(_BaseTrainer):
         content_index: torch.Tensor,
         style: torch.Tensor,
         style_index: torch.Tensor,
-        *,
-        return_unique_content_tokens: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         unique_content_tokens = model.encode_content_tokens(content)
-        content_tokens = self._expand_condition_batch(
-            unique_content_tokens,
-            content_index,
-            average_grad_by_reuse=True,
-        )
+        content_tokens = self._expand_condition_batch(unique_content_tokens, content_index)
+        unique_style_token_bank = model.encode_style_token_bank(style_img=style)
+        style_token_bank = self._expand_condition_batch(unique_style_token_bank, style_index)
+        style_tokens = model.build_style_condition_tokens(content_tokens, style_token_bank)
+        return content_tokens, style_tokens
+
+    def _encode_conditions_direct(
+        self,
+        model: nn.Module,
+        content: torch.Tensor,
+        style: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        content_tokens = model.encode_content_tokens(content)
         style_token_bank = model.encode_style_token_bank(style_img=style)
-        unique_content_query = model.precompute_content_query(unique_content_tokens)
-        content_query = self._expand_condition_batch(
-            unique_content_query,
-            content_index,
-            average_grad_by_reuse=True,
-        )
-        style_key, style_value = model.precompute_style_bank_kv(style_token_bank)
-        expanded_style_key = self._expand_condition_batch(
-            style_key,
-            style_index,
-            average_grad_by_reuse=True,
-        )
-        expanded_style_value = self._expand_condition_batch(
-            style_value,
-            style_index,
-            average_grad_by_reuse=True,
-        )
-        style_tokens = model.build_style_condition_tokens(
-            content_tokens,
-            content_query=content_query,
-            style_key=expanded_style_key,
-            style_value=expanded_style_value,
-        )
-        if return_unique_content_tokens:
-            return content_tokens, style_tokens, unique_content_tokens
+        style_tokens = model.build_style_condition_tokens(content_tokens, style_token_bank)
         return content_tokens, style_tokens
 
     def _prepare_denoising_targets(
@@ -933,26 +865,27 @@ class XPredTrainer(_BaseTrainer):
         model: nn.Module,
         *,
         content: torch.Tensor,
-        content_index: torch.Tensor,
         style: torch.Tensor,
-        style_index: torch.Tensor,
         timesteps: torch.Tensor,
         xt: torch.Tensor,
         t_view: torch.Tensor,
         target_velocity: torch.Tensor,
         x1: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
-        conditioning_outputs = self._encode_conditions(
+        content_tokens, style_tokens = self._encode_conditions_direct(
             model,
             content,
-            content_index,
             style,
-            style_index,
-            return_unique_content_tokens=True,
         )
-        content_tokens, style_tokens, unique_content_tokens = conditioning_outputs
-        backbone_unique_content_hidden_cache = model.precompute_backbone_unique_content_hidden_cache(
-            unique_content_tokens,
+        backbone_condition_hidden_cache = model.precompute_backbone_condition_hidden_cache(
+            content_tokens,
+            style_tokens,
+            device=self.device,
+            dtype=content_tokens.dtype,
+        )
+        output_condition_hidden = model.precompute_output_condition_hidden(
+            content_tokens,
+            style_tokens,
             device=self.device,
             dtype=content_tokens.dtype,
         )
@@ -961,8 +894,8 @@ class XPredTrainer(_BaseTrainer):
             timesteps,
             content_tokens=content_tokens,
             style_tokens=style_tokens,
-            backbone_unique_content_hidden_cache=backbone_unique_content_hidden_cache,
-            content_index=content_index,
+            backbone_condition_hidden_cache=backbone_condition_hidden_cache,
+            output_condition_hidden=output_condition_hidden,
         )
         pred_x, pred_velocity = self._prediction_to_x_and_velocity(
             prediction,
@@ -990,18 +923,14 @@ class XPredTrainer(_BaseTrainer):
             step = int(self.global_step)
         target = batch["target"].to(self.device)
         content = batch["content"].to(self.device)
-        content_index = batch["content_index"].to(self.device, dtype=torch.long)
         style = batch["style_img"].to(self.device)
-        style_index = batch["style_index"].to(self.device, dtype=torch.long)
 
         with self._autocast_context():
             timesteps, xt, t_view, _, target_velocity, x1 = self._prepare_denoising_targets(target)
             primary_outputs = self._forward_ref_branch(
                 model,
                 content=content,
-                content_index=content_index,
                 style=style,
-                style_index=style_index,
                 timesteps=timesteps,
                 xt=xt,
                 t_view=t_view,
@@ -1025,14 +954,12 @@ class XPredTrainer(_BaseTrainer):
         collect_module_stats = (
             self.module_stats_every_steps is not None and (next_step % self.module_stats_every_steps) == 0
         )
-        lr_batch_scale = self._batch_lr_scale(batch)
-        self._set_learning_rate_for_step(next_step, batch_lr_scale=lr_batch_scale)
+        self._set_learning_rate_for_step(next_step)
         self.optimizer.zero_grad(set_to_none=True)
         metrics = self._compute_losses(
             batch,
             step=next_step,
         )
-        metrics["lr_batch_scale"] = float(lr_batch_scale)
         metrics["target_batch_size"] = float(batch["target"].size(0))
         metrics["loss"].backward()
         metrics.update(self._apply_grad_clip(step=next_step))
@@ -1170,7 +1097,6 @@ class XPredTrainer(_BaseTrainer):
                     "ema_decay": float(self.ema_decay),
                     "ema_start_step": int(self.ema_start_step),
                     "grad_clip_norm": None if self.grad_clip_norm is None else float(self.grad_clip_norm),
-                    "grad_clip_min_norm": None if self.grad_clip_min_norm is None else float(self.grad_clip_min_norm),
                 },
                 "step": int(self.global_step),
                 "epoch": int(self.current_epoch),
@@ -1234,12 +1160,6 @@ class XPredTrainer(_BaseTrainer):
                     self._set_ema_decay(ema_decay)
             if "ema_start_step" in trainer_config:
                 self._set_ema_start_step(int(trainer_config["ema_start_step"]))
-            if "grad_clip_min_norm" in trainer_config and self.grad_clip_norm is not None:
-                restored_clip_min = trainer_config["grad_clip_min_norm"]
-                if restored_clip_min is None:
-                    self.grad_clip_min_norm = self.grad_clip_norm
-                else:
-                    self.grad_clip_min_norm = max(0.0, min(float(restored_clip_min), self.grad_clip_norm))
         else:
             self._set_ema_decay(self.ema_decay)
             self._set_ema_start_step(self.ema_start_step)
@@ -1267,9 +1187,15 @@ class XPredTrainer(_BaseTrainer):
         sample_count = min(16, int(batch["target"].size(0)))
         target = batch["target"][:sample_count].to(self.device)
         content = batch["content"]
-        content_index = batch["content_index"][:sample_count]
+        if "content_index" in batch:
+            content_index = batch["content_index"][:sample_count]
+        else:
+            content_index = torch.arange(sample_count, dtype=torch.long)
         style = batch["style_img"]
-        style_index = batch["style_index"][:sample_count]
+        if "style_index" in batch:
+            style_index = batch["style_index"][:sample_count]
+        else:
+            style_index = torch.arange(sample_count, dtype=torch.long)
         sample = self.sample(
             content,
             content_index=content_index,

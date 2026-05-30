@@ -283,10 +283,11 @@ class GlyphDiTBlock(nn.Module):
                             f"expected {expected_part_shape}, got "
                             f"{None if content_tokens is None else tuple(content_tokens.shape)}"
                         )
-                    if style_tokens is None or style_tokens.shape != expected_part_shape:
+                    expected_style_shape = (x.size(0), x.size(1), self.condition_half_dim)
+                    if style_tokens is None or style_tokens.shape != expected_style_shape:
                         raise RuntimeError(
-                            "style token shape mismatch: "
-                            f"expected {expected_part_shape}, got "
+                            "style condition shape mismatch: "
+                            f"expected {expected_style_shape}, got "
                             f"{None if style_tokens is None else tuple(style_tokens.shape)}"
                         )
                 else:
@@ -327,7 +328,6 @@ class DiffusionTransformerBackbone(nn.Module):
         in_channels: int = 3,
         image_size: int = 128,
         patch_size: int = 8,
-        patch_embed_bottleneck_dim: int = 0,
         hidden_dim: int = 256,
         conditioning_dim: int | None = None,
         depth: int = 12,
@@ -344,8 +344,6 @@ class DiffusionTransformerBackbone(nn.Module):
         self.in_channels = int(in_channels)
         self.image_size = int(image_size)
         self.patch_size = int(patch_size)
-        self.patch_embed_bottleneck_dim = int(patch_embed_bottleneck_dim)
-        self.use_patch_embed_bottleneck = self.patch_embed_bottleneck_dim > 0
         self.hidden_dim = int(hidden_dim)
         self.conditioning_dim = self.hidden_dim if conditioning_dim is None else int(conditioning_dim)
         self.depth = int(depth)
@@ -388,29 +386,13 @@ class DiffusionTransformerBackbone(nn.Module):
             for block_idx in range(self.depth)
         ]
         self.has_content_injection = any(self.content_layer_mask)
-        if self.use_patch_embed_bottleneck:
-            self.patch_embed_proj1 = nn.Conv2d(
-                self.in_channels,
-                self.patch_embed_bottleneck_dim,
-                kernel_size=self.patch_size,
-                stride=self.patch_size,
-                bias=False,
-            )
-            self.patch_embed_proj2 = nn.Conv2d(
-                self.patch_embed_bottleneck_dim,
-                self.hidden_dim,
-                kernel_size=1,
-                stride=1,
-                bias=True,
-            )
-        else:
-            self.patch_embed_proj1 = nn.Conv2d(
-                self.in_channels,
-                self.hidden_dim,
-                kernel_size=self.patch_size,
-                stride=self.patch_size,
-                bias=True,
-            )
+        self.patch_embed_proj1 = nn.Conv2d(
+            self.in_channels,
+            self.hidden_dim,
+            kernel_size=self.patch_size,
+            stride=self.patch_size,
+            bias=True,
+        )
         pos_embed = build_2d_sincos_pos_embed(self.hidden_dim, self.grid_size, self.grid_size)
         self.register_buffer("pos_embed", pos_embed.unsqueeze(0), persistent=False)
         self.feat_rope = VisionRotaryEmbeddingFast(
@@ -473,8 +455,6 @@ class DiffusionTransformerBackbone(nn.Module):
 
     def patch_embed(self, image: torch.Tensor) -> torch.Tensor:
         patch_tokens_2d = self.patch_embed_proj1(image)
-        if self.use_patch_embed_bottleneck:
-            patch_tokens_2d = self.patch_embed_proj2(patch_tokens_2d)
         return patch_tokens_2d.flatten(2).transpose(1, 2).contiguous()
 
     def prepare_condition_token_parts(
@@ -491,16 +471,17 @@ class DiffusionTransformerBackbone(nn.Module):
             return None
         content_tokens = content_tokens.to(device=device, dtype=dtype)
         style_tokens = style_tokens.to(device=device, dtype=dtype)
-        expected_part_shape = (int(batch_size), int(token_count), self.conditioning_dim // 2)
-        if content_tokens.shape != expected_part_shape:
+        expected_content_shape = (int(batch_size), int(token_count), self.conditioning_dim // 2)
+        expected_style_shape = (int(batch_size), int(token_count), self.conditioning_dim // 2)
+        if content_tokens.shape != expected_content_shape:
             raise RuntimeError(
                 "content token shape mismatch: "
-                f"expected {expected_part_shape}, got {tuple(content_tokens.shape)}"
+                f"expected {expected_content_shape}, got {tuple(content_tokens.shape)}"
             )
-        if style_tokens.shape != expected_part_shape:
+        if style_tokens.shape != expected_style_shape:
             raise RuntimeError(
-                "style token shape mismatch: "
-                f"expected {expected_part_shape}, got {tuple(style_tokens.shape)}"
+                "style condition shape mismatch: "
+                f"expected {expected_style_shape}, got {tuple(style_tokens.shape)}"
             )
         return content_tokens, style_tokens
 
@@ -516,11 +497,11 @@ class DiffusionTransformerBackbone(nn.Module):
         if not self.has_content_injection:
             return None
         style_tokens = style_tokens.to(device=device, dtype=dtype)
-        expected_part_shape = (int(batch_size), int(token_count), self.conditioning_dim // 2)
-        if style_tokens.shape != expected_part_shape:
+        expected_style_shape = (int(batch_size), int(token_count), self.conditioning_dim // 2)
+        if style_tokens.shape != expected_style_shape:
             raise RuntimeError(
-                "style token shape mismatch: "
-                f"expected {expected_part_shape}, got {tuple(style_tokens.shape)}"
+                "style condition shape mismatch: "
+                f"expected {expected_style_shape}, got {tuple(style_tokens.shape)}"
             )
         return style_tokens
 
