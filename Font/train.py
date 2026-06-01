@@ -261,14 +261,13 @@ def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
         patch_size=int(args.patch_size),
         encoder_hidden_dim=int(args.encoder_hidden_dim),
         style_encoder_hidden_dim=int(args.style_encoder_hidden_dim),
-        content_encoder_heads=6,
-        style_encoder_heads=6,
+        content_encoder_heads=8,
+        style_encoder_heads=12,
         dit_hidden_dim=int(args.dit_hidden_dim),
         dit_depth=int(args.dit_depth),
         dit_heads=int(args.dit_heads),
         dit_mlp_ratio=float(args.dit_mlp_ratio),
         content_injection_layers=None,
-        content_style_fusion_heads=6,
     )
 
 
@@ -296,7 +295,6 @@ def main() -> None:
     parser.add_argument("--dit-depth", type=int, required=True)
     parser.add_argument("--dit-heads", type=int, required=True)
     parser.add_argument("--dit-mlp-ratio", type=float, required=True)
-
     parser.add_argument("--lr", type=float, required=True)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--adam-beta1", type=float, default=0.9)
@@ -493,8 +491,8 @@ def main() -> None:
     run_config["norm_variant"] = "rms"
     run_config["ode_solver"] = "heun_last_euler"
     run_config["content_injection_layers"] = list(range(1, int(args.dit_depth) + 1))
-    run_config["content_style_fusion_heads"] = 6
     run_config["style_encoder_hidden_dim"] = int(args.style_encoder_hidden_dim)
+    run_config["style_patch_size"] = 16
 
     (args.save_dir / "train_config.json").write_text(
         json.dumps(run_config, ensure_ascii=False, indent=2, sort_keys=True),

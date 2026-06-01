@@ -224,11 +224,7 @@ class GlyphDiTBlock(nn.Module):
             if self.use_content_injection
             else None
         )
-        self.style_condition_to_hidden = (
-            nn.Linear(self.condition_half_dim, hidden_dim)
-            if self.use_content_injection
-            else None
-        )
+        self.style_global_to_hidden = nn.Linear(self.condition_half_dim, hidden_dim) if self.use_content_injection else None
         self.time_to_hidden = nn.Linear(hidden_dim, hidden_dim)
         self.joint_mod = _build_zero_linear(hidden_dim, hidden_dim * 6)
         self.dit_block = DiTBlock(
@@ -245,8 +241,8 @@ class GlyphDiTBlock(nn.Module):
         *,
         time_cond: torch.Tensor,
         content_tokens: torch.Tensor | None,
-        style_tokens: torch.Tensor | None,
-        condition_token_parts: tuple[torch.Tensor, torch.Tensor] | None = None,
+        style_global: torch.Tensor | None,
+        condition_token_parts: torch.Tensor | None = None,
         condition_hidden: torch.Tensor | None = None,
         feat_rope: nn.Module | None = None,
     ) -> torch.Tensor:
@@ -262,7 +258,7 @@ class GlyphDiTBlock(nn.Module):
             if (
                 condition_hidden is None
                 and content_tokens is None
-                and style_tokens is None
+                and style_global is None
                 and condition_token_parts is None
             ):
                 raise RuntimeError("conditioning input must be provided when content injection is enabled")
@@ -272,7 +268,7 @@ class GlyphDiTBlock(nn.Module):
                         "condition_hidden shape mismatch: "
                         f"expected {tuple(x.shape)}, got {tuple(condition_hidden.shape)}"
                     )
-            elif self.content_condition_to_hidden is None or self.style_condition_to_hidden is None:
+            elif self.content_condition_to_hidden is None or self.style_global_to_hidden is None:
                 raise RuntimeError("content/style tokens must be provided when content injection is enabled")
             if condition_hidden is None:
                 if condition_token_parts is None:
@@ -283,18 +279,17 @@ class GlyphDiTBlock(nn.Module):
                             f"expected {expected_part_shape}, got "
                             f"{None if content_tokens is None else tuple(content_tokens.shape)}"
                         )
-                    expected_style_shape = (x.size(0), x.size(1), self.condition_half_dim)
-                    if style_tokens is None or style_tokens.shape != expected_style_shape:
+                    expected_style_global_shape = (x.size(0), self.condition_half_dim)
+                    if style_global is None or style_global.shape != expected_style_global_shape:
                         raise RuntimeError(
-                            "style condition shape mismatch: "
-                            f"expected {expected_style_shape}, got "
-                            f"{None if style_tokens is None else tuple(style_tokens.shape)}"
+                            "style global shape mismatch: "
+                            f"expected {expected_style_global_shape}, got "
+                            f"{None if style_global is None else tuple(style_global.shape)}"
                         )
                 else:
-                    content_tokens, style_tokens = condition_token_parts
+                    content_tokens = condition_token_parts
                 content_hidden = self.content_condition_to_hidden(content_tokens)
-                style_hidden = self.style_condition_to_hidden(style_tokens)
-                joint_hidden = time_hidden + content_hidden + style_hidden
+                joint_hidden = time_hidden + content_hidden + self.style_global_to_hidden(style_global).unsqueeze(1)
             else:
                 joint_hidden = time_hidden + condition_hidden
         modulation = self.joint_mod(F.silu(joint_hidden))
@@ -460,34 +455,6 @@ class DiffusionTransformerBackbone(nn.Module):
     def prepare_condition_token_parts(
         self,
         content_tokens: torch.Tensor,
-        style_tokens: torch.Tensor,
-        *,
-        batch_size: int,
-        token_count: int,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        if not self.has_content_injection:
-            return None
-        content_tokens = content_tokens.to(device=device, dtype=dtype)
-        style_tokens = style_tokens.to(device=device, dtype=dtype)
-        expected_content_shape = (int(batch_size), int(token_count), self.conditioning_dim // 2)
-        expected_style_shape = (int(batch_size), int(token_count), self.conditioning_dim // 2)
-        if content_tokens.shape != expected_content_shape:
-            raise RuntimeError(
-                "content token shape mismatch: "
-                f"expected {expected_content_shape}, got {tuple(content_tokens.shape)}"
-            )
-        if style_tokens.shape != expected_style_shape:
-            raise RuntimeError(
-                "style condition shape mismatch: "
-                f"expected {expected_style_shape}, got {tuple(style_tokens.shape)}"
-            )
-        return content_tokens, style_tokens
-
-    def prepare_style_condition_tokens(
-        self,
-        style_tokens: torch.Tensor,
         *,
         batch_size: int,
         token_count: int,
@@ -496,19 +463,40 @@ class DiffusionTransformerBackbone(nn.Module):
     ) -> torch.Tensor | None:
         if not self.has_content_injection:
             return None
-        style_tokens = style_tokens.to(device=device, dtype=dtype)
-        expected_style_shape = (int(batch_size), int(token_count), self.conditioning_dim // 2)
-        if style_tokens.shape != expected_style_shape:
+        content_tokens = content_tokens.to(device=device, dtype=dtype)
+        expected_content_shape = (int(batch_size), int(token_count), self.conditioning_dim // 2)
+        if content_tokens.shape != expected_content_shape:
             raise RuntimeError(
-                "style condition shape mismatch: "
-                f"expected {expected_style_shape}, got {tuple(style_tokens.shape)}"
+                "content token shape mismatch: "
+                f"expected {expected_content_shape}, got {tuple(content_tokens.shape)}"
             )
-        return style_tokens
+        return content_tokens
+
+    def prepare_style_global_condition(
+        self,
+        style_global: torch.Tensor | None,
+        *,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor | None:
+        if not self.has_content_injection:
+            return None
+        if style_global is None:
+            raise RuntimeError("style_global is required when global style conditioning is enabled")
+        style_global = style_global.to(device=device, dtype=dtype)
+        expected_style_global_shape = (int(batch_size), self.conditioning_dim // 2)
+        if style_global.shape != expected_style_global_shape:
+            raise RuntimeError(
+                "style global shape mismatch: "
+                f"expected {expected_style_global_shape}, got {tuple(style_global.shape)}"
+            )
+        return style_global
 
     def build_condition_hidden_cache(
         self,
         content_tokens: torch.Tensor,
-        style_tokens: torch.Tensor,
+        style_global: torch.Tensor | None = None,
         *,
         batch_size: int,
         token_count: int,
@@ -517,7 +505,6 @@ class DiffusionTransformerBackbone(nn.Module):
     ) -> list[torch.Tensor | None]:
         condition_parts = self.prepare_condition_token_parts(
             content_tokens,
-            style_tokens,
             batch_size=batch_size,
             token_count=token_count,
             device=device,
@@ -525,18 +512,23 @@ class DiffusionTransformerBackbone(nn.Module):
         )
         if condition_parts is None:
             return [None for _ in self.blocks]
-        content_tokens, style_tokens = condition_parts
+        content_tokens = condition_parts
+        style_global = self.prepare_style_global_condition(
+            style_global,
+            batch_size=batch_size,
+            device=device,
+            dtype=dtype,
+        )
         cache: list[torch.Tensor | None] = []
         for block in self.blocks:
             if not block.use_content_injection:
                 cache.append(None)
                 continue
-            if block.content_condition_to_hidden is None or block.style_condition_to_hidden is None:
+            if block.content_condition_to_hidden is None or block.style_global_to_hidden is None:
                 raise RuntimeError("content injection block is missing condition projections")
-            cache.append(
-                block.content_condition_to_hidden(content_tokens)
-                + block.style_condition_to_hidden(style_tokens)
-            )
+            condition_hidden = block.content_condition_to_hidden(content_tokens)
+            condition_hidden = condition_hidden + block.style_global_to_hidden(style_global).unsqueeze(1)
+            cache.append(condition_hidden)
         return cache
 
     def build_unique_content_hidden_cache(
@@ -583,7 +575,7 @@ class DiffusionTransformerBackbone(nn.Module):
         timesteps: torch.Tensor,
         *,
         content_tokens: torch.Tensor,
-        style_tokens: torch.Tensor,
+        style_global: torch.Tensor | None = None,
         condition_hidden_cache: list[torch.Tensor | None] | None = None,
         unique_content_hidden_cache: list[torch.Tensor | None] | None = None,
         content_index: torch.Tensor | None = None,
@@ -607,7 +599,7 @@ class DiffusionTransformerBackbone(nn.Module):
         )
 
         condition_token_parts = None
-        prepared_style_tokens = None
+        prepared_style_global = None
         if condition_hidden_cache is not None and unique_content_hidden_cache is not None:
             raise RuntimeError("condition_hidden_cache and unique_content_hidden_cache are mutually exclusive")
         if self.has_content_injection:
@@ -630,17 +622,15 @@ class DiffusionTransformerBackbone(nn.Module):
                         "content_index length mismatch: "
                         f"expected {x.size(0)}, got {content_index.numel()}"
                     )
-                prepared_style_tokens = self.prepare_style_condition_tokens(
-                    style_tokens,
+                prepared_style_global = self.prepare_style_global_condition(
+                    style_global,
                     batch_size=x.size(0),
-                    token_count=x.size(1),
                     device=x.device,
                     dtype=x.dtype,
                 )
             else:
                 condition_token_parts = self.prepare_condition_token_parts(
                     content_tokens,
-                    style_tokens,
                     batch_size=x.size(0),
                     token_count=x.size(1),
                     device=x.device,
@@ -655,18 +645,17 @@ class DiffusionTransformerBackbone(nn.Module):
                 unique_content_hidden = unique_content_hidden_cache[block_idx]
                 if unique_content_hidden is None:
                     raise RuntimeError("missing unique content hidden for injection block")
-                if prepared_style_tokens is None:
-                    raise RuntimeError("style tokens are required with unique content cache")
-                if block.style_condition_to_hidden is None:
-                    raise RuntimeError("content injection block is missing style condition projection")
+                if prepared_style_global is None:
+                    raise RuntimeError("style_global is required with unique content cache")
+                if block.style_global_to_hidden is None:
+                    raise RuntimeError("content injection block is missing style global projection")
                 content_hidden = self._expand_unique_content_hidden(unique_content_hidden, content_index)
-                style_hidden = block.style_condition_to_hidden(prepared_style_tokens)
-                condition_hidden = content_hidden + style_hidden
+                condition_hidden = content_hidden + block.style_global_to_hidden(prepared_style_global).unsqueeze(1)
             x = block(
                 x,
                 time_cond=time_cond,
                 content_tokens=None if condition_hidden is not None else content_tokens,
-                style_tokens=None if condition_hidden is not None else style_tokens,
+                style_global=None if condition_hidden is not None else style_global,
                 condition_token_parts=condition_token_parts if block.use_content_injection else None,
                 condition_hidden=condition_hidden,
                 feat_rope=self.feat_rope,

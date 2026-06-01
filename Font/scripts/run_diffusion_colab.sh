@@ -14,7 +14,7 @@ PID_FILE=""
 SAVE_DIR="checkpoints/xpred_$(date '+%Y%m%d_%H%M%S')"
 
 RESUME_CKPT=""
-DEVICE_ARG="cuda:1"
+DEVICE_ARG="auto"
 SEED=42
 FONT_SPLIT="train"
 FONT_SPLIT_SEED=""
@@ -42,8 +42,8 @@ STYLE_REF_COUNT_MAX=3
 BATCH_SIZE=128
 NUM_WORKERS=2
 PATCH_SIZE=8
-ENCODER_HIDDEN_DIM=384
-STYLE_ENCODER_HIDDEN_DIM=384
+ENCODER_HIDDEN_DIM=512
+STYLE_ENCODER_HIDDEN_DIM=768
 DIT_HIDDEN_DIM=512
 DIT_DEPTH=8
 DIT_HEADS=8
@@ -383,8 +383,8 @@ echo "[run_diffusion_colab] PYTORCH_ALLOC_CONF=${PYTORCH_ALLOC_CONF}"
 echo "[run_diffusion_colab] resume=${RESUME_CKPT:-<none>}"
 echo "[run_diffusion_colab] batch=${BATCH_SIZE} lr=${LR} weight_decay=${WEIGHT_DECAY} adam_betas=(${ADAM_BETA1},${ADAM_BETA2}) lr_schedule=${LR_SCHEDULE} lr_warmup_steps=${LR_WARMUP_STEPS} lr_min_scale=${LR_MIN_SCALE} grad_clip_norm=${GRAD_CLIP_NORM} module_stats_every_steps=${MODULE_STATS_EVERY}"
 echo "[run_diffusion_colab] style_ref_count=${STYLE_REF_COUNT} style_ref_count_min=${STYLE_REF_COUNT_MIN} style_ref_count_max=${STYLE_REF_COUNT_MAX}"
-echo "[run_diffusion_colab] patch_size=8 image_size=128 sample_steps=${SAMPLE_STEPS} ode_solver=heun_last_euler prediction_type=${PREDICTION_TYPE} loss_type=jit_v_mse ema_decay=${EMA_DECAY} ema_start_step=${EMA_START_STEP}"
-echo "[run_diffusion_colab] dit_heads=${DIT_HEADS} style_path=token_bank_cross_attention main_path=direct_patch_embed+swiglu+rms+qk_norm"
+echo "[run_diffusion_colab] patch_size=${PATCH_SIZE} style_patch_size=16 image_size=128 sample_steps=${SAMPLE_STEPS} ode_solver=heun_last_euler prediction_type=${PREDICTION_TYPE} loss_type=jit_v_mse ema_decay=${EMA_DECAY} ema_start_step=${EMA_START_STEP}"
+echo "[run_diffusion_colab] dit_heads=${DIT_HEADS} style_path=global_style_pool main_path=direct_patch_embed+swiglu+rms+qk_norm"
 echo "[run_diffusion_colab] output_path=final_adaln_patch_projection encoder_hidden_dim=${ENCODER_HIDDEN_DIM} style_encoder_hidden_dim=${STYLE_ENCODER_HIDDEN_DIM} dit_hidden_dim=${DIT_HIDDEN_DIM} dit_depth=${DIT_DEPTH}"
 echo "[run_diffusion_colab] content_injection_layers=1..${DIT_DEPTH}"
 

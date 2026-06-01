@@ -100,8 +100,6 @@ def _module_stats_group_name(param_name: str) -> str:
         return ".".join(parts[:3])
     if len(parts) >= 2 and parts[0] == "backbone":
         return ".".join(parts[:2])
-    if len(parts) >= 2 and parts[0] == "content_style_attn":
-        return ".".join(parts[:2])
     if parts[0].startswith("output_"):
         return parts[0]
     if len(parts) >= 2:
@@ -807,24 +805,24 @@ class XPredTrainer(_BaseTrainer):
         content_index: torch.Tensor,
         style: torch.Tensor,
         style_index: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         unique_content_tokens = model.encode_content_tokens(content)
         content_tokens = self._expand_condition_batch(unique_content_tokens, content_index)
         unique_style_token_bank = model.encode_style_token_bank(style_img=style)
-        style_token_bank = self._expand_condition_batch(unique_style_token_bank, style_index)
-        style_tokens = model.build_style_condition_tokens(content_tokens, style_token_bank)
-        return content_tokens, style_tokens
+        unique_style_global = model.build_style_global_condition(unique_style_token_bank)
+        style_global = None if unique_style_global is None else self._expand_condition_batch(unique_style_global, style_index)
+        return content_tokens, style_global
 
     def _encode_conditions_direct(
         self,
         model: nn.Module,
         content: torch.Tensor,
         style: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         content_tokens = model.encode_content_tokens(content)
         style_token_bank = model.encode_style_token_bank(style_img=style)
-        style_tokens = model.build_style_condition_tokens(content_tokens, style_token_bank)
-        return content_tokens, style_tokens
+        style_global = model.build_style_global_condition(style_token_bank)
+        return content_tokens, style_global
 
     def _prepare_denoising_targets(
         self,
@@ -872,20 +870,20 @@ class XPredTrainer(_BaseTrainer):
         target_velocity: torch.Tensor,
         x1: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
-        content_tokens, style_tokens = self._encode_conditions_direct(
+        content_tokens, style_global = self._encode_conditions_direct(
             model,
             content,
             style,
         )
         backbone_condition_hidden_cache = model.precompute_backbone_condition_hidden_cache(
             content_tokens,
-            style_tokens,
+            style_global,
             device=self.device,
             dtype=content_tokens.dtype,
         )
         output_condition_hidden = model.precompute_output_condition_hidden(
             content_tokens,
-            style_tokens,
+            style_global,
             device=self.device,
             dtype=content_tokens.dtype,
         )
@@ -893,7 +891,7 @@ class XPredTrainer(_BaseTrainer):
             xt,
             timesteps,
             content_tokens=content_tokens,
-            style_tokens=style_tokens,
+            style_global=style_global,
             backbone_condition_hidden_cache=backbone_condition_hidden_cache,
             output_condition_hidden=output_condition_hidden,
         )
@@ -1018,7 +1016,7 @@ class XPredTrainer(_BaseTrainer):
         )
         step_count = self.sample_steps if num_inference_steps is None else max(1, int(num_inference_steps))
         with self._autocast_context():
-            content_tokens, style_tokens = self._encode_conditions(
+            content_tokens, style_global = self._encode_conditions(
                 sample_model,
                 content,
                 content_index,
@@ -1027,13 +1025,13 @@ class XPredTrainer(_BaseTrainer):
             )
             backbone_condition_hidden_cache = sample_model.precompute_backbone_condition_hidden_cache(
                 content_tokens,
-                style_tokens,
+                style_global,
                 device=self.device,
                 dtype=content_tokens.dtype,
             )
             output_condition_hidden = sample_model.precompute_output_condition_hidden(
                 content_tokens,
-                style_tokens,
+                style_global,
                 device=self.device,
                 dtype=content_tokens.dtype,
             )
@@ -1043,7 +1041,7 @@ class XPredTrainer(_BaseTrainer):
                     x_t,
                     t_vec,
                     content_tokens=content_tokens,
-                    style_tokens=style_tokens,
+                    style_global=style_global,
                     backbone_condition_hidden_cache=backbone_condition_hidden_cache,
                     output_condition_hidden=output_condition_hidden,
                 )
