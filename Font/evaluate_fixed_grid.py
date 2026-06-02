@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import random
 import time
@@ -68,7 +69,11 @@ def load_eval_trainer(checkpoint_path: Path, device: torch.device) -> XPredTrain
     if checkpoint.get("stage") != "xpred":
         raise RuntimeError(f"Checkpoint is not an x-pred checkpoint: {checkpoint_path}")
     trainer_config = checkpoint.get("trainer_config", {})
-    model = SourcePartRefDiT(**checkpoint["model_config"])
+    raw_model_config = dict(checkpoint["model_config"])
+    allowed_fields = set(inspect.signature(SourcePartRefDiT.__init__).parameters)
+    allowed_fields.discard("self")
+    model_config = {key: value for key, value in raw_model_config.items() if key in allowed_fields}
+    model = SourcePartRefDiT(**model_config)
     if int(model.image_size) != 128:
         raise RuntimeError(
             f"Only 128-resolution checkpoints are supported, got image_size={model.image_size}"

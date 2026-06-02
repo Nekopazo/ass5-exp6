@@ -260,14 +260,17 @@ def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
         image_size=128,
         patch_size=int(args.patch_size),
         encoder_hidden_dim=int(args.encoder_hidden_dim),
-        style_encoder_hidden_dim=int(args.style_encoder_hidden_dim),
-        content_encoder_heads=8,
-        style_encoder_heads=12,
+        content_encoder_block_depth=3,
+        style_encoder_block_depth=3,
+        content_encoder_use_shortcut=False,
+        style_encoder_use_shortcut=False,
         dit_hidden_dim=int(args.dit_hidden_dim),
         dit_depth=int(args.dit_depth),
         dit_heads=int(args.dit_heads),
         dit_mlp_ratio=float(args.dit_mlp_ratio),
         content_injection_layers=None,
+        content_style_fusion_heads=4,
+        style_condition_mode=str(args.style_condition_mode),
     )
 
 
@@ -290,7 +293,12 @@ def main() -> None:
     parser.add_argument("--style-ref-count-max", type=int, required=True)
     parser.add_argument("--patch-size", type=int, required=True)
     parser.add_argument("--encoder-hidden-dim", type=int, required=True)
-    parser.add_argument("--style-encoder-hidden-dim", type=int, required=True)
+    parser.add_argument(
+        "--style-condition-mode",
+        type=str,
+        required=True,
+        choices=["global_mean", "tokenwise_cross"],
+    )
     parser.add_argument("--dit-hidden-dim", type=int, required=True)
     parser.add_argument("--dit-depth", type=int, required=True)
     parser.add_argument("--dit-heads", type=int, required=True)
@@ -491,8 +499,11 @@ def main() -> None:
     run_config["norm_variant"] = "rms"
     run_config["ode_solver"] = "heun_last_euler"
     run_config["content_injection_layers"] = list(range(1, int(args.dit_depth) + 1))
-    run_config["style_encoder_hidden_dim"] = int(args.style_encoder_hidden_dim)
-    run_config["style_patch_size"] = 16
+    run_config["encoder_hidden_dim"] = int(args.encoder_hidden_dim)
+    run_config["content_encoder_use_shortcut"] = False
+    run_config["style_encoder_use_shortcut"] = False
+    run_config["content_style_fusion_heads"] = 4
+    run_config["style_condition_mode"] = str(args.style_condition_mode)
 
     (args.save_dir / "train_config.json").write_text(
         json.dumps(run_config, ensure_ascii=False, indent=2, sort_keys=True),
