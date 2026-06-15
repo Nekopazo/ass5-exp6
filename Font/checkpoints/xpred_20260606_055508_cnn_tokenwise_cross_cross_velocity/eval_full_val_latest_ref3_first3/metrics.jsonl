@@ -1,0 +1,1 @@
+{"batches": 16, "checkpoint": "/scratch/yangximing/code/ass5-exp6/Font/checkpoints/xpred_20260606_055508_cnn_tokenwise_cross_cross_velocity/latest.pt", "checkpoint_label": "latest", "elapsed_sec": 212.92185473442078, "fid": 44.3050651550293, "l1": 0.15748327425447536, "lpips": 0.1773982244519006, "samples": 5424, "split": "val", "ssim": 0.5554551043077908, "step": 100000}

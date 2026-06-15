@@ -1,0 +1,5 @@
+full_conv	标准两层卷积 block
+full_conv_stage_res	标准两层卷积，但第二层残差加回
+full_resnet    两层卷积 block 都用残差连接
+lite_dwres	轻量 stem/downsample，后两层用 depthwise residual
+lite_dwres_all	三层都用 depthwise residual

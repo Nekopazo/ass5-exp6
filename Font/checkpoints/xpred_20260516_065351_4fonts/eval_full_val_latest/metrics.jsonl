@@ -1,1 +1,0 @@
-{"batches": 16, "checkpoint": "/scratch/yangximing/code/ass5-exp6/DiffuFont/checkpoints/xpred_20260516_065351_4fonts/latest.pt", "checkpoint_label": "latest", "elapsed_sec": 206.91390538215637, "fid": 6.599891185760498, "l1": 0.15154552447995137, "lpips": 0.17631063920206727, "samples": 5424, "split": "val", "ssim": 0.5678189584111746, "step": 100000}

@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .diffusion_transformer_backbone import (
     DiffusionTransformerBackbone,
+    FeedForward,
     _build_norm,
     _build_zero_linear,
     modulate,
@@ -23,6 +24,8 @@ def _group_count(channels: int) -> int:
         if channels % groups == 0:
             return groups
     return 1
+
+
 class ResDownBlock(nn.Module):
     """A simple conv block with conv downsampling followed by one regular conv."""
 
@@ -47,8 +50,122 @@ class ResDownBlock(nn.Module):
         return self.main(x)
 
 
-class CustomResidualGlyphEncoder(nn.Module):
-    """CNN glyph encoder with a 32-channel stem and three downsample-first blocks."""
+class ConvNormAct(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, *, stride: int = 1) -> None:
+        super().__init__()
+        self.main = nn.Sequential(
+            nn.Conv2d(int(in_channels), int(out_channels), kernel_size=3, stride=int(stride), padding=1, bias=False),
+            nn.GroupNorm(_group_count(int(out_channels)), int(out_channels)),
+            nn.SiLU(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.main(x)
+
+
+class ResDownBlockResidualAdd(nn.Module):
+    """Same conv stack as ResDownBlock, but add the second conv output back to the first conv result."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+    ) -> None:
+        super().__init__()
+        self.in_norm = nn.GroupNorm(_group_count(int(in_channels)), int(in_channels))
+        self.in_act = nn.SiLU()
+        self.down_conv = nn.Conv2d(int(in_channels), int(out_channels), kernel_size=3, stride=2, padding=1, bias=False)
+        self.out_norm = nn.GroupNorm(_group_count(int(out_channels)), int(out_channels))
+        self.out_act = nn.SiLU()
+        self.refine_conv = nn.Conv2d(int(out_channels), int(out_channels), kernel_size=3, padding=1, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        hidden = self.down_conv(self.in_act(self.in_norm(x)))
+        refined = self.refine_conv(self.out_act(self.out_norm(hidden)))
+        return hidden + refined
+
+
+class ResNetDownBlock(nn.Module):
+    """ResNet-style downsampling block with a projected residual shortcut."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+    ) -> None:
+        super().__init__()
+        self.in_norm = nn.GroupNorm(_group_count(int(in_channels)), int(in_channels))
+        self.in_act = nn.SiLU()
+        self.main_conv1 = nn.Conv2d(
+            int(in_channels),
+            int(out_channels),
+            kernel_size=3,
+            stride=2,
+            padding=1,
+            bias=False,
+        )
+        self.out_norm = nn.GroupNorm(_group_count(int(out_channels)), int(out_channels))
+        self.out_act = nn.SiLU()
+        self.main_conv2 = nn.Conv2d(
+            int(out_channels),
+            int(out_channels),
+            kernel_size=3,
+            padding=1,
+            bias=False,
+        )
+        self.shortcut = nn.Conv2d(
+            int(in_channels),
+            int(out_channels),
+            kernel_size=1,
+            stride=2,
+            bias=False,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        shortcut = self.shortcut(x)
+        hidden = self.main_conv1(self.in_act(self.in_norm(x)))
+        hidden = self.main_conv2(self.out_act(self.out_norm(hidden)))
+        return shortcut + hidden
+
+
+class DWResBlock(nn.Module):
+    """Depthwise residual block that preserves spatial size and channels."""
+
+    def __init__(self, channels: int) -> None:
+        super().__init__()
+        channels = int(channels)
+        self.main = nn.Sequential(
+            nn.GroupNorm(_group_count(channels), channels),
+            nn.SiLU(),
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1, groups=channels, bias=False),
+            nn.GroupNorm(_group_count(channels), channels),
+            nn.SiLU(),
+            nn.Conv2d(channels, channels, kernel_size=1, bias=False),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.main(x)
+
+
+class LiteDWResDownBlock(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, *, use_dwres: bool) -> None:
+        super().__init__()
+        self.down = ConvNormAct(in_channels, out_channels, stride=2)
+        if use_dwres:
+            self.refine = DWResBlock(out_channels)
+        else:
+            self.refine = nn.Sequential(
+                nn.Conv2d(int(out_channels), int(out_channels), kernel_size=3, padding=1, bias=False),
+                nn.GroupNorm(_group_count(int(out_channels)), int(out_channels)),
+                nn.SiLU(),
+            )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.refine(self.down(x))
+
+
+class CnnGlyphEncoder(nn.Module):
+    """CNN glyph encoder with the original 32-channel stem and three downsample-first blocks."""
 
     def __init__(
         self,
@@ -57,54 +174,81 @@ class CustomResidualGlyphEncoder(nn.Module):
         image_size: int = 128,
         output_grid_size: int = 16,
         hidden_dim: int = 256,
-        base_channels: int = 64,
-        max_channels: int = 256,
         block_depth: int = 3,
+        encoder_variant: str = "full_conv",
     ) -> None:
         super().__init__()
         if int(in_channels) != 3:
-            raise ValueError(f"CustomResidualGlyphEncoder requires RGB input, got {in_channels}")
+            raise ValueError(f"CnnGlyphEncoder requires RGB input, got {in_channels}")
         if int(image_size) != 128:
-            raise ValueError(f"CustomResidualGlyphEncoder is fixed to image_size=128, got {image_size}")
+            raise ValueError(f"CnnGlyphEncoder is fixed to image_size=128, got {image_size}")
         if int(output_grid_size) != 16:
-            raise ValueError(f"CustomResidualGlyphEncoder is fixed to output_grid_size=16, got {output_grid_size}")
+            raise ValueError(f"CnnGlyphEncoder is fixed to output_grid_size=16, got {output_grid_size}")
         if int(hidden_dim) != 256:
-            raise ValueError(f"CustomResidualGlyphEncoder is fixed to hidden_dim=256, got {hidden_dim}")
+            raise ValueError(f"CnnGlyphEncoder is fixed to hidden_dim=256, got {hidden_dim}")
+        base_channels: int = 64
+        max_channels: int = 256
         if int(base_channels) != 64 or int(max_channels) != 256:
             raise ValueError(
-                "CustomResidualGlyphEncoder is fixed to base_channels=64 and max_channels=256, "
+                "CnnGlyphEncoder is fixed to base_channels=64 and max_channels=256, "
                 f"got {base_channels} and {max_channels}"
             )
         if int(block_depth) != 3:
-            raise ValueError(f"CustomResidualGlyphEncoder is fixed to 3 ResDownBlocks, got {block_depth}")
+            raise ValueError(f"CnnGlyphEncoder is fixed to 3 ResDownBlocks, got {block_depth}")
         self.in_channels = int(in_channels)
         self.image_size = int(image_size)
         self.output_grid_size = int(output_grid_size)
         self.hidden_dim = int(hidden_dim)
+        self.encoder_variant = str(encoder_variant)
         self.base_channels = int(base_channels)
         self.max_channels = int(max_channels)
         self.block_depth = int(block_depth)
         self.downsample_depth = 3
         self.local_hidden_dim = self.hidden_dim
         self.num_tokens = self.output_grid_size * self.output_grid_size
-        self.stem = nn.Sequential(
-            nn.Conv2d(self.in_channels, 32, kernel_size=3, padding=1, bias=False),
-            nn.GroupNorm(_group_count(32), 32),
-            nn.SiLU(),
-        )
-        self.blocks = nn.ModuleList(
-            (
-                ResDownBlock(32, 64),
-                ResDownBlock(64, 128),
-                ResDownBlock(128, 256),
+        if self.encoder_variant in {"full_conv", "full_conv_stage_res", "full_resnet"}:
+            self.stem = nn.Sequential(
+                nn.Conv2d(self.in_channels, 32, kernel_size=3, padding=1, bias=False),
+                nn.GroupNorm(_group_count(32), 32),
+                nn.SiLU(),
             )
-        )
+            if self.encoder_variant == "full_conv":
+                self.blocks = nn.ModuleList((ResDownBlock(32, 64), ResDownBlock(64, 128), ResDownBlock(128, 256)))
+            elif self.encoder_variant == "full_resnet":
+                self.blocks = nn.ModuleList(
+                    (
+                        ResNetDownBlock(32, 64),
+                        ResNetDownBlock(64, 128),
+                        ResNetDownBlock(128, 256),
+                    )
+                )
+            else:
+                self.blocks = nn.ModuleList(
+                    (
+                        ResDownBlockResidualAdd(32, 64),
+                        ResDownBlockResidualAdd(64, 128),
+                        ResDownBlockResidualAdd(128, 256),
+                    )
+                )
+        elif self.encoder_variant in {"lite_dwres", "lite_dwres_all"}:
+            self.stem = ConvNormAct(self.in_channels, 32)
+            self.blocks = nn.ModuleList(
+                (
+                    LiteDWResDownBlock(32, 64, use_dwres=self.encoder_variant == "lite_dwres_all"),
+                    LiteDWResDownBlock(64, 128, use_dwres=True),
+                    LiteDWResDownBlock(128, 256, use_dwres=True),
+                )
+            )
+        else:
+            raise ValueError(
+                "CnnGlyphEncoder encoder_variant must be 'full_conv', 'full_conv_stage_res', 'full_resnet', 'lite_dwres', or 'lite_dwres_all', "
+                f"got {self.encoder_variant!r}"
+            )
 
     def _encode_map(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() != 4:
             raise ValueError(f"expected BCHW tensor, got {tuple(x.shape)}")
-        expected_shape = (3, self.image_size, self.image_size)
-        if x.shape[1:] != expected_shape:
+        if x.shape[1:] != (3, self.image_size, self.image_size):
             raise ValueError(f"expected RGB {self.image_size}x{self.image_size} glyph tensor, got {tuple(x.shape)}")
         x = self.stem(x)
         for block in self.blocks:
@@ -128,44 +272,345 @@ class CustomResidualGlyphEncoder(nn.Module):
         feature_map = self._encode_map(x)
         return feature_map.flatten(2).transpose(1, 2).contiguous()
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_tokens(x)
+
+
+class TransformerEncoderBlock(nn.Module):
+    """Pre-norm transformer encoder block for glyph patch tokens."""
+
+    def __init__(
+        self,
+        *,
+        hidden_dim: int,
+        num_heads: int,
+        mlp_ratio: float,
+        norm_variant: str = "rms",
+    ) -> None:
+        super().__init__()
+        self.norm_attn = _build_norm(hidden_dim, norm_variant=norm_variant)
+        self.norm_mlp = _build_norm(hidden_dim, norm_variant=norm_variant)
+        self.attn = SDPAAttention(hidden_dim, num_heads)
+        self.mlp = FeedForward(hidden_dim, mlp_ratio, activation="swiglu")
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        rope: VisionRotaryEmbeddingFast,
+    ) -> torch.Tensor:
+        attn_in = self.norm_attn(x)
+        attn_out, _ = self.attn(
+            attn_in,
+            attn_in,
+            attn_in,
+            query_rope=rope,
+            key_rope=rope,
+            need_weights=False,
+        )
+        x = x + attn_out
+        x = x + self.mlp(self.norm_mlp(x))
+        return x
+
+
+class ClsPoolingBlock(nn.Module):
+    """Cross-attend a learnable CLS token over per-reference token grids."""
+
+    def __init__(
+        self,
+        *,
+        hidden_dim: int,
+        num_heads: int,
+        use_rope_for_keys: bool,
+        grid_size: int,
+    ) -> None:
+        super().__init__()
+        self.hidden_dim = int(hidden_dim)
+        self.num_heads = int(num_heads)
+        self.use_rope_for_keys = bool(use_rope_for_keys)
+        self.grid_size = int(grid_size)
+        self.norm_query = _build_norm(self.hidden_dim, norm_variant="rms")
+        self.norm_context = _build_norm(self.hidden_dim, norm_variant="rms")
+        self.attn = SDPAAttention(self.hidden_dim, self.num_heads)
+        self.mlp = FeedForward(self.hidden_dim, 4.0, activation="swiglu")
+        head_dim = self.hidden_dim // self.num_heads
+        if self.use_rope_for_keys:
+            if head_dim % 4 != 0:
+                raise ValueError(
+                    "ClsPoolingBlock requires head dim divisible by 4 when using RoPE, "
+                    f"got hidden_dim={hidden_dim}, num_heads={num_heads}"
+                )
+            self.key_rope = VisionRotaryEmbeddingFast(
+                dim=head_dim // 2,
+                pt_seq_len=self.grid_size,
+            )
+        else:
+            self.key_rope = None
+
+    def forward(self, cls_tokens: torch.Tensor, context_tokens: torch.Tensor) -> torch.Tensor:
+        if cls_tokens.dim() != 3 or cls_tokens.size(1) != 1:
+            raise ValueError(f"cls_tokens must be [B, 1, D], got {tuple(cls_tokens.shape)}")
+        if context_tokens.dim() != 3:
+            raise ValueError(f"context_tokens must be [B, T, D], got {tuple(context_tokens.shape)}")
+        query_in = self.norm_query(cls_tokens)
+        context_in = self.norm_context(context_tokens)
+        attn_out, _ = self.attn(
+            query_in,
+            context_in,
+            context_in,
+            key_rope=self.key_rope,
+            need_weights=False,
+        )
+        cls_tokens = cls_tokens + attn_out
+        cls_tokens = cls_tokens + self.mlp(self.norm_query(cls_tokens))
+        return cls_tokens
+
+
+class ViTGlyphEncoder(nn.Module):
+    """ViT glyph encoder producing patch tokens and optional CLS-pooled features."""
+
+    def __init__(
+        self,
+        *,
+        in_channels: int = 3,
+        image_size: int = 128,
+        output_grid_size: int = 16,
+        hidden_dim: int = 256,
+        block_depth: int = 4,
+        num_heads: int = 4,
+        use_cls_token: bool = False,
+    ) -> None:
+        super().__init__()
+        if int(in_channels) != 3:
+            raise ValueError(f"ViTGlyphEncoder requires RGB input, got {in_channels}")
+        if int(image_size) <= 0 or int(output_grid_size) <= 0:
+            raise ValueError(f"image_size/output_grid_size must be positive, got {image_size} and {output_grid_size}")
+        if int(hidden_dim) != 256:
+            raise ValueError(f"ViTGlyphEncoder is fixed to hidden_dim=256, got {hidden_dim}")
+        if int(block_depth) != 4:
+            raise ValueError(f"ViTGlyphEncoder is fixed to block_depth=4, got {block_depth}")
+        if int(num_heads) != 4:
+            raise ValueError(f"ViTGlyphEncoder is fixed to num_heads=4, got {num_heads}")
+        self.in_channels = int(in_channels)
+        self.image_size = int(image_size)
+        self.output_grid_size = int(output_grid_size)
+        self.hidden_dim = int(hidden_dim)
+        self.block_depth = int(block_depth)
+        self.num_heads = int(num_heads)
+        self.use_cls_token = bool(use_cls_token)
+        self.patch_size = self.image_size // self.output_grid_size
+        if self.patch_size * self.output_grid_size != self.image_size:
+            raise ValueError(
+                "ViTGlyphEncoder requires image_size divisible by output_grid_size, "
+                f"got image_size={self.image_size}, output_grid_size={self.output_grid_size}"
+            )
+        self.num_tokens = self.output_grid_size * self.output_grid_size
+        patch_dim = self.in_channels * self.patch_size * self.patch_size
+        self.patch_embed = nn.Linear(patch_dim, self.hidden_dim)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, self.hidden_dim)) if self.use_cls_token else None
+        head_dim = self.hidden_dim // self.num_heads
+        if head_dim % 4 != 0:
+            raise ValueError(
+                "ViTGlyphEncoder requires head dim divisible by 4 for RoPE, "
+                f"got hidden_dim={self.hidden_dim}, num_heads={self.num_heads}"
+            )
+        self.encoder_rope = VisionRotaryEmbeddingFast(
+            dim=head_dim // 2,
+            pt_seq_len=self.output_grid_size,
+        )
+        self.blocks = nn.ModuleList(
+            TransformerEncoderBlock(
+                hidden_dim=self.hidden_dim,
+                num_heads=self.num_heads,
+                mlp_ratio=4.0,
+                norm_variant="rms",
+            )
+            for _ in range(self.block_depth)
+        )
+        self.final_norm = _build_norm(self.hidden_dim, norm_variant="rms")
+
+    def _patchify(self, x: torch.Tensor) -> torch.Tensor:
+        return F.unfold(x, kernel_size=self.patch_size, stride=self.patch_size).transpose(1, 2).contiguous()
+
+    def _encode_tokens_and_cls(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if x.dim() != 4:
+            raise ValueError(f"expected BCHW tensor, got {tuple(x.shape)}")
+        expected_shape = (3, self.image_size, self.image_size)
+        if x.shape[1:] != expected_shape:
+            raise ValueError(f"expected RGB {self.image_size}x{self.image_size} glyph tensor, got {tuple(x.shape)}")
+        tokens = self.patch_embed(self._patchify(x))
+        if self.cls_token is not None:
+            cls_tokens = self.cls_token.expand(x.size(0), -1, -1)
+            joint_tokens = torch.cat([cls_tokens, tokens], dim=1)
+        else:
+            cls_tokens = None
+            joint_tokens = tokens
+        for block in self.blocks:
+            if self.cls_token is None:
+                joint_tokens = block(joint_tokens, rope=self.encoder_rope)
+                continue
+            cls_part = joint_tokens[:, :1, :]
+            token_part = joint_tokens[:, 1:, :]
+            cls_in = block.norm_attn(cls_part)
+            token_in = block.norm_attn(token_part)
+            attn_out, _ = block.attn(
+                cls_in,
+                token_in,
+                token_in,
+                key_rope=self.encoder_rope,
+                need_weights=False,
+            )
+            cls_part = cls_part + attn_out
+            cls_part = cls_part + block.mlp(block.norm_mlp(cls_part))
+            token_attn_out, _ = block.attn(
+                token_in,
+                token_in,
+                token_in,
+                query_rope=self.encoder_rope,
+                key_rope=self.encoder_rope,
+                need_weights=False,
+            )
+            token_part = token_part + token_attn_out
+            token_part = token_part + block.mlp(block.norm_mlp(token_part))
+            joint_tokens = torch.cat([cls_part, token_part], dim=1)
+        joint_tokens = self.final_norm(joint_tokens)
+        if cls_tokens is not None:
+            return joint_tokens[:, 1:, :], joint_tokens[:, 0, :]
+        return joint_tokens, None
+
+    def forward_features(self, x: torch.Tensor) -> list[torch.Tensor]:
+        return [self.forward_tokens(x)]
+
+    def forward_tokens(self, x: torch.Tensor) -> torch.Tensor:
+        tokens, _ = self._encode_tokens_and_cls(x)
+        return tokens
+
     def forward_pooled(self, x: torch.Tensor) -> torch.Tensor:
-        feature_map = self._encode_map(x)
-        return feature_map.mean(dim=(2, 3))
+        _, cls_tokens = self._encode_tokens_and_cls(x)
+        if cls_tokens is None:
+            raise RuntimeError("CLS pooling is not enabled for this ViTGlyphEncoder")
+        return cls_tokens
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.forward_tokens(x)
 
 
-class ContentEncoder(CustomResidualGlyphEncoder):
-    """Content glyph encoder with the shared architecture and separate weights."""
+class ContentEncoder(nn.Module):
+    """Content glyph encoder with switchable CNN or ViT backbone."""
 
-    def __init__(self, **kwargs) -> None:
-        kwargs.pop("use_shortcut", None)
-        super().__init__(hidden_dim=256, block_depth=3, **kwargs)
+    def __init__(self, *, encoder_type: str, **kwargs) -> None:
+        super().__init__()
+        self.encoder_type = str(encoder_type)
+        if self.encoder_type == "cnn":
+            kwargs.pop("num_heads", None)
+            kwargs["block_depth"] = 3
+            self.encoder = CnnGlyphEncoder(**kwargs)
+        elif self.encoder_type == "vit":
+            self.encoder = ViTGlyphEncoder(use_cls_token=False, **kwargs)
+        else:
+            raise ValueError(f"Unsupported content encoder_type: {encoder_type!r}")
+
+    def forward_features(self, x: torch.Tensor) -> list[torch.Tensor]:
+        return self.encoder.forward_features(x)
+
+    def forward_tokens(self, x: torch.Tensor) -> torch.Tensor:
+        return self.encoder.forward_tokens(x)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_tokens(x)
 
 
-class StyleEncoder(CustomResidualGlyphEncoder):
-    """Style glyph encoder with the shared architecture and separate weights."""
+class StyleEncoder(nn.Module):
+    """Style glyph encoder with switchable CNN or ViT backbone."""
 
-    def __init__(self, **kwargs) -> None:
-        kwargs.pop("use_shortcut", None)
-        super().__init__(hidden_dim=256, block_depth=3, **kwargs)
+    def __init__(
+        self,
+        *,
+        encoder_type: str,
+        hidden_dim: int,
+        output_grid_size: int,
+        use_cls_pool: bool = False,
+        **kwargs,
+    ) -> None:
+        super().__init__()
+        self.encoder_type = str(encoder_type)
+        self.hidden_dim = int(hidden_dim)
+        self.output_grid_size = int(output_grid_size)
+        self.use_cls_pool = bool(use_cls_pool)
+        if self.encoder_type == "cnn":
+            kwargs.pop("num_heads", None)
+            kwargs["block_depth"] = 3
+            self.encoder = CnnGlyphEncoder(hidden_dim=self.hidden_dim, output_grid_size=self.output_grid_size, **kwargs)
+            if self.use_cls_pool:
+                self.cls_token = nn.Parameter(torch.zeros(1, 1, self.hidden_dim))
+                self.cls_pool = ClsPoolingBlock(
+                    hidden_dim=self.hidden_dim,
+                    num_heads=4,
+                    use_rope_for_keys=True,
+                    grid_size=self.output_grid_size,
+                )
+                self.cls_pool_norm = _build_norm(self.hidden_dim, norm_variant="rms")
+            else:
+                self.cls_token = None
+                self.cls_pool = None
+                self.cls_pool_norm = None
+        elif self.encoder_type == "vit":
+            self.encoder = ViTGlyphEncoder(
+                hidden_dim=self.hidden_dim,
+                output_grid_size=self.output_grid_size,
+                use_cls_token=self.use_cls_pool,
+                **kwargs,
+            )
+            self.cls_token = None
+            self.cls_pool = None
+            self.cls_pool_norm = None
+        else:
+            raise ValueError(f"Unsupported style encoder_type: {encoder_type!r}")
+
+    def forward_features(self, x: torch.Tensor) -> list[torch.Tensor]:
+        return [self.forward_tokens(x)]
+
+    def forward_tokens(self, x: torch.Tensor) -> torch.Tensor:
+        return self.encoder.forward_tokens(x)
+
+    def forward_cls(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.use_cls_pool:
+            raise RuntimeError("CLS pooling is disabled for this StyleEncoder")
+        if self.encoder_type == "vit":
+            return self.encoder.forward_pooled(x)
+        feature_map = self.encoder._encode_map(x)
+        tokens = feature_map.flatten(2).transpose(1, 2).contiguous()
+        if self.cls_token is None or self.cls_pool is None or self.cls_pool_norm is None:
+            raise RuntimeError("CNN CLS pooling modules are not initialized")
+        cls_tokens = self.cls_token.expand(tokens.size(0), -1, -1)
+        cls_tokens = self.cls_pool(cls_tokens, tokens)
+        cls_tokens = self.cls_pool_norm(cls_tokens)
+        return cls_tokens[:, 0, :]
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_tokens(x)
 
 
 class ContentStyleCrossAttention(nn.Module):
     """External content<-style fusion utilities for concat cross-attention."""
 
-    def __init__(self, embed_dim: int, num_heads: int, *, grid_size: int) -> None:
+    def __init__(self, embed_dim: int, num_heads: int, *, grid_size: int, fusion_mode: str = "cross") -> None:
         super().__init__()
         self.embed_dim = int(embed_dim)
         self.num_heads = int(num_heads)
         self.grid_size = int(grid_size)
+        self.fusion_mode = str(fusion_mode)
         if self.embed_dim <= 0:
             raise ValueError(f"embed_dim must be positive, got {embed_dim}")
         if self.num_heads <= 0 or (self.embed_dim % self.num_heads) != 0:
             raise ValueError(f"invalid attention config embed_dim={embed_dim} num_heads={num_heads}")
         if self.grid_size <= 0:
             raise ValueError(f"grid_size must be positive, got {grid_size}")
+        if self.fusion_mode not in {"cross", "cross_mlp", "cross_mlp_residual"}:
+            raise ValueError(
+                "content_style_fusion_mode must be 'cross', 'cross_mlp', or 'cross_mlp_residual', "
+                f"got {self.fusion_mode!r}"
+            )
         head_dim = self.embed_dim // self.num_heads
         if head_dim % 4 != 0:
             raise ValueError(
@@ -177,6 +622,12 @@ class ContentStyleCrossAttention(nn.Module):
             dim=head_dim // 2,
             pt_seq_len=self.grid_size,
         )
+        if self.fusion_mode in {"cross_mlp", "cross_mlp_residual"}:
+            self.fused_norm = _build_norm(self.embed_dim, norm_variant="rms")
+            self.fused_mlp = FeedForward(self.embed_dim, 4.0, activation="swiglu")
+        else:
+            self.fused_norm = None
+            self.fused_mlp = None
     def _validate_style_inputs(self, style_tokens: torch.Tensor) -> None:
         if style_tokens.dim() != 4:
             raise ValueError(f"style_tokens must be 4D [B, R, T, D], got {tuple(style_tokens.shape)}")
@@ -262,11 +713,20 @@ class ContentStyleCrossAttention(nn.Module):
             flat_style_value,
             need_weights=False,
         )
-        return style_context.view(batch_size, query_len, self.embed_dim).contiguous()
+        fused_tokens = style_context.view(batch_size, query_len, self.embed_dim).contiguous()
+        if self.fusion_mode in {"cross_mlp", "cross_mlp_residual"}:
+            if self.fused_norm is None or self.fused_mlp is None:
+                raise RuntimeError(f"{self.fusion_mode} fusion is missing its MLP modules")
+            mlp_tokens = self.fused_mlp(self.fused_norm(fused_tokens))
+            if self.fusion_mode == "cross_mlp":
+                fused_tokens = mlp_tokens
+            else:
+                fused_tokens = fused_tokens + mlp_tokens
+        return fused_tokens
 
 
 class SourcePartRefDiT(nn.Module):
-    """Pure DiT glyph generator with tokenwise or pooled-global style conditioning."""
+    """Pure DiT glyph generator with tokenwise or CLS-global style conditioning."""
 
     def __init__(
         self,
@@ -274,11 +734,11 @@ class SourcePartRefDiT(nn.Module):
         in_channels: int = 3,
         image_size: int = 128,
         patch_size: int = 8,
+        encoder_type: str = "vit",
         encoder_hidden_dim: int = 256,
-        content_encoder_block_depth: int = 3,
-        style_encoder_block_depth: int = 3,
-        content_encoder_use_shortcut: bool = True,
-        style_encoder_use_shortcut: bool = True,
+        content_encoder_block_depth: int = 4,
+        style_encoder_block_depth: int = 4,
+        encoder_variant: str = "full_conv",
         dit_hidden_dim: int = 512,
         dit_depth: int = 8,
         dit_heads: int = 8,
@@ -288,7 +748,8 @@ class SourcePartRefDiT(nn.Module):
         content_injection_layers: Sequence[int] | None = None,
         conditioning_injection_mode: str = "all",
         content_style_fusion_heads: int = 4,
-        style_condition_mode: str = "global_mean",
+        style_condition_mode: str = "tokenwise_cross",
+        content_style_fusion_mode: str = "cross",
     ) -> None:
         super().__init__()
         if int(in_channels) != 3:
@@ -300,16 +761,17 @@ class SourcePartRefDiT(nn.Module):
         self.patch_size = int(patch_size)
         self.patch_grid_size = self.image_size // self.patch_size
         self.num_patches = self.patch_grid_size * self.patch_grid_size
+        self.encoder_type = str(encoder_type)
         self.encoder_hidden_dim = int(encoder_hidden_dim)
+        self.encoder_variant = str(encoder_variant)
         self.content_encoder_block_depth = max(1, int(content_encoder_block_depth))
         self.style_encoder_block_depth = max(1, int(style_encoder_block_depth))
-        self.content_encoder_use_shortcut = bool(content_encoder_use_shortcut)
-        self.style_encoder_use_shortcut = bool(style_encoder_use_shortcut)
         self.dit_hidden_dim = int(dit_hidden_dim)
         self.dit_depth = int(dit_depth)
         self.dit_heads = int(dit_heads)
         self.dit_mlp_ratio = float(dit_mlp_ratio)
         self.style_condition_mode = str(style_condition_mode)
+        self.content_style_fusion_mode = str(content_style_fusion_mode)
         self.ffn_activation = str(ffn_activation)
         self.norm_variant = str(norm_variant)
         if self.ffn_activation != "swiglu":
@@ -327,10 +789,17 @@ class SourcePartRefDiT(nn.Module):
                 "conditioning_injection_mode is fixed to 'all' in the refactored model, "
                 f"got {conditioning_injection_mode!r}"
             )
-        if self.style_condition_mode not in {"global_mean", "tokenwise_cross"}:
+        if self.encoder_type != "cnn":
+            raise ValueError(f"encoder_type is fixed to 'cnn' for this experiment, got {self.encoder_type!r}")
+        if self.style_condition_mode != "tokenwise_cross":
             raise ValueError(
-                "style_condition_mode must be 'global_mean' or 'tokenwise_cross', "
+                "style_condition_mode is fixed to 'tokenwise_cross' for this experiment, "
                 f"got {self.style_condition_mode!r}"
+            )
+        if self.content_style_fusion_mode not in {"cross", "cross_mlp", "cross_mlp_residual"}:
+            raise ValueError(
+                "content_style_fusion_mode must be 'cross', 'cross_mlp', or 'cross_mlp_residual', "
+                f"got {self.content_style_fusion_mode!r}"
             )
         self.content_style_fusion_heads = int(content_style_fusion_heads)
         if self.content_style_fusion_heads <= 0:
@@ -344,28 +813,32 @@ class SourcePartRefDiT(nn.Module):
         self.output_patch_dim = self.in_channels * self.patch_size * self.patch_size
 
         self.content_encoder = ContentEncoder(
+            encoder_type=self.encoder_type,
             in_channels=self.in_channels,
             image_size=self.image_size,
             output_grid_size=self.patch_grid_size,
-            use_shortcut=self.content_encoder_use_shortcut,
+            hidden_dim=self.encoder_hidden_dim,
+            block_depth=self.content_encoder_block_depth,
+            encoder_variant=self.encoder_variant,
+            num_heads=4,
         )
         self.style_encoder = StyleEncoder(
+            encoder_type=self.encoder_type,
             in_channels=self.in_channels,
             image_size=self.image_size,
             output_grid_size=self.patch_grid_size,
-            use_shortcut=self.style_encoder_use_shortcut,
-        )
-        self.style_token_hidden_dim = int(self.style_encoder.local_hidden_dim)
-        self.style_token_proj = (
-            nn.Identity()
-            if self.style_token_hidden_dim == self.encoder_hidden_dim
-            else nn.Linear(self.style_token_hidden_dim, self.encoder_hidden_dim)
+            hidden_dim=self.encoder_hidden_dim,
+            block_depth=self.style_encoder_block_depth,
+            encoder_variant=self.encoder_variant,
+            num_heads=4,
+            use_cls_pool=self.style_condition_mode == "global_cls",
         )
         self.content_style_attn = (
             ContentStyleCrossAttention(
                 embed_dim=self.encoder_hidden_dim,
                 num_heads=self.content_style_fusion_heads,
                 grid_size=self.patch_grid_size,
+                fusion_mode=self.content_style_fusion_mode,
             )
             if self.style_condition_mode == "tokenwise_cross"
             else None
@@ -382,7 +855,7 @@ class SourcePartRefDiT(nn.Module):
             mlp_ratio=self.dit_mlp_ratio,
             content_injection_layers=self.content_injection_layers,
             use_style_tokenwise_condition=self.style_condition_mode == "tokenwise_cross",
-            use_style_global_condition=self.style_condition_mode == "global_mean",
+            use_style_global_condition=self.style_condition_mode == "global_cls",
             ffn_activation=self.ffn_activation,
             norm_variant=self.norm_variant,
         )
@@ -439,11 +912,11 @@ class SourcePartRefDiT(nn.Module):
             "in_channels": int(self.in_channels),
             "image_size": int(self.image_size),
             "patch_size": int(self.patch_size),
+            "encoder_type": str(self.encoder_type),
             "encoder_hidden_dim": int(self.encoder_hidden_dim),
+            "encoder_variant": str(self.encoder_variant),
             "content_encoder_block_depth": int(self.content_encoder_block_depth),
             "style_encoder_block_depth": int(self.style_encoder_block_depth),
-            "content_encoder_use_shortcut": bool(self.content_encoder_use_shortcut),
-            "style_encoder_use_shortcut": bool(self.style_encoder_use_shortcut),
             "dit_hidden_dim": int(self.dit_hidden_dim),
             "dit_depth": int(self.dit_depth),
             "dit_heads": int(self.dit_heads),
@@ -451,11 +924,11 @@ class SourcePartRefDiT(nn.Module):
             "content_injection_layers": list(self.content_injection_layers),
             "content_style_fusion_heads": int(self.content_style_fusion_heads),
             "style_condition_mode": str(self.style_condition_mode),
+            "content_style_fusion_mode": str(self.content_style_fusion_mode),
         }
 
     def encode_content_tokens(self, content_img: torch.Tensor) -> torch.Tensor:
-        content_features = self.content_encoder(content_img)
-        return content_features.flatten(2).transpose(1, 2).contiguous()
+        return self.content_encoder(content_img)
 
     def _encode_style_features(self, style_img: torch.Tensor) -> torch.Tensor:
         if style_img.dim() == 4:
@@ -468,15 +941,26 @@ class SourcePartRefDiT(nn.Module):
             raise RuntimeError("style_img must contain at least one reference per sample")
 
         flat_style = style_img.view(batch * refs, channels, height, width)
-        style_features = self.style_encoder.forward_features(flat_style)[-1]
-        style_tokens = style_features.flatten(2).transpose(1, 2).contiguous()
+        style_tokens = self.style_encoder(flat_style)
         tokens_per_ref = int(style_tokens.size(1))
-        style_tokens = style_tokens.view(batch, refs, tokens_per_ref, self.style_token_hidden_dim)
+        style_tokens = style_tokens.view(batch, refs, tokens_per_ref, self.encoder_hidden_dim)
         return style_tokens
 
+    def _encode_style_cls(self, style_img: torch.Tensor) -> torch.Tensor:
+        if style_img.dim() == 4:
+            style_img = style_img.unsqueeze(1)
+        if style_img.dim() != 5:
+            raise ValueError(f"style_img must be BCHW or BRCHW, got {tuple(style_img.shape)}")
+        batch, refs, channels, height, width = style_img.shape
+        flat_style = style_img.view(batch * refs, channels, height, width)
+        style_cls = self.style_encoder.forward_cls(flat_style)
+        return style_cls.view(batch, refs, self.encoder_hidden_dim)
+
     def encode_style_token_bank(self, style_img: torch.Tensor) -> torch.Tensor:
-        style_tokens = self._encode_style_features(style_img)
-        return self.style_token_proj(style_tokens).contiguous()
+        return self._encode_style_features(style_img).contiguous()
+
+    def encode_style_global_vectors(self, style_img: torch.Tensor) -> torch.Tensor:
+        return self._encode_style_cls(style_img).contiguous()
 
     def precompute_style_bank_kv(
         self,
@@ -495,21 +979,20 @@ class SourcePartRefDiT(nn.Module):
         return self.content_style_attn.project_content_query(content_tokens)
 
     def build_style_global_condition(self, style_token_bank: torch.Tensor) -> torch.Tensor | None:
-        if self.style_condition_mode != "global_mean":
+        if self.style_condition_mode != "global_cls":
             return None
-        if style_token_bank.dim() != 4:
-            raise ValueError(f"style_token_bank must be 4D [B, R, T, D], got {tuple(style_token_bank.shape)}")
+        if style_token_bank.dim() != 3:
+            raise ValueError(f"style_global_bank must be 3D [B, R, D], got {tuple(style_token_bank.shape)}")
         expected_style_shape = (
             int(style_token_bank.size(0)),
             int(style_token_bank.size(1)),
-            self.num_patches,
             self.output_condition_half_dim,
         )
         if style_token_bank.shape != expected_style_shape:
             raise ValueError(
-                f"style_token_bank shape mismatch: expected {expected_style_shape}, got {tuple(style_token_bank.shape)}"
+                f"style_global_bank shape mismatch: expected {expected_style_shape}, got {tuple(style_token_bank.shape)}"
             )
-        return style_token_bank.mean(dim=(1, 2)).contiguous()
+        return style_token_bank.mean(dim=1).contiguous()
 
     def build_style_condition_tokens(
         self,
@@ -720,7 +1203,7 @@ class SourcePartRefDiT(nn.Module):
         style_img: torch.Tensor,
     ) -> torch.Tensor:
         content_tokens = self.encode_content_tokens(content_img)
-        style_token_bank = self.encode_style_token_bank(style_img)
+        style_token_bank = self.encode_style_token_bank(style_img) if self.style_condition_mode == "tokenwise_cross" else None
         style_tokens = None
         style_global = None
         if self.style_condition_mode == "tokenwise_cross":
@@ -729,7 +1212,7 @@ class SourcePartRefDiT(nn.Module):
                 style_token_bank,
             )
         else:
-            style_global = self.build_style_global_condition(style_token_bank)
+            style_global = self.build_style_global_condition(self.encode_style_global_vectors(style_img))
         return self.predict(
             x_t_image,
             timesteps,

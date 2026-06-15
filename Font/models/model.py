@@ -16,6 +16,8 @@ import torch.nn.functional as F
 from torch import nn
 from torchvision.utils import save_image
 
+from .perceptual_loss import ContentPerceptualLoss
+
 def _metrics_to_floats(metrics: Dict[str, torch.Tensor | float | int]) -> Dict[str, float]:
     output: Dict[str, float] = {}
     for key, value in metrics.items():
@@ -665,6 +667,7 @@ class XPredTrainer(_BaseTrainer):
         weight_decay: float = 0.0,
         adam_beta1: float = 0.9,
         adam_beta2: float = 0.95,
+        perceptual_coefficient: float = 0.0,
     ) -> None:
         super().__init__(
             model,
@@ -698,6 +701,14 @@ class XPredTrainer(_BaseTrainer):
         self.ema_start_step = self.total_steps + 1
         self._set_ema_decay(float(ema_decay))
         self._set_ema_start_step(ema_start_step)
+        self.perceptual_coefficient = max(0.0, float(perceptual_coefficient))
+        self.perceptual_loss = (
+            ContentPerceptualLoss().to(self.device).eval()
+            if self.perceptual_coefficient > 0.0
+            else None
+        )
+        if self.perceptual_loss is not None:
+            self.perceptual_loss.requires_grad_(False)
 
     @staticmethod
     def _normalize_prediction_type(prediction_type: str) -> str:
@@ -808,14 +819,16 @@ class XPredTrainer(_BaseTrainer):
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         unique_content_tokens = model.encode_content_tokens(content)
         content_tokens = self._expand_condition_batch(unique_content_tokens, content_index)
-        unique_style_token_bank = model.encode_style_token_bank(style_img=style)
-        style_token_bank = self._expand_condition_batch(unique_style_token_bank, style_index)
+        unique_style_token_bank = None
         style_tokens = None
         style_global = None
-        if model.style_condition_mode == "global_mean":
-            unique_style_global = model.build_style_global_condition(unique_style_token_bank)
+        if model.style_condition_mode == "global_cls":
+            unique_style_global_bank = model.encode_style_global_vectors(style_img=style)
+            unique_style_global = model.build_style_global_condition(unique_style_global_bank)
             style_global = None if unique_style_global is None else self._expand_condition_batch(unique_style_global, style_index)
         else:
+            unique_style_token_bank = model.encode_style_token_bank(style_img=style)
+            style_token_bank = self._expand_condition_batch(unique_style_token_bank, style_index)
             style_tokens = model.build_style_condition_tokens(content_tokens, style_token_bank)
         return content_tokens, style_tokens, style_global
 
@@ -826,12 +839,13 @@ class XPredTrainer(_BaseTrainer):
         style: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         content_tokens = model.encode_content_tokens(content)
-        style_token_bank = model.encode_style_token_bank(style_img=style)
         style_tokens = None
         style_global = None
-        if model.style_condition_mode == "global_mean":
-            style_global = model.build_style_global_condition(style_token_bank)
+        if model.style_condition_mode == "global_cls":
+            style_global_bank = model.encode_style_global_vectors(style_img=style)
+            style_global = model.build_style_global_condition(style_global_bank)
         else:
+            style_token_bank = model.encode_style_token_bank(style_img=style)
             style_tokens = model.build_style_condition_tokens(content_tokens, style_token_bank)
         return content_tokens, style_tokens, style_global
 
@@ -951,11 +965,16 @@ class XPredTrainer(_BaseTrainer):
             )
             velocity_mse = primary_outputs["velocity_mse"]
             pred_x_l1 = primary_outputs["pred_x_l1"]
-            loss = velocity_mse
+            perceptual_loss = torch.zeros((), device=self.device, dtype=torch.float32)
+            if self.perceptual_loss is not None:
+                perceptual_loss = self.perceptual_loss(primary_outputs["pred_x"], x1)
+            loss = velocity_mse + self.perceptual_coefficient * perceptual_loss
         metrics = {
             "loss": loss,
             "loss_v": velocity_mse,
             "pred_x_l1": pred_x_l1,
+            "loss_perceptual": perceptual_loss,
+            "perceptual_coefficient": float(self.perceptual_coefficient),
             "t_mean": timesteps.mean(),
         }
         return metrics

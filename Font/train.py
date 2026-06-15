@@ -259,11 +259,11 @@ def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
         in_channels=3,
         image_size=128,
         patch_size=int(args.patch_size),
+        encoder_type=str(args.encoder_type),
         encoder_hidden_dim=int(args.encoder_hidden_dim),
-        content_encoder_block_depth=3,
-        style_encoder_block_depth=3,
-        content_encoder_use_shortcut=False,
-        style_encoder_use_shortcut=False,
+        encoder_variant=str(args.encoder_variant),
+        content_encoder_block_depth=4,
+        style_encoder_block_depth=4,
         dit_hidden_dim=int(args.dit_hidden_dim),
         dit_depth=int(args.dit_depth),
         dit_heads=int(args.dit_heads),
@@ -271,6 +271,7 @@ def build_model(args: argparse.Namespace) -> SourcePartRefDiT:
         content_injection_layers=None,
         content_style_fusion_heads=4,
         style_condition_mode=str(args.style_condition_mode),
+        content_style_fusion_mode=str(args.content_style_fusion_mode),
     )
 
 
@@ -292,12 +293,25 @@ def main() -> None:
     parser.add_argument("--style-ref-count-min", type=int, required=True)
     parser.add_argument("--style-ref-count-max", type=int, required=True)
     parser.add_argument("--patch-size", type=int, required=True)
+    parser.add_argument("--encoder-type", type=str, required=True, choices=["cnn"])
     parser.add_argument("--encoder-hidden-dim", type=int, required=True)
+    parser.add_argument(
+        "--encoder-variant",
+        type=str,
+        default="full_conv",
+        choices=["full_conv", "full_conv_stage_res", "full_resnet", "lite_dwres", "lite_dwres_all"],
+    )
     parser.add_argument(
         "--style-condition-mode",
         type=str,
         required=True,
-        choices=["global_mean", "tokenwise_cross"],
+        choices=["tokenwise_cross"],
+    )
+    parser.add_argument(
+        "--content-style-fusion-mode",
+        type=str,
+        default="cross",
+        choices=["cross", "cross_mlp", "cross_mlp_residual"],
     )
     parser.add_argument("--dit-hidden-dim", type=int, required=True)
     parser.add_argument("--dit-depth", type=int, required=True)
@@ -323,6 +337,7 @@ def main() -> None:
     parser.add_argument("--t-eps", type=float, default=0.05)
     parser.add_argument("--noise-scale", type=float, default=1.0)
     parser.add_argument("--prediction-type", type=str, default="x", choices=["x", "noise", "velocity"])
+    parser.add_argument("--perceptual-coefficient", type=float, default=0.01)
     parser.add_argument("--ema-decay", type=float, required=True)
     parser.add_argument("--ema-start-step", type=int, default=40000)
     args = parser.parse_args()
@@ -453,6 +468,7 @@ def main() -> None:
         val_every_steps=val_every_steps,
         val_max_batches=trainer_val_max_batches,
         grad_clip_norm=float(args.grad_clip_norm),
+        perceptual_coefficient=float(args.perceptual_coefficient),
     )
 
     if args.resume is not None:
@@ -486,6 +502,7 @@ def main() -> None:
     run_config["model_type"] = "dit_xpred"
     run_config["prediction_type"] = str(args.prediction_type)
     run_config["loss_type"] = "jit_v_mse"
+    run_config["perceptual_coefficient"] = float(args.perceptual_coefficient)
     run_config["lr_schedule"] = str(args.lr_schedule)
     run_config["lr_warmup_steps"] = int(args.lr_warmup_steps)
     run_config["lr_min_scale"] = float(args.lr_min_scale)
@@ -499,11 +516,12 @@ def main() -> None:
     run_config["norm_variant"] = "rms"
     run_config["ode_solver"] = "heun_last_euler"
     run_config["content_injection_layers"] = list(range(1, int(args.dit_depth) + 1))
+    run_config["encoder_type"] = str(args.encoder_type)
     run_config["encoder_hidden_dim"] = int(args.encoder_hidden_dim)
-    run_config["content_encoder_use_shortcut"] = False
-    run_config["style_encoder_use_shortcut"] = False
+    run_config["encoder_variant"] = str(args.encoder_variant)
     run_config["content_style_fusion_heads"] = 4
     run_config["style_condition_mode"] = str(args.style_condition_mode)
+    run_config["content_style_fusion_mode"] = str(args.content_style_fusion_mode)
 
     (args.save_dir / "train_config.json").write_text(
         json.dumps(run_config, ensure_ascii=False, indent=2, sort_keys=True),

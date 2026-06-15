@@ -42,8 +42,11 @@ STYLE_REF_COUNT_MAX=3
 BATCH_SIZE=128 
 NUM_WORKERS=2
 PATCH_SIZE=8
+ENCODER_TYPE="cnn"
 ENCODER_HIDDEN_DIM=256
-STYLE_CONDITION_MODE="global_mean"
+ENCODER_VARIANT="full_resnet"
+STYLE_CONDITION_MODE="tokenwise_cross"
+CONTENT_STYLE_FUSION_MODE="cross"
 DIT_HIDDEN_DIM=512
 DIT_DEPTH=8
 DIT_HEADS=8
@@ -51,6 +54,7 @@ DIT_MLP_RATIO="4.0"
 
 SAMPLE_STEPS=20
 PREDICTION_TYPE="x"
+PERCEPTUAL_COEFFICIENT="0"
 EMA_DECAY="0.9999"
 EMA_START_STEP="30000"
 EXTRA_TRAIN_ARGS=()
@@ -85,6 +89,7 @@ while [[ $# -gt 0 ]]; do
     --grad-clip-norm) GRAD_CLIP_NORM="${2:?}"; shift 2 ;;
     --sample-steps) SAMPLE_STEPS="${2:?}"; shift 2 ;;
     --prediction-type) PREDICTION_TYPE="${2:?}"; shift 2 ;;
+    --perceptual-coefficient) PERCEPTUAL_COEFFICIENT="${2:?}"; shift 2 ;;
     --ema-decay) EMA_DECAY="${2:?}"; shift 2 ;;
     --ema-start-step) EMA_START_STEP="${2:?}"; shift 2 ;;
     --style-ref-count) STYLE_REF_COUNT="${2:?}"; shift 2 ;;
@@ -93,7 +98,10 @@ while [[ $# -gt 0 ]]; do
     --batch) BATCH_SIZE="${2:?}"; shift 2 ;;
     --num-workers) NUM_WORKERS="${2:?}"; shift 2 ;;
     --encoder-hidden-dim) ENCODER_HIDDEN_DIM="${2:?}"; shift 2 ;;
+    --encoder-type) ENCODER_TYPE="${2:?}"; shift 2 ;;
+    --encoder-variant) ENCODER_VARIANT="${2:?}"; shift 2 ;;
     --style-condition-mode) STYLE_CONDITION_MODE="${2:?}"; shift 2 ;;
+    --content-style-fusion-mode) CONTENT_STYLE_FUSION_MODE="${2:?}"; shift 2 ;;
     --dit-hidden-dim) DIT_HIDDEN_DIM="${2:?}"; shift 2 ;;
     --dit-depth) DIT_DEPTH="${2:?}"; shift 2 ;;
     --dit-heads) DIT_HEADS="${2:?}"; shift 2 ;;
@@ -155,6 +163,8 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --lr-min-scale "${LR_MIN_SCALE}"
     --grad-clip-norm "${GRAD_CLIP_NORM}"
     --sample-steps "${SAMPLE_STEPS}"
+    --prediction-type "${PREDICTION_TYPE}"
+    --perceptual-coefficient "${PERCEPTUAL_COEFFICIENT}"
     --ema-decay "${EMA_DECAY}"
     --ema-start-step "${EMA_START_STEP}"
     --style-ref-count "${STYLE_REF_COUNT}"
@@ -163,7 +173,10 @@ if [[ "${RUN_MODE}" == "daemon" ]]; then
     --batch "${BATCH_SIZE}"
     --num-workers "${NUM_WORKERS}"
     --encoder-hidden-dim "${ENCODER_HIDDEN_DIM}"
+    --encoder-type "${ENCODER_TYPE}"
+    --encoder-variant "${ENCODER_VARIANT}"
     --style-condition-mode "${STYLE_CONDITION_MODE}"
+    --content-style-fusion-mode "${CONTENT_STYLE_FUSION_MODE}"
     --dit-hidden-dim "${DIT_HIDDEN_DIM}"
     --dit-depth "${DIT_DEPTH}"
     --dit-heads "${DIT_HEADS}"
@@ -350,13 +363,17 @@ cmd_common=(
   --style-ref-count-max "${STYLE_REF_COUNT_MAX}"
   --patch-size "${PATCH_SIZE}"
   --encoder-hidden-dim "${ENCODER_HIDDEN_DIM}"
+  --encoder-type "${ENCODER_TYPE}"
+  --encoder-variant "${ENCODER_VARIANT}"
   --style-condition-mode "${STYLE_CONDITION_MODE}"
+  --content-style-fusion-mode "${CONTENT_STYLE_FUSION_MODE}"
   --dit-hidden-dim "${DIT_HIDDEN_DIM}"
   --dit-depth "${DIT_DEPTH}"
   --dit-heads "${DIT_HEADS}"
   --dit-mlp-ratio "${DIT_MLP_RATIO}"
   --sample-steps "${SAMPLE_STEPS}"
   --prediction-type "${PREDICTION_TYPE}"
+  --perceptual-coefficient "${PERCEPTUAL_COEFFICIENT}"
   --ema-decay "${EMA_DECAY}"
   --ema-start-step "${EMA_START_STEP}"
   --epochs "${EPOCHS}"
@@ -383,8 +400,8 @@ echo "[run_diffusion_colab] PYTORCH_ALLOC_CONF=${PYTORCH_ALLOC_CONF}"
 echo "[run_diffusion_colab] resume=${RESUME_CKPT:-<none>}"
 echo "[run_diffusion_colab] batch=${BATCH_SIZE} lr=${LR} weight_decay=${WEIGHT_DECAY} adam_betas=(${ADAM_BETA1},${ADAM_BETA2}) lr_schedule=${LR_SCHEDULE} lr_warmup_steps=${LR_WARMUP_STEPS} lr_min_scale=${LR_MIN_SCALE} grad_clip_norm=${GRAD_CLIP_NORM} module_stats_every_steps=${MODULE_STATS_EVERY}"
 echo "[run_diffusion_colab] style_ref_count=${STYLE_REF_COUNT} style_ref_count_min=${STYLE_REF_COUNT_MIN} style_ref_count_max=${STYLE_REF_COUNT_MAX}"
-echo "[run_diffusion_colab] patch_size=${PATCH_SIZE} style_patch_size=${PATCH_SIZE} image_size=128 sample_steps=${SAMPLE_STEPS} ode_solver=heun_last_euler prediction_type=${PREDICTION_TYPE} loss_type=jit_v_mse ema_decay=${EMA_DECAY} ema_start_step=${EMA_START_STEP}"
-echo "[run_diffusion_colab] dit_heads=${DIT_HEADS} style_condition_mode=${STYLE_CONDITION_MODE} main_path=direct_patch_embed+swiglu+rms+qk_norm"
+echo "[run_diffusion_colab] patch_size=${PATCH_SIZE} style_patch_size=${PATCH_SIZE} image_size=128 sample_steps=${SAMPLE_STEPS} ode_solver=heun_last_euler prediction_type=${PREDICTION_TYPE} loss_type=jit_v_mse perceptual_coefficient=${PERCEPTUAL_COEFFICIENT} ema_decay=${EMA_DECAY} ema_start_step=${EMA_START_STEP}"
+echo "[run_diffusion_colab] encoder_type=${ENCODER_TYPE} encoder_variant=${ENCODER_VARIANT} dit_heads=${DIT_HEADS} style_condition_mode=${STYLE_CONDITION_MODE} content_style_fusion_mode=${CONTENT_STYLE_FUSION_MODE} main_path=direct_patch_embed+swiglu+rms+qk_norm"
 echo "[run_diffusion_colab] output_path=final_adaln_patch_projection encoder_hidden_dim=${ENCODER_HIDDEN_DIM} dit_hidden_dim=${DIT_HIDDEN_DIM} dit_depth=${DIT_DEPTH}"
 echo "[run_diffusion_colab] content_injection_layers=1..${DIT_DEPTH}"
 
